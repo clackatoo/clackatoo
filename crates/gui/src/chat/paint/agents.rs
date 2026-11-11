@@ -407,8 +407,13 @@ fn agent_row(entry: &Subagent, now: u64) -> String {
         SubagentStatus::Failed(why) => ("✗", format!("failed: {why}")),
         SubagentStatus::Closed => ("·", "closed".to_owned()),
     };
-    let mut what = vec![entry.profile.clone().unwrap_or_else(|| entry.agent.clone())];
-    if entry.profile.is_some() {
+    let mut what = vec![
+        entry
+            .specialist
+            .clone()
+            .unwrap_or_else(|| entry.agent.clone()),
+    ];
+    if entry.specialist.is_some() {
         what.push(entry.agent.clone());
     }
     if let Some(model) = &entry.model {
@@ -449,7 +454,7 @@ mod tests {
         Subagent {
             chat: TerminalId(chat),
             agent: "Claude Code".into(),
-            profile: Some("explore".into()),
+            specialist: Some("explore".into()),
             model: Some("Haiku 5.5".into()),
             task: format!("Find thing {chat}"),
             status,
@@ -466,6 +471,7 @@ mod tests {
         ChatNode {
             state: ChatState::Answering,
             turns: vec![Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),

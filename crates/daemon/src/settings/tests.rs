@@ -243,8 +243,7 @@ fn a_broken_config_keeps_the_last_good_values_and_says_so() {
     write(
         &init,
         "daemon.machine.name = \"good\"\n\
-         daemon.agents.mine = { command = { \"mine-acp\" }, tasks = false }\n\
-         daemon.profiles.review = { model = { claude = \"haiku\" }, limits = \"read-only\" }\n",
+         daemon.agents.mine = { command = { \"mine-acp\" }, tasks = false }\n",
     );
     let good = load(&dirs, When::Starting);
     assert!(good.notes.is_empty(), "{:?}", good.notes);
@@ -420,9 +419,7 @@ fn the_last_good_settings_read_back_the_same() {
                 daemon.machine.priority = false\n\
                 daemon.web.mode = \"tailscale\"\n\
                 daemon.images.terminal_mb = 32\n\
-                daemon.agents[\"my agent\"] = { name = \"Mine\", command = { \"a\", \"b c\" }, mode = \"m\", tasks = true }\n\
-                daemon.profiles.explore = { model = \"inherit\" }\n\
-                daemon.profiles.review = { about = \"x\", prompt = \"y\", limits = \"no-commands\", agent = \"codex\", model = { claude = \"haiku\", codex = \"luna\" }, effort = \"low\" }\n";
+                daemon.agents[\"my agent\"] = { name = \"Mine\", command = { \"a\", \"b c\" }, mode = \"m\", tasks = true }\n";
     let settings = run(text).unwrap();
     let again = run(&settings.to_lua()).unwrap();
     assert_eq!(again.options.len(), settings.options.len());
@@ -581,4 +578,14 @@ fn a_change_goes_through_a_link_but_never_one_to_nothing() {
         std::fs::read_to_string(&target).unwrap(),
         "daemon.subagents.working = 4\r\ndaemon.subagents.default = 3\r\n"
     );
+}
+
+#[test]
+fn lua_specialist_definitions_are_rejected() {
+    for table in ["specialists", "profiles"] {
+        let why = wrong(&format!(
+            "daemon.{table}.review = {{ instructions = 'Review' }}"
+        ));
+        assert!(why.contains(table), "{why}");
+    }
 }

@@ -62,7 +62,7 @@ sessions.
 A [subagent](~clackatoo/reference/chats-together#subagents) in a pane comes
 back a subagent of its chat, if that chat is in a pane of the same workspace
 and so comes back with it: with its band, on its chat's card, under the turn
-that started it, and with its profile and that profile's limits. `:q` sends it
+that started it, and with its specialist and that specialist's limits. `:q` sends it
 back to the card, its chat can message it and wait for it, and one you'd sent
 back and opened again is still yours to close. It never comes back able to do
 more than it could: it keeps its limits (ones this build doesn't know count as
@@ -72,7 +72,7 @@ higher than its chat's: otherwise for the safest, Manual or Read-only, and
 never the mode your own new chats start in. An agent whose modes clackatoo
 doesn't know is asked for none. A subagent whose chat didn't come back,
 because it was in no pane, or is in another workspace, comes back on its own,
-with its profile and limits, in a mode no higher than its agent's safest, and
+with its specialist and limits, in a mode no higher than its agent's safest, and
 says so. Its Subagents setting is never more than its chat's. Some things
 start again: how many chats agents have started under each of yours (up to
 128), how many turns notices have started (100), messages from other agents

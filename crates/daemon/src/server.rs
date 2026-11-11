@@ -67,6 +67,7 @@ mod clipboard;
 mod closed;
 mod config_notes;
 mod configuring;
+mod context;
 mod disk;
 mod edit_log;
 mod explorers;
@@ -86,6 +87,7 @@ mod masks;
 mod mentions;
 mod notices;
 mod offers;
+mod outline;
 mod pastes;
 mod pictures;
 mod pieces;
@@ -97,7 +99,11 @@ mod reveal;
 mod review;
 mod settling;
 mod shutdown;
+mod side;
 mod signs;
+mod skills;
+mod specialist_files;
+mod specialists;
 mod stopping;
 mod symbols;
 mod terminal_images;
@@ -107,6 +113,7 @@ mod turn_undo;
 mod tutor;
 mod watched;
 mod web;
+mod work;
 
 use buffers::{BufferSlot, WindowChange};
 use chats::AgentId;
@@ -246,6 +253,7 @@ enum Source {
     /// asked to hear of, repositories' indexes and the display's sockets
     /// (see [`explorers`]).
     Files,
+    Outline(PathBuf),
     Client(Client),
     Carrier(Carrier),
     /// A connection an agent's tools are served on.
@@ -1122,6 +1130,11 @@ pub struct Daemon {
     /// The messages to chats waiting for the files they mention to be
     /// read, and what's held behind them.
     mentioning: mentions::Mentioning,
+    skills: skills::Skills,
+    specialist_files: specialist_files::Saving,
+    work: work::Work,
+    outlines: outline::Outlines,
+    contexts: context::Contexts,
     /// The process groups of agents and language servers stopped, until
     /// nothing they started is left.
     groups: groups::Groups,
@@ -1336,7 +1349,7 @@ impl Daemon {
                     .gone_wait
                     .clamp(crate::rpc::PARSE_WAIT, std::time::Duration::from_hours(24)),
             ),
-            waker,
+            waker: Arc::clone(&waker),
             shutdown: Arc::new(AtomicBool::new(false)),
             sources: Slab::new(),
             terminals: BTreeMap::new(),
@@ -1369,6 +1382,11 @@ impl Daemon {
             clipboard_unsent: false,
             agents: chats::Agents::default(),
             mentioning: mentions::Mentioning::default(),
+            skills: skills::Skills::default(),
+            specialist_files: specialist_files::Saving::default(),
+            work: work::Work::new(Arc::clone(&waker)),
+            outlines: outline::Outlines::default(),
+            contexts: context::Contexts::default(),
             groups: groups::Groups::default(),
             agent_files: agent_files::AgentFiles::default(),
             disk: disk::Disk::default(),
@@ -1441,6 +1459,7 @@ impl Daemon {
         let chat_images = images.as_ref().map(|images| images.chats.clone());
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
         let mut drafts = std::mem::take(&mut handover.state.drafts);
+        let mut context_records = std::mem::take(&mut handover.state.context_records);
         let mut uids = std::mem::take(&mut handover.state.uids);
         let mut branches = std::mem::take(&mut handover.state.branches);
         let mut forks = std::mem::take(&mut handover.state.forks);
@@ -1593,6 +1612,7 @@ impl Daemon {
             let images = previews.remove(&chat.id);
             let record = live_chats.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
+            chat.native_skills = daemon.config.agents.configured.native_plugins(&agent.name);
             // Before anything handed over keyed by turn.
             if chat.resume_uids(&mut uids) {
                 chat.resume_branches(&mut branches);
@@ -1623,12 +1643,14 @@ impl Daemon {
             if let Some(record) = record {
                 if going_on {
                     chat.resume_live(record);
+                    chat.resume_context_state(&mut context_records);
                     if chat.is_connected() {
                         chat.set_native_steering(daemon.agent_steers(chat.agent()));
                     }
                     log::info!("chat {id}: it goes on with its agent through the upgrade");
                     kept_chats.insert(id);
                     daemon.add_chat(chat);
+                    daemon.refresh_chat_skills(id);
                     continue;
                 }
                 log::info!("chat {id}: its agent couldn't go on through the upgrade");
@@ -1636,6 +1658,7 @@ impl Daemon {
             }
             // What it ran in the background went with its agent: it's told
             // so, as its turn goes on, or else in a turn of its own.
+            chat.resume_context_state(&mut context_records);
             let mut told = false;
             if let Some(continuation) = continuation {
                 if chat.continue_after_upgrade(continuation, &stopped) {
@@ -1828,6 +1851,10 @@ impl Daemon {
         servers_until: Instant,
         keep: &[AgentId],
     ) -> io::Result<Handover> {
+        self.finish_skill_reads_for_upgrade();
+        self.finish_outlines_for_upgrade();
+        self.finish_contexts_for_upgrade();
+        self.finish_specialist_files();
         // Capture before ending links or dropping their client receipts.
         let federation = Some(self.hand_over_federation()?);
         // And the ports forwarded through them, still listening.
@@ -1881,6 +1908,7 @@ impl Daemon {
         let mut image_originals = Vec::new();
         let mut chat_queues = Vec::new();
         let mut drafts = Vec::new();
+        let mut context_records = Vec::new();
         let mut uids = Vec::new();
         let mut branches = Vec::new();
         let mut forks = Vec::new();
@@ -1962,6 +1990,7 @@ impl Daemon {
                     chat_images.push(images);
                     chat_queues.push(chat.hand_over_queue());
                     drafts.extend(chat.hand_over_draft());
+                    context_records.push(chat.hand_over_context_state());
                     uids.extend(chat.hand_over_uids());
                     branches.extend(chat.hand_over_branches());
                     forks.extend(chat.hand_over_forks());
@@ -2042,6 +2071,7 @@ impl Daemon {
                 tool_previews,
                 image_originals,
                 chat_queues,
+                context_records,
                 drafts,
                 uids,
                 branches,
@@ -2240,6 +2270,9 @@ impl Daemon {
                     .chain(self.next_lent_due())
                     .chain(self.next_restart_due())
                     .chain(self.next_restate_due())
+                    .chain(self.work.due)
+                    .chain(self.next_outline_due())
+                    .chain(self.next_context_due())
                     .chain(self.next_paste_due())
                     .chain(self.next_grace_due())
                     .chain(self.held_until())
@@ -2292,6 +2325,12 @@ impl Daemon {
             self.take_signs();
             self.take_installs();
             self.agent_chores();
+            self.take_skills();
+            self.take_work();
+            self.take_outlines();
+            self.take_contexts();
+            self.take_specialist_files();
+            self.take_specialist_limits();
             self.take_renames();
             self.take_pastes();
             self.keep_chat_images();
@@ -2568,6 +2607,10 @@ impl Daemon {
                 Some(&Source::Agent(id, pipe)) => self.agent_event(id, pipe),
                 Some(&Source::Server(id, pipe)) => self.server_event(id, pipe),
                 Some(Source::Files) => self.read_files_changes(),
+                Some(Source::Outline(root)) => {
+                    let root = root.clone();
+                    self.outline_changed(&root);
+                }
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 Some(Source::Tools(_)) => self.serve_tools(token, event),
@@ -3121,6 +3164,9 @@ impl Daemon {
     }
 
     fn close_terminal(&mut self, id: TerminalId) -> Result<(), Error> {
+        if let Some(side) = self.side_of(id) {
+            self.close_terminal(side)?;
+        }
         // While it's here to say what those it started may have.
         self.pin_subagents_under(id);
         let slot = self
@@ -3304,7 +3350,7 @@ impl Daemon {
     /// closing it, and for the daemon itself.
     pub(super) fn sends_subagents_back(&self, token: Token) -> bool {
         match self.sources.get(token.0) {
-            Some(Source::Client(client)) => client.wire >= wire::SUBAGENT_PROFILE,
+            Some(Source::Client(client)) => client.wire >= wire::SUBAGENT_SPECIALIST,
             _ => true,
         }
     }
@@ -3573,6 +3619,66 @@ impl Daemon {
                 }
                 Some(ClientMessage::Request(request)) => match self.route_request(token, request) {
                     relay::Routed::Here(request) => {
+                        if let Request::Side { chat, action } = request {
+                            self.request_side(token, chat, action);
+                            continue;
+                        }
+                        if let Request::Context { chat, action } = request {
+                            self.request_context(token, chat, action);
+                            continue;
+                        }
+                        if let Request::Chat {
+                            terminal,
+                            action:
+                                ChatAction::SubmitContext {
+                                    text,
+                                    images,
+                                    context,
+                                    target,
+                                    steer,
+                                },
+                        } = request
+                        {
+                            self.submit_context(
+                                token,
+                                terminal,
+                                context::Submission {
+                                    resolved_context: true,
+                                    text,
+                                    images,
+                                    target,
+                                    steer,
+                                },
+                                context,
+                            );
+                            continue;
+                        }
+                        if let Request::Skills { pane } = request {
+                            self.browse_skills(token, pane);
+                            continue;
+                        }
+                        if let Request::SpecialistFiles { pane } = request {
+                            self.browse_specialist_files(token, pane);
+                            continue;
+                        }
+                        if let Request::SaveSpecialistFile {
+                            pane,
+                            specialist,
+                            scope,
+                            path,
+                        } = request
+                        {
+                            self.save_specialist_file(token, pane, specialist, scope, path);
+                            continue;
+                        }
+                        if let Request::Specialists { pane } = request {
+                            self.browse_specialists(token, pane);
+                            continue;
+                        }
+                        if let Request::SaveSpecialist { .. } = request {
+                            self.refuse_legacy_specialist_save(token);
+                            continue;
+                        }
                         ServerMessage::Response(self.respond(request, token))
                     }
                     relay::Routed::Answered(response) => ServerMessage::Response(response),
@@ -3828,7 +3934,13 @@ impl Daemon {
     /// What each terminal is, chats included.
     fn terminal_infos(&self, token: Token) -> Vec<TerminalInfo> {
         (self.terminals.iter())
-            .filter(|&(&id, _)| self.may_see_terminal(token, id))
+            .filter(|&(&id, slot)| {
+                self.may_see_terminal(token, id)
+                    && slot
+                        .terminal
+                        .chat_ref()
+                        .is_none_or(|c| c.side_parent().is_none())
+            })
             .map(|(_, slot)| slot.terminal.info())
             .collect()
     }
@@ -3859,6 +3971,14 @@ impl Daemon {
             )));
         }
         let response = match request {
+            Request::Work(action) => self.serve_work(token, action),
+            Request::Side { .. }
+            | Request::Context { .. }
+            | Request::Skills { .. }
+            | Request::Specialists { .. }
+            | Request::SaveSpecialist { .. }
+            | Request::SpecialistFiles { .. }
+            | Request::SaveSpecialistFile { .. } => Err(Error::Unsupported), // answered off the loop
             Request::HarnessCapabilities { terminal } => {
                 if self.may_see_terminal(token, terminal) && self.chat_ref(terminal).is_some() {
                     Ok(Response::Text(self.harness_capabilities(terminal)))
@@ -4040,7 +4160,31 @@ impl Daemon {
                 self.note_device_action(token, terminal, &action);
                 // Answered with the message's text, for the box asking.
                 if let ChatAction::TakeBack { queued } = action {
-                    self.take_back_queued(terminal, queued).map(Response::Text)
+                    let attached = self
+                        .chat_ref(terminal)
+                        .and_then(|c| c.queued_user(queued))
+                        .is_some_and(|q| !q.prompt.context.is_empty());
+                    if attached
+                        && self
+                            .client_wire(token)
+                            .is_none_or(|wire| wire < wire::CONTEXT)
+                    {
+                        Err(Error::Other("Update this client to take a message with context back into its draft.".into()))
+                    } else {
+                        self.take_back_queued(terminal, queued).map(|text| {
+                            if attached {
+                                Response::Context(clackatoo_protocol::ContextReply::Draft {
+                                    text,
+                                    context: self
+                                        .chat_ref(terminal)
+                                        .map(|c| c.node().draft_context.clone())
+                                        .unwrap_or_default(),
+                                })
+                            } else {
+                                Response::Text(text)
+                            }
+                        })
+                    }
                 } else if let ChatAction::Fork { keep, place } = action {
                     let keep = usize::try_from(keep).unwrap_or(usize::MAX);
                     (self.fork_chat(terminal, keep, place)).map(Response::TerminalCreated)
@@ -4502,6 +4646,14 @@ impl Daemon {
     /// Does what a client asked of the chat `id`, as [`Self::chat_action`].
     #[allow(clippy::too_many_lines, reason = "one arm for each action")]
     fn chat_act(&mut self, id: TerminalId, action: ChatAction) -> Result<(), Error> {
+        if matches!(action, ChatAction::Stop) {
+            self.cancel_context_submissions(id);
+        }
+        if let ChatAction::Set { setting, value } = &action
+            && setting == crate::chat::SPECIALIST_SETTING
+        {
+            return self.select_specialist(id, value);
+        }
         // How many chats agents started may work under it is held to the
         // chats' above, which only the daemon sees.
         if let ChatAction::Set { setting, value } = &action
@@ -4580,6 +4732,16 @@ impl Daemon {
             // What's typed in the box: the clients', which the agent never
             // hears of, nor do viewers.
             ChatAction::Draft { text } => {
+                chat.set_draft(text);
+                return Ok(());
+            }
+            ChatAction::DraftContext { text, context } => {
+                if context.len() > clackatoo_protocol::ContextSnapshot::MAX_COUNT
+                    || serde_json::to_vec(&context).map_or(true, |b| b.len() > 32 * 1024)
+                {
+                    return Err(Error::Other("Draft context exceeds its bounds.".into()));
+                }
+                chat.set_draft_context(context);
                 chat.set_draft(text);
                 return Ok(());
             }

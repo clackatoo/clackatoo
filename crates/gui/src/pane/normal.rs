@@ -419,6 +419,22 @@ impl Pane {
         self.cursor.map(|cursor| cursor.at.col)
     }
 
+    pub(crate) fn context_ref(&self) -> Option<clackatoo_protocol::ContextRef> {
+        let terminal = self.terminal();
+        if let Some((a, b, _)) = self.selection() {
+            return Some(clackatoo_protocol::ContextRef::Terminal {
+                terminal,
+                first: a.line.min(b.line),
+                last: a.line.max(b.line),
+            });
+        }
+        let line = self
+            .cursor
+            .map(|c| c.at.line)
+            .or_else(|| self.document_end().map(|end| end.saturating_sub(1)))?;
+        Some(clackatoo_protocol::ContextRef::Command { terminal, line })
+    }
+
     /// Whether a command failed since this was last asked, as Vim beeps: a
     /// macro or a binding typing keys stops.
     pub(crate) fn take_failed(&mut self) -> bool {

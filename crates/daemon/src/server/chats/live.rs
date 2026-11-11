@@ -349,6 +349,11 @@ impl Daemon {
                     continue;
                 }
             };
+            if agent.native_plugins() != self.config.agents.configured.native_plugins(&name) {
+                log::info!("agent {name}: restarting to apply native plugin settings");
+                self.let_agent_go(agent.stop(), &name, End::Gently(KILL_AFTER));
+                continue;
+            }
             if self.agents.running.contains_key(&id) || self.agents.named(&name).is_some() {
                 log::error!("agent {name} couldn't be taken over: there's one already");
                 self.let_agent_go(agent.stop(), &name, End::Gently(KILL_AFTER));

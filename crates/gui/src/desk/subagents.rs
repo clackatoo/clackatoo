@@ -26,9 +26,9 @@ pub(crate) struct Band {
     pub(crate) parent: TerminalId,
     /// Live terminal state; None for a subagent chat.
     pub(crate) terminal: Option<clackatoo_protocol::AgentTerminal>,
-    /// The profile it was started as, such as `explore`, if the daemon
+    /// The specialist it was started as, such as `explore`, if the daemon
     /// says.
-    pub(crate) profile: Option<String>,
+    pub(crate) specialist: Option<String>,
     /// Whether the chat that started it is still open: if not, there's
     /// nowhere to go, and closing the pane closes the chat.
     pub(crate) open: bool,
@@ -40,7 +40,7 @@ pub(crate) struct Band {
 impl Band {
     /// What it says, in parts, each in its ink, the most important first,
     /// so a narrow pane cuts the last: what it is, the chat that started
-    /// it, which is a link while it's open, its profile, and the key to go
+    /// it, which is a link while it's open, its specialist, and the key to go
     /// there.
     pub(crate) fn parts(&self) -> crate::chrome::BandParts {
         let parent = self.parent;
@@ -79,8 +79,8 @@ impl Band {
                 parts.push((closing, Ink::Muted));
             }
         }
-        if let Some(profile) = &self.profile {
-            parts.push((format!(" · {profile}"), Ink::Muted));
+        if let Some(specialist) = &self.specialist {
+            parts.push((format!(" · {specialist}"), Ink::Muted));
         }
         if self.open
             && let Some(keys) = &self.keys
@@ -114,7 +114,7 @@ impl Desk {
             return Some(Band {
                 parent: agent.parent,
                 terminal: Some(agent),
-                profile: None,
+                specialist: None,
                 open: self.watched_chat(agent.parent).is_some(),
                 keys: self.parent_chat_keys(),
             });
@@ -124,7 +124,7 @@ impl Desk {
         Some(Band {
             parent,
             terminal: None,
-            profile: summary.profile.clone(),
+            specialist: summary.specialist.clone(),
             open: self.watched_chat(parent).is_some(),
             keys: self.parent_chat_keys(),
         })

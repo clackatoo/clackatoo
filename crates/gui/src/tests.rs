@@ -18,6 +18,110 @@ use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Illustrative jobs for presentation tests; outline indexing is not yet a consumer.
+pub(crate) fn example_work() -> Vec<clackatoo_protocol::WorkItem> {
+    use clackatoo_protocol::{WorkItem, WorkState};
+    vec![
+        WorkItem {
+            id: 1,
+            title: "Indexing outline".into(),
+            scope: Some("/home/jack/projects/clackatoo".into()),
+            state: WorkState::Running,
+            detail: "Extracting symbols from crates/daemon/src/server.rs".into(),
+            completed: 824,
+            total: Some(1200),
+            cancellable: true,
+        },
+        WorkItem {
+            id: 2,
+            title: "Reading skills".into(),
+            scope: Some("/home/jack/projects/peios".into()),
+            state: WorkState::Queued,
+            detail: "Waiting for a worker".into(),
+            completed: 0,
+            total: None,
+            cancellable: true,
+        },
+        WorkItem {
+            id: 3,
+            title: "Refreshing search index".into(),
+            scope: Some("/home/jack/projects/notes".into()),
+            state: WorkState::Failed,
+            detail: "Could not read the project directory: permission denied".into(),
+            completed: 0,
+            total: None,
+            cancellable: false,
+        },
+    ]
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn renders_background_work_badge_and_live_picker_at_wide_and_narrow_sizes() {
+    let Some(gpu) = gpu() else { return };
+    let mut fonts = fonts(1.0);
+    for size in [[1280, 900], [560, 780], [320, 600]] {
+        let metrics = Metrics {
+            cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+            ui_line: fonts.ui.height,
+            padding: 4.0,
+        };
+        let geometry = Geometry::new(size, metrics);
+        let layout = crate::finder::view::Layout::new(&geometry);
+        let mut desk = crate::desk::Desk::default();
+        desk.work_changed(example_work());
+        desk.open_work();
+        let buttons = ButtonLayout::default();
+        let chrome = Chrome::new(
+            geometry,
+            Contents {
+                workspaces: vec![WorkspaceName::plain(1, "clackatoo", 1, true)],
+                tabs: vec![(TabId(1), "1 zsh".into(), true)],
+                status: Status::tabs(),
+                buttons: &buttons,
+                bottom_shown: true,
+                menu: None,
+                alert: None,
+                grant: None,
+                rounded: false,
+                finder: desk.finder_view((layout.rows, layout.cols), layout.preview_size),
+                scrolls: Scrolls::default(),
+                messages: None,
+                waiting: None,
+                which_keys: None,
+                background: None,
+                work: desk.work_badge(),
+            },
+            &mut |text, bold| fonts.ui_width(text, bold),
+        );
+        let (panel, view) = chrome.finder.as_ref().expect("work list");
+        let header = panel.title_width
+            + crate::render::mono_width(&view.query) as f32 * metrics.cell[0]
+            + crate::render::mono_width(&view.count) as f32 * metrics.cell[0]
+            + 6.0 * metrics.padding;
+        assert!(header <= panel.panel.width, "header overflows at {size:?}");
+        let (_, badge, _) = chrome.work.as_ref().expect("work badge");
+        assert!(badge.right() <= size[0] as f32, "{size:?}: {badge:?}");
+        let painted = chrome.paint(Hit::Nothing);
+        let mut fills = vec![chrome::window_fill(&geometry, false)];
+        fills.extend(painted.fills);
+        let mut texts = painted.texts;
+        texts.extend(painted.over_texts);
+        let picture = Picture {
+            scenes: &[],
+            fills: &fills,
+            over: &painted.over,
+            texts: &texts,
+            glyphs: &[],
+            over_glyphs: &[],
+            images: &[],
+            transparent: false,
+        };
+        let pixels = draw(&gpu, size, &picture, &mut fonts);
+        save(&format!("background-work-{}", size[0]), size, &pixels);
+    }
+}
+
 /// The GPU device every test shares, or `None` on machines without one:
 /// the one windows drawn offscreen share. It's made once: tests making and
 /// dropping devices of their own at the same time sometimes hung NVIDIA's
@@ -458,6 +562,7 @@ fn two_pane_window(
             waiting: None,
             which_keys: None,
             background: None,
+            work: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -830,6 +935,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
     ChatNode {
         turns: vec![
             Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),
@@ -861,6 +967,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 switch: None,
             },
             Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),
@@ -1133,7 +1240,7 @@ fn renders_live_subagents_after_the_conversation_continues() {
     node.subagents = vec![Subagent {
         chat: TerminalId(5),
         agent: "Claude Code".into(),
-        profile: Some("general".into()),
+        specialist: Some("general".into()),
         model: None,
         task: "Compare the old archive".into(),
         status: SubagentStatus::Working,
@@ -1252,6 +1359,7 @@ fn moved_chat_node() -> clackatoo_protocol::ChatNode {
     node.turns.insert(
         1,
         Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -1391,6 +1499,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
             root: Node::Chat(Box::new(ChatNode {
                 state: ChatState::Ready,
                 turns: vec![Turn {
+                    context: Vec::new(),
                     woke: None,
                     notice: None,
                     previews: Vec::new(),
@@ -2209,6 +2318,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
             waiting: None,
             which_keys: None,
             background: None,
+            work: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -3158,6 +3268,7 @@ fn crowded_bars_at(
             waiting: None,
             which_keys: None,
             background: None,
+            work: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );

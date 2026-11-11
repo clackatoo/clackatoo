@@ -129,9 +129,13 @@ pub(super) fn rows(offer: &Offer<'_>, menu: &Menu) -> Vec<Row> {
     let shown: Vec<&Setting> = (menu.settings.iter())
         .filter_map(|id| settings.iter().find(|setting| setting.id == *id))
         .collect();
-    let others = offers_models(offer, menu) && !offer.providers.is_empty();
+    let models = offers_models(offer, menu);
+    let others = models && !offer.providers.is_empty();
     let mut rows = Vec::new();
     for setting in &shown {
+        if models && is_specialist(&setting.id) {
+            continue;
+        }
         let value = menu.value(setting);
         let slider = slider(setting, value);
         if others && setting.kind == SettingKind::Model {
@@ -184,7 +188,36 @@ pub(super) fn rows(offer: &Offer<'_>, menu: &Menu) -> Vec<Row> {
             );
         }
     }
-    filter_rows(offer, menu, rows)
+    let mut rows = filter_rows(offer, menu, rows);
+    if models {
+        rows.extend(
+            specialist_choices(offer.settings)
+                .into_iter()
+                .map(Row::Choice),
+        );
+    }
+    rows
+}
+
+pub(super) fn is_specialist(id: &str) -> bool {
+    id == "clackatoo.specialist"
+}
+
+pub(super) fn specialist_choices(settings: &[Setting]) -> Vec<ChoiceRow> {
+    settings
+        .iter()
+        .find(|s| is_specialist(&s.id))
+        .map(|setting| {
+            setting
+                .choices
+                .iter()
+                .map(|choice| ChoiceRow {
+                    current: choice.value == setting.value,
+                    ..plain(setting, choice)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The rows for another agent, `provider`: its name, and its models to
@@ -624,6 +657,43 @@ mod tests {
                 .all(|s| s.kind != SettingKind::Other)
         );
         assert_eq!(permissions_label(&settings), "Auto review");
+    }
+
+    #[test]
+    fn specialists_are_separate_from_permissions_and_model_filters() {
+        let settings = vec![Setting {
+            id: "clackatoo.specialist".into(),
+            name: "Specialist".into(),
+            kind: SettingKind::Other,
+            value: "general".into(),
+            choices: vec![
+                choice("general", "general", None),
+                choice("reviewer", "reviewer", Some("Review changes")),
+            ],
+        }];
+        assert!(permissions(&settings).is_empty());
+        let selected = menu(&["clackatoo.specialist"], None);
+        let choices = rows(&settings, &selected);
+        assert_eq!(shown(&choices).len(), 2);
+        let mut models = settings.clone();
+        models.push(Setting {
+            id: "model".into(),
+            name: "Model".into(),
+            kind: SettingKind::Model,
+            value: "opus".into(),
+            choices: vec![choice("opus", "Opus", None)],
+        });
+        let mut model_menu = menu(&["model"], None);
+        model_menu.filter = Filter::Favorites;
+        model_menu.query = "no matching model".into();
+        let found = rows(&models, &model_menu);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|row| matches!(row, Row::Choice(c) if is_specialist(&c.setting)))
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -88,6 +88,12 @@ const MOST_READING: usize = 8;
 /// What's to be read for a message's mentions, gathered on the loop.
 #[derive(Debug)]
 pub(crate) struct Job {
+    /// A shared slash invocation, loaded fresh on this same cancellable worker.
+    pub(crate) skill: Option<(
+        crate::skills::Roots,
+        String,
+        Option<crate::specialists::Specialist>,
+    )>,
     /// Each mention: its path as written, and its lines.
     pub(crate) mentions: Vec<(String, Option<(u32, u32)>)>,
     /// The chat's working directory and project, made absolute with links
@@ -106,6 +112,8 @@ pub(crate) struct Job {
 /// What reading a message's mentions made.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Read {
+    /// A requested skill's fresh instructions, or why it cannot run.
+    pub(crate) skill: Option<Result<String, String>>,
     /// The blocks to send after the message's text.
     pub(crate) blocks: Vec<Value>,
     /// The mentions of something outside the project, as written.
@@ -126,6 +134,7 @@ enum For {
 /// A read going on.
 #[derive(Debug)]
 struct Reading {
+    skill: bool,
     job: u64,
     chat: TerminalId,
     purpose: For,
@@ -190,6 +199,7 @@ impl Mentioning {
         }
         self.next += 1;
         let number = self.next;
+        let skill = job.skill.is_some();
         let mentioned = (job.mentions.iter())
             .map(|(path, lines)| mention(path, *lines))
             .collect();
@@ -216,6 +226,7 @@ impl Mentioning {
             return None;
         }
         self.reading.push(Reading {
+            skill,
             job: number,
             chat,
             purpose,
@@ -259,6 +270,7 @@ impl Daemon {
             .reading
             .retain(|reading| reading.job != held.job);
         if let Some(chat) = self.chat(id) {
+            chat.prompt_not_sent(&held.message);
             chat.answered(Ok(StopReason::Cancelled));
             self.settle_turn(id);
             self.collect_damage(id);
@@ -283,16 +295,36 @@ impl Daemon {
         action: Action,
         after: &mut std::vec::IntoIter<Action>,
     ) -> Result<(Action, Vec<Value>), ()> {
+        if matches!(&action,Action::Prompt(prompt)|Action::Briefed{text:prompt,..}|Action::Carry{text:prompt,..} if prompt.resolved_context && !self.is_shared_skill(id,&prompt.text))
+        {
+            return Ok((action, Vec::new()));
+        }
         let text = match &action {
             Action::Prompt(prompt)
             | Action::Briefed { text: prompt, .. }
             | Action::Carry { text: prompt, .. } => &prompt.text,
             _ => return Ok((action, Vec::new())),
         };
-        let Some(job) = self.mention_job(id, text) else {
+        let Some(mut job) = self.mention_job(id, text) else {
             return Ok((action, Vec::new()));
         };
+        if matches!(&action,Action::Prompt(p)|Action::Briefed{text:p,..}|Action::Carry{text:p,..} if p.resolved_context)
+        {
+            job.mentions.clear();
+            job.buffers.clear();
+        }
+        let skill = job.skill.is_some();
         let Some(number) = self.mentioning.submit((id, For::Message), job, &self.waker) else {
+            if skill {
+                if let Some(chat) = self.chat(id) {
+                    chat.prompt_not_sent(&action);
+                    chat.answered(Err(
+                        "The skill could not be read just now. Try again shortly.".into(),
+                    ));
+                }
+                self.collect_damage(id);
+                return Err(());
+            }
             if let Some(chat) = self.chat(id) {
                 chat.notify("too many files are being read: the agent was sent the words".into());
             }
@@ -331,11 +363,12 @@ impl Daemon {
     /// mentions anything and isn't a command its agent runs: one that only
     /// starts with a `/`, as a path does, is words, as the digest takes it.
     fn mention_job(&mut self, id: TerminalId, text: &str) -> Option<Job> {
-        if agent_command(text, &self.chat_ref(id)?.node().commands) {
+        let skill = self.is_shared_skill(id, text);
+        if !skill && agent_command(text, &self.chat_ref(id)?.node().commands) {
             return None;
         }
         let found = mentions(text);
-        if found.is_empty() {
+        if found.is_empty() && !skill {
             return None;
         }
         let home = self.config.home.clone();
@@ -348,6 +381,7 @@ impl Daemon {
         let project = chat.project().to_owned();
         let project = project.canonicalize().unwrap_or(project);
         let embed_saved = crate::agents::embeds_saved(chat.agent());
+        let specialist = chat.specialist_definition().cloned();
         let mentions: Vec<(String, Option<(u32, u32)>)> = (found.iter())
             .map(|found| (found.path.to_owned(), found.lines))
             .collect();
@@ -365,7 +399,9 @@ impl Daemon {
                 )
             })
             .collect();
+        let skill = skill.then(|| (self.skill_roots(cwd.clone()), text.to_owned(), specialist));
         Some(Job {
+            skill,
             mentions,
             cwd,
             project,
@@ -420,6 +456,9 @@ impl Daemon {
                 read.outside.join(", ")
             )),
             Some(_) => None,
+            None if reading.skill => Some(
+                "The requested skill could not be read in time; the request was not sent.".into(),
+            ),
             None => Some(format!(
                 "couldn't read {} in time, so the agent was sent the words",
                 reading.mentioned.join(", ")
@@ -431,18 +470,43 @@ impl Daemon {
             chat.notify(notice);
             self.collect_damage(id);
         }
-        let blocks = read.map(|read| read.blocks).unwrap_or_default();
+        let (blocks, skill) = read
+            .map(|read| (read.blocks, read.skill))
+            .unwrap_or_default();
         match reading.purpose {
             For::Message => {
-                let Some(held) =
+                let Some(mut held) =
                     (self.mentioning.held.remove(&id)).filter(|held| held.job == reading.job)
                 else {
                     return;
                 };
+                if reading.skill {
+                    match skill.unwrap_or_else(|| {
+                        Err("The requested skill could not be read in time.".into())
+                    }) {
+                        Ok(text) => match &mut held.message {
+                            Action::Prompt(prompt)
+                            | Action::Briefed { text: prompt, .. }
+                            | Action::Carry { text: prompt, .. } => prompt.text = text,
+                            _ => unreachable!("only a prompt reads a skill"),
+                        },
+                        Err(why) => {
+                            if let Some(chat) = self.chat(id) {
+                                chat.prompt_not_sent(&held.message);
+                                chat.answered(Err(why));
+                            }
+                            self.collect_damage(id);
+                            self.act(id, held.after);
+                            return;
+                        }
+                    }
+                }
                 let actions = std::iter::once(held.message).chain(held.after).collect();
                 self.act_with(id, actions, Some(blocks));
             }
-            For::Steer(message) => self.steer_read(id, message, !blocks.is_empty()),
+            For::Steer(message) => {
+                self.steer_read(id, message, reading.skill || !blocks.is_empty());
+            }
         }
     }
 }
@@ -465,6 +529,10 @@ fn places(path: &str, cwd: &Path, project: &Path, home: &Path) -> Vec<PathBuf> {
 /// Reads what `job` mentions, as the module's docs say.
 pub(crate) fn read(job: &Job) -> Read {
     let mut made = Read::default();
+    if let Some((roots, text, specialist)) = &job.skill {
+        let catalogue = crate::skills::Catalogue::discover(roots);
+        made.skill = Some(specialist.as_ref().map_or_else(|| Ok(catalogue.clone()), |s| catalogue.scoped(s)).and_then(|catalogue| catalogue.explicit(text).unwrap_or_else(|| Err("The requested skill is no longer available for slash invocation. Refresh the catalogue with list_skills or Settings.".into()))));
+    }
     let root = &job.project;
     let mut budget = MOST_EMBEDDED;
     let mut seen = HashSet::new();
@@ -522,7 +590,7 @@ pub(crate) fn read(job: &Job) -> Read {
 
 /// The text to send of the file at `real`, or of its `lines`, if it's to
 /// go as text: its buffer's, if it's open, or else what's on the disk.
-fn text_of(job: &Job, real: &Path, lines: Option<(u32, u32)>) -> Option<String> {
+pub(super) fn text_of(job: &Job, real: &Path, lines: Option<(u32, u32)>) -> Option<String> {
     let buffer = (job.buffers.iter()).find(|(path, ..)| path == real);
     let root = &job.project;
     match (lines, buffer) {
@@ -537,19 +605,42 @@ fn text_of(job: &Job, real: &Path, lines: Option<(u32, u32)>) -> Option<String> 
     }
 }
 
+/// Capture the buffer the person sees even when it matches its last saved version.
+pub(super) fn captured_text_of(
+    job: &Job,
+    real: &Path,
+    lines: Option<(u32, u32)>,
+) -> Option<String> {
+    if lines.is_none()
+        && let Some((_, _, text)) = job.buffers.iter().find(|(path, ..)| path == real)
+    {
+        return (text.len_bytes() <= MOST_FILE).then(|| text.to_string());
+    }
+    text_of(job, real, lines)
+}
+
+/// Full bounded source for validating a selected syntax definition on a worker.
+pub(super) fn source_of(job: &Job, real: &Path) -> Option<String> {
+    if let Some((_, _, text)) = job.buffers.iter().find(|(path, ..)| path == real) {
+        return (text.len_bytes() <= 4 * 1024 * 1024).then(|| text.to_string());
+    }
+    String::from_utf8(read_under(real, &job.project, 4 * 1024 * 1024)?).ok()
+}
+
 /// The file at `real`, at most `most` bytes of it, if it's a plain file
 /// under `root` as its handle says, and no bigger: opened once, without
 /// following a link or waiting on a pipe, so what's read is what was
 /// checked.
 fn read_under(real: &Path, root: &Path, most: usize) -> Option<Vec<u8>> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt};
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(real)
         .ok()?;
-    if !file.metadata().ok()?.is_file() {
+    let before = file.metadata().ok()?;
+    if !before.is_file() {
         return None;
     }
     let at = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
@@ -558,10 +649,18 @@ fn read_under(real: &Path, root: &Path, most: usize) -> Option<Vec<u8>> {
     }
     let mut bytes = Vec::new();
     let most = u64::try_from(most).unwrap_or(u64::MAX);
-    file.take(most.saturating_add(1))
+    (&file)
+        .take(most.saturating_add(1))
         .read_to_end(&mut bytes)
         .ok()?;
-    (u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= most).then_some(bytes)
+    let after = file.metadata().ok()?;
+    (before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+        && u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= most)
+        .then_some(bytes)
 }
 
 /// Lines `first` to `last` of `text`, from 1, with their line ends; those
@@ -580,6 +679,7 @@ mod tests {
     fn job(dir: &Path, mentions: &[(&str, Option<(u32, u32)>)]) -> Job {
         let dir = dir.canonicalize().unwrap();
         Job {
+            skill: None,
             mentions: (mentions.iter())
                 .map(|&(path, lines)| (path.to_owned(), lines))
                 .collect(),
@@ -814,6 +914,8 @@ mod tests {
                 height: 1,
             };
             let refused = Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: "look at @a.rs".into(),
                 images: vec![image],
             };

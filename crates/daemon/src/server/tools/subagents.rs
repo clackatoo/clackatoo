@@ -11,7 +11,7 @@
 //! started it reaches, and open panes beside that chat, as the nearest
 //! chat with a pane above it is its anchor.
 //!
-//! A chat started as a profile (see [`crate::profiles`]) takes its role,
+//! A chat started as a specialist (see [`crate::specialists`]) takes its role,
 //! limits, agent and model from it, and never has fewer limits than the
 //! chat that started it.
 //!
@@ -40,8 +40,8 @@ use super::talk::{final_words, going_note, head, quoted};
 use super::{MAX_WAITS, Wait, Waiting};
 use crate::chat::{HostedChat, Wanted, role_for};
 use crate::mcp::NewChat;
-use crate::profiles;
 use crate::server::Daemon;
+use crate::specialists;
 
 /// The most of each chat's answer a summary of several gives back, in
 /// bytes, all together: each gets its share.
@@ -343,7 +343,7 @@ impl Daemon {
     }
 
     /// `start_chat` and `start_chats`: starts each of `chats` for the chat
-    /// `chat`'s agent, as its profile says, and sends it its first
+    /// `chat`'s agent, as its specialist says, and sends it its first
     /// message. Each is checked before any starts, so none starts if one
     /// is refused; one that fails as it starts leaves the others going.
     /// It answers once each is added and has its message, never waiting
@@ -382,16 +382,27 @@ impl Daemon {
                     project.display()
                 ));
             }
-            let profile = (self.config.agents)
-                .profile(new.profile.as_deref().unwrap_or(profiles::DEFAULT))?;
-            planned.push((new, profile, dir));
+            let mut specialist = self.specialist_for(
+                chat,
+                new.specialist.as_deref().unwrap_or(specialists::DEFAULT),
+                true,
+            )?;
+            let parent = self.chat_ref(chat).ok_or("the chat has closed")?;
+            specialist.extra.budget = specialist.extra.budget.capped(parent.specialist_budget());
+            let provider = new
+                .agent
+                .as_deref()
+                .or(specialist.agent.as_deref())
+                .unwrap_or(parent.agent());
+            specialist.extra.budget.check(provider)?;
+            planned.push((new, specialist, dir));
         }
         let mut text = String::new();
         let mut started = 0;
-        for (number, (new, profile, dir)) in planned.into_iter().enumerate() {
+        for (number, (new, specialist, dir)) in planned.into_iter().enumerate() {
             // Checked first, one fails only as the chat it starts closes
             // at once: those started go on, and the agent hears of both.
-            match self.start_one(chat, new, &profile, &dir) {
+            match self.start_one(chat, new, &specialist, &dir) {
                 Ok(said) => {
                     started += 1;
                     text.push_str(&said);
@@ -417,19 +428,19 @@ impl Daemon {
         Ok(text)
     }
 
-    /// Starts `new` for the chat `chat`'s agent, as `profile`, in `dir`.
+    /// Starts `new` for the chat `chat`'s agent, as `specialist`, in `dir`.
     /// Returns what the agent is told of it.
     fn start_one(
         &mut self,
         chat: TerminalId,
         new: NewChat,
-        profile: &profiles::Profile,
+        specialist: &specialists::Specialist,
         dir: &Path,
     ) -> Result<String, String> {
         let message = (self.message_from(chat, &new.prompt)).ok_or("the chat has closed")?;
         let own = self.chat_ref(chat).ok_or("the chat has closed")?;
-        let name =
-            (new.agent.or_else(|| profile.agent.clone())).unwrap_or_else(|| own.agent().to_owned());
+        let name = (new.agent.or_else(|| specialist.agent.clone()))
+            .unwrap_or_else(|| own.agent().to_owned());
         let same = name == own.agent();
         // It may do what the chat that starts it may, and no more: with
         // the same agent, it starts in the same mode; with another, in
@@ -437,22 +448,22 @@ impl Daemon {
         // parent's mode rules out, such as Codex's Read-only or Claude
         // Code's planning, holds as limits of its own.
         let mode = same.then(|| own.mode().map(str::to_owned)).flatten();
-        let limits = (profile.limits).max(own.all_limits());
+        let limits = (specialist.limits).max(own.all_limits());
         let inherited = |kind| {
-            (same && profile.inherit_model)
+            (same && specialist.inherit_model)
                 .then(|| own.setting_value(kind).map(str::to_owned))
                 .flatten()
         };
         let wanted = Wanted {
             model: (new
                 .model
-                .or_else(|| profile.model_for(&name).map(str::to_owned)))
+                .or_else(|| specialist.model_for(&name).map(str::to_owned)))
             .or_else(|| inherited(SettingKind::Model)),
-            effort: (profile.effort_for(&name).map(str::to_owned))
+            effort: (specialist.effort_for(&name).map(str::to_owned))
                 .or_else(|| inherited(SettingKind::Effort)),
             read_only: limits.no_commands(),
         };
-        let role = role_for(&profile.name, &profile.prompt, limits);
+        let role = role_for(&specialist.name, &specialist.instruction_text(), limits);
         let (root, depth) = (own.relations().root.unwrap_or(chat), own.relations().depth);
         let (size, tools, task, browser) = (own.size(), own.tools(), own.task(), own.browser());
         let spec = self.agent_spec(&name);
@@ -460,7 +471,8 @@ impl Daemon {
         let cwd = dir.to_string_lossy().into_owned();
         let mut child = HostedChat::new(id, size, cwd, &spec, tools, task, browser);
         child.started_by(chat, root, depth + 1, mode);
-        child.start_as(&profile.name, limits, role, wanted);
+        child.start_as(&specialist.name, limits, role, wanted);
+        child.remember_specialist(specialist.clone());
         // As many may work under it as under the chat that starts it.
         child.set_subagents(self.subagents_cap(chat));
         self.start_hosted_chat(child);
@@ -484,7 +496,7 @@ impl Daemon {
         self.note_subagent(id);
         log::info!(
             "chat {chat} started chat {id}, with {name}, as {}",
-            profile.name
+            specialist.name
         );
         let place = pane.map_or_else(
             || "in the background, as a card in this chat the user can open".to_owned(),
@@ -492,7 +504,7 @@ impl Daemon {
         );
         Ok(format!(
             "Started chat {id} ({name}, as {}{}), {place}, in {}, and sent it the message.",
-            profile.name,
+            specialist.name,
             if limits.no_commands() {
                 format!(", {}", limits.name())
             } else {
@@ -608,8 +620,8 @@ impl Daemon {
             return format!("Chat {to} has moved out of this chat's workspace.\n");
         }
         let mut what = vec![other.agent_title().to_owned()];
-        if let Some(profile) = other.profile() {
-            what.insert(0, profile.to_owned());
+        if let Some(specialist) = other.specialist() {
+            what.insert(0, specialist.to_owned());
         }
         if let Some(model) = other.model_name() {
             what.push(model.to_owned());

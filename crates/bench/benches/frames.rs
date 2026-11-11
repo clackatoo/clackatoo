@@ -128,6 +128,7 @@ fn chat_history(c: &mut Criterion) {
     let node = ChatNode {
         turns: (0..96)
             .map(|i| Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 prompt: format!("Turn {i}"),

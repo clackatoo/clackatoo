@@ -74,6 +74,7 @@ impl HostedChat {
         self.woke_by_task = None;
         let taken = (self.idle_taken.take()).filter(|(at, _)| at.elapsed() < PUT_BACK);
         self.push_turn(Turn {
+            context: Vec::new(),
             previews: Vec::new(),
             prompt: String::new(),
             sent: now(),

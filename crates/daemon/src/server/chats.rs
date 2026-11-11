@@ -574,6 +574,27 @@ impl Daemon {
             self.collect_damage(id);
             return;
         };
+        let native_plugins = self.config.agents.configured.native_plugins(&name)
+            && self
+                .chat_ref(id)
+                .is_none_or(|chat| chat.side_parent().is_none());
+        if let Some(chat) = self.chat(id) {
+            chat.native_skills = native_plugins;
+        }
+        // Start the runtime while the worker reads the catalogue, and keep
+        // missing-agent failures and old-process cleanup immediate.
+        if self.reading_skills(id) {
+            return;
+        }
+        if let Some(chat) = self.chat_ref(id)
+            && let Err(why) = chat.specialist_budget().check(&name)
+        {
+            if let Some(chat) = self.chat(id) {
+                chat.failed_to_connect(&why);
+            }
+            self.collect_damage(id);
+            return;
+        }
         let Some(chat) = self.chat(id) else { return };
         // The rest of a load it stopped waiting for is still being told:
         // it asks once that's done (see `late_session`), and is told it's
@@ -595,6 +616,9 @@ impl Daemon {
         // A new branch's session, forked from the branch left's.
         let plan = chat.fork_plan().cloned().filter(|_| session.is_none());
         let opening = Opening {
+            no_tools: chat.side_parent().is_some(),
+            budget: chat.specialist_budget(),
+            native_plugins,
             tools: self.tools_server(id),
             task,
             limits,
@@ -709,6 +733,7 @@ impl Daemon {
             &command,
             (display.as_deref(), self.config.agents.trace.as_deref()),
             spec.tasks,
+            self.config.agents.configured.native_plugins(&spec.name),
             &self.parser,
         )?;
         let id = AgentId(self.agents.next);
@@ -826,6 +851,10 @@ impl Daemon {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "provider prompt dispatch and its existing start lifecycle"
+    )]
     pub(super) fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
         let actions = self.not_waiting(id, actions);
         self.act_with(id, actions, None);
@@ -834,6 +863,10 @@ impl Daemon {
     /// Carries out `actions`, as [`act`](Self::act) does, the first of them
     /// a message to send with `context`, the files it mentions, if that's
     /// been read already (see `server/mentions.rs`).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "provider dispatch preserves the existing prompt and cancellation lifecycle"
+    )]
     pub(super) fn act_with(
         &mut self,
         id: TerminalId,
@@ -872,6 +905,7 @@ impl Daemon {
             let session = self
                 .chat(id)
                 .and_then(|chat| chat.session().map(str::to_owned));
+            let skill_brief = self.skill_brief_for(id, &action, session.as_deref());
             // No answer comes to end a turn the agent took by itself.
             let woken =
                 matches!(action, Action::Cancel) && self.chat(id).is_some_and(|chat| chat.woken());
@@ -883,12 +917,14 @@ impl Daemon {
                 }
                 (Action::Install, _, _) => self.install_agent(id),
                 (Action::Prompt(text), Some(slot), Some(session)) => {
-                    let words = [text.text.as_str()];
+                    let request = text.words();
+                    let words = super::skills::words(&[], skill_brief.as_deref(), &request);
                     slot.agent
                         .prompt(id, &session, (&words, &context), &text.images);
                 }
                 (Action::Briefed { role, text }, Some(slot), Some(session)) => {
-                    let words = [role.as_str(), &text.text];
+                    let request = text.words();
+                    let words = super::skills::words(&[&role], skill_brief.as_deref(), &request);
                     slot.agent
                         .prompt(id, &session, (&words, &context), &text.images);
                 }
@@ -901,8 +937,9 @@ impl Daemon {
                     let digest = self.chat(id).and_then(|chat| chat.digest(from, to, &files));
                     let slot = agent.and_then(|agent| self.agents.running.get_mut(&agent));
                     if let Some(slot) = slot {
-                        let words: Vec<&str> = digest.iter().map(String::as_str).collect();
-                        let words = [&words[..], &[text.text.as_str()]].concat();
+                        let before: Vec<&str> = digest.iter().map(String::as_str).collect();
+                        let request = text.words();
+                        let words = super::skills::words(&before, skill_brief.as_deref(), &request);
                         slot.agent
                             .prompt(id, &session, (&words, &context), &text.images);
                     }
@@ -1351,6 +1388,20 @@ impl Daemon {
                 {
                     return;
                 }
+                if matches!(
+                    &*update,
+                    SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_)
+                ) && let Some((side, _)) = self
+                    .chat_in(name, &session)
+                    .filter(|(_, c)| c.side_parent().is_some())
+                {
+                    let _ = self.chat_action(side, clackatoo_protocol::ChatAction::Stop);
+                    if let Some(chat) = self.chat(side) {
+                        chat.notify("The provider attempted a tool call. This context-only side answer was stopped.".into());
+                    }
+                    self.collect_damage(side);
+                    return;
+                }
                 let tells =
                     (self.agents.running.get(&agent)).is_some_and(|slot| slot.agent.tells_turns());
                 let Some(id) = self.session_updated((name, tells), &session, *update) else {
@@ -1469,6 +1520,12 @@ impl Daemon {
                     .filter(|option| !unknown.iter().any(|id| *option.option_id.0 == **id))
                     .cloned()
                     .collect();
+                if chat.side_parent().is_some() {
+                    if let Some(slot) = self.agents.running.get_mut(&agent) {
+                        slot.agent.answer_permission(&request, None);
+                    }
+                    return;
+                }
                 let answered = if interaction {
                     None
                 } else {
@@ -1492,6 +1549,16 @@ impl Daemon {
             }
             Incoming::Elicit { request, asked } => {
                 let asked = *asked;
+                if self
+                    .chat_in(name, &asked.session)
+                    .is_some_and(|(_, c)| c.side_parent().is_some())
+                {
+                    if let Some(slot) = self.agents.running.get_mut(&agent) {
+                        slot.agent
+                            .answer(&request, Ok(serde_json::json!({"action":"decline"})));
+                    }
+                    return;
+                }
                 let shown = (self.chat_in(name, &asked.session))
                     .and_then(|(id, chat)| chat.elicit(request.clone(), asked).then_some(id));
                 let Some(id) = shown else {
@@ -2111,7 +2178,8 @@ impl Daemon {
             };
             log::info!("asking {name} for its models");
             if let Some(slot) = self.agents.running.get_mut(&agent) {
-                slot.agent.probe(&cwd);
+                slot.agent
+                    .probe(&cwd, self.config.agents.configured.native_plugins(&name));
             }
             self.flush_agent(agent);
             self.agents.unlearned.remove(&name);
@@ -2424,6 +2492,8 @@ impl Daemon {
             .chain(self.next_session_due())
             .chain(self.next_listing_due())
             .chain(self.next_mentions_due())
+            .chain(self.next_skills_due())
+            .chain(self.next_specialist_due())
             .min()
     }
 
@@ -2708,7 +2778,8 @@ impl Daemon {
         // once what it mentions has been read (see `steer_read`).
         let native = state.node().delivery.native_steering
             && pending.target.is_none()
-            && pending.prompt.images.is_empty();
+            && pending.prompt.images.is_empty()
+            && pending.prompt.context.is_empty();
         let text = pending.prompt.text.clone();
         if self.reading_to_steer(chat, id) {
             return Err(Error::Other(
@@ -2903,6 +2974,7 @@ mod tests {
         assert_eq!(resumed.agents.running.len(), 1, "starts without Send");
         let deadline = Instant::now() + Duration::from_secs(10);
         while resumed.chat(id).unwrap().answering() {
+            resumed.take_skills();
             let agents: Vec<_> = resumed.agents.running.keys().copied().collect();
             for agent in agents {
                 resumed.flush_agent(agent);

@@ -177,7 +177,7 @@ After you send another message, subagents still working from earlier turns also 
 
 A subagent is a chat like any other: you can steer it, review and undo what it changes, and answer its questions. The card says when one is waiting for you. Subagents in the background close with the chat that started them.
 
-When subagents finish, your chat's agent is told, and your chat shows it as a teal card, such as `↳ 2 subagents finished in 3m 4s`, with a line for each: its chat, profile, how long it worked and what it was asked, over the first line of its answer. Press Enter or `za` on a line, or click it, to read the whole answer, and click `chat 7`, or press `gx` on the line, to open that chat. A message one agent sends another shows quoted, under `From chat 7 · explore`, never as one of yours.
+When subagents finish, your chat's agent is told, and your chat shows it as a teal card, such as `↳ 2 subagents finished in 3m 4s`, with a line for each: its chat, specialist, how long it worked and what it was asked, over the first line of its answer. Press Enter or `za` on a line, or click it, to read the whole answer, and click `chat 7`, or press `gx` on the line, to open that chat. A message one agent sends another shows quoted, under `From chat 7 · explore`, never as one of yours.
 
 How many may work at once is the chat's **Subagents** setting, in the permissions menu after Tools and Browser: Off, or 2 up to 16, starting at 6. It counts every subagent working under your chat, however deep. A subagent starts with its chat's value, and you can lower it in the subagent's own menu, but never raise it above its chat's; with Off, none of its subagents work: it can't start one, or set an idle one working again. The agent can't change it. Open the permissions menu now and set Subagents to 2. The other limits, such as how deep subagents go, are in the daemon's `agents.toml`, under `[subagents]`.
 
@@ -187,11 +187,11 @@ Agent-created terminals have a teal band like subagent panes. It names the chat 
 
 A terminal that has **never been selected** closes automatically 60 seconds after its command finishes. Its band counts down the remaining seconds, such as `closes in 59s`, using the daemon's closing deadline. Selecting it once keeps it open permanently, even after you move elsewhere; marking it to keep running does too. This applies to agent-created background terminals as well. A new command resets the timer. If the shell cannot report completion, the terminal stays open. Selection and remaining time survive a daemon upgrade; terminals carried over from older builds stay open because their selection history is unknown.
 
-An agent can give a subagent a pane of its own, and a card opens one as a pane. A teal band across the top of a subagent's pane says what it is, as `↳ subagent of chat 12 · explore`: whose it is, and the profile it was started as. Click the band, or press Ctrl+B `u`, to go to the chat that started it, whichever tab that's in.
+An agent can give a subagent a pane of its own, and a card opens one as a pane. A teal band across the top of a subagent's pane says what it is, as `↳ subagent of chat 12 · explore`: whose it is, and the specialist it was started as. Click the band, or press Ctrl+B `u`, to go to the chat that started it, whichever tab that's in.
 
 `:q`, `:close` or Ctrl+B `x` in a subagent's pane closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. One you sent back is yours: the agent that started it can't close it. `:bd` closes the chat itself for good, pane and all, as `clackatoo close` does from a shell. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it.
 
-A subagent in a pane comes back after the daemon restarts, a subagent still, if its chat was in a pane too: band, card, `:q` and all, with its profile's limits and never a mode above its chat's.
+A subagent in a pane comes back after the daemon restarts, a subagent still, if its chat was in a pane too: band, card, `:q` and all, with its specialist's limits and never a mode above its chat's.
 
 ## Reviewing what they changed
 
@@ -199,15 +199,16 @@ A subagent in a pane comes back after the daemon restarts, a subagent still, if 
 
 Rejecting a subagent's hunk is a change made as that subagent, as its edits were: never as you, so `u` in the editor leaves it, and never as the chat that started it. Undoing a turn in that chat leaves its subagents' changes, as the review says: reject them in the review instead.
 
-## Profiles
+## Specialists
 
-Each subagent starts as a profile, which gives it a role, limits, and an agent and model:
+Each subagent starts as a specialist, which gives it a role, limits, and an agent and model:
 
-- `explore` researches quickly on the cheapest model, changes nothing, and answers briefly;
+- `explore` handles quick, narrow code lookups on a lightweight model, changes nothing, and answers briefly with file references;
+- `research` investigates codebase and architecture questions across files and available repositories, changes nothing, and answers with code citations and explicit uncertainties. It inherits the parent's model and effort when using the same provider;
 - `plan` reads and thinks on a strong model, changes nothing, and returns a plan;
 - `general` works as your chat does, on its agent and model.
 
-Add your own, or change these, in the daemon's config, `daemon/init.lua`, as `daemon.profiles.NAME = { … }`. Claude Code's own Task tool, whose helpers work inside one turn, folded under its card, is off unless you `:set claudetask`.
+Create and edit your own in Settings > Agents > Specialists, or write a SPECIALIST.md file in .agents/specialists/NAME. Claude Code's own Task tool, whose helpers work inside one turn, folded under its card, is off unless you `:set claudetask`.
 
 ## Claude Code's own helpers
 
@@ -382,3 +383,64 @@ The selector also has **Model** and **Permissions** tabs, grouping the web
 composer controls in one sheet. Agents can call
 `harness_capabilities` themselves. A requested tool catalogue is reported
 separately from model acknowledgment: the harness cannot prove a model saw it.
+
+
+A Specialist gives a chat a reusable role, model and effort defaults, skills
+and limits. Open the model selector and choose from the Specialists column
+to the right of the model list, before the chat's first message. Tab moves
+between specialists and models; each list scrolls independently. The role is retained through compaction and upgrades. Agents use the
+same specialists through clackatoo's start_chat tool.
+
+Specialists are SPECIALIST.md files: YAML frontmatter holds metadata,
+defaults, skills and limits; the Markdown body holds instructions. Project
+roles live in .agents/specialists/NAME; personal roles live in the clackatoo
+config's specialists/NAME folder or ~/.agents/specialists/NAME. Project roles
+take precedence. Specialists and skillsets share one dependency resolver.
+
+Settings > Agents > Specialists creates and edits these files. The model
+selector's cog opens that page directly. Choose Personal or Project scope
+for a new file. Built-ins offer Make a custom copy. Save or Ctrl+S saves;
+Cancel discards the draft. Instructions accept multiline paste and Ctrl+J
+for a new line; Enter finishes a field, and Esc undoes that field edit.
+Existing chats keep their current role. Lua does not define specialists.
+
+
+## Project code outlines
+
+Agents can use `file_outline`, `search_symbols` and `repo_map` to find code
+in their project. The shared index uses installed language grammars and
+refreshes changed files in the background. Unsaved editor source is included
+in query results without being saved into the disk index. The bottom bar's
+work indicator shows indexing progress and lets you cancel it. Results say
+when coverage is partial; an outline helps locate implementations to read.
+
+
+## Attaching workspace context
+
+Use + Context above the message box, or type @context:, to search workspace
+objects. Tab changes category; Enter previews a result, then Enter attaches it.
+Files, symbols, diagnostics, shell commands, review hunks, chat excerpts and
+board entries share this picker. Esc returns to the message box.
+
+Inspect the preview before sending. Use Narrow lines for a first-last range,
+Contents / ref to supply only a reference, and Copy snapshot to copy its text.
+The wheel and Page Up / Page Down scroll the preview. Every attached object
+can be inspected or removed; Earlier and Later expose longer attachment lists.
+
+:Ask and <Space>a also attach the current terminal selection or command,
+review hunk, board entry or chat answer to a nearby chat. Editor selections
+continue to work. Files can be dragged from an explorer onto a chat.
+
+Accepted messages keep immutable snapshots, including while queued. Editing
+a source afterwards never changes a queued message or its transcript's context.
+Use Context ... inspect on a sent turn to inspect or reattach its snapshot.
+The phone has the same Context browser. Selected sources that cannot be read
+hold the message so you can refresh or remove them without losing the draft.
+
+## Ask a side question
+
+Type `/btw Why did we choose this approach?` to ask about the current
+conversation while its main agent keeps working. The side sheet has its own
+composer and follows up from the context captured when it opened. Esc hides
+it; `/btw` reopens it. Copy an answer, attach it to the main draft with
+**Send to main**, or **Keep as chat** to continue in a normal tab.

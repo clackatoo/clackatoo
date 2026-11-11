@@ -1,4 +1,5 @@
-//! A searchable model chooser with a provider rail and durable favorites.
+//! Specialists beside the searchable model chooser and provider rail.
+mod specialists;
 use super::{Canvas, Laid, Look, Measures, Place, TextPaint, draw_laid, intersection, lay_out};
 use crate::chat::picker::{ChoiceRow, Filter, Row, SliderRow, Spot};
 use crate::chat::{ChatView, Hit, Tone, picker};
@@ -25,6 +26,60 @@ fn icon(canvas: &mut Canvas<'_>, mark: Icon, rect: [f32; 4], side: f32, paint: P
         mark,
         paint,
     ));
+}
+
+fn divider(canvas: &mut Canvas<'_>, m: Measures, rect: [f32; 4]) {
+    canvas.fill(Fill::solid(
+        [
+            rect[0] + rect[2],
+            rect[1] + m.em(0.6),
+            1.0,
+            rect[3] - m.em(1.2),
+        ],
+        Paint::RaisedEdge,
+    ));
+}
+
+struct ModelLayout {
+    bounds: [f32; 4],
+    specialist_width: f32,
+    count: usize,
+}
+
+impl ModelLayout {
+    fn new(m: Measures, place: Place, anchor: [f32; 4], has_specialists: bool) -> Self {
+        let width = m
+            .em(if has_specialists { 40.5 } else { 29.0 })
+            .min(place.size[0] - m.em(1.0))
+            .max(m.em(8.0));
+        let specialist_width = if has_specialists {
+            (width * 0.29).clamp(m.em(7.0), m.em(11.5)).min(width * 0.4)
+        } else {
+            0.0
+        };
+        let left = anchor[0].clamp(
+            place.origin[0] + m.em(0.5),
+            (place.origin[0] + place.size[0] - width - m.em(0.5)).max(place.origin[0] + m.em(0.5)),
+        );
+        let bottom = (anchor[1] - m.em(0.5))
+            .max(place.origin[1] + m.em(17.0))
+            .min(place.origin[1] + place.size[1] - m.em(0.5));
+        let search_height = m.em(3.2);
+        let footer = m.em(4.1);
+        let row_height = m.em(3.2);
+        let room = (bottom - place.origin[1] - m.em(0.5) - search_height - footer).max(row_height);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let count = ((room / row_height) as usize).clamp(1, 5);
+        #[allow(clippy::cast_precision_loss)]
+        let height = search_height + count as f32 * row_height + footer;
+        let top = (bottom - height).max(place.origin[1] + m.em(0.5));
+        let bounds = [left, top, width, (bottom - top).max(0.0)];
+        Self {
+            bounds,
+            specialist_width,
+            count,
+        }
+    }
 }
 
 impl ChatView {
@@ -95,7 +150,9 @@ impl ChatView {
         let choices: Vec<ChoiceRow> = rows
             .iter()
             .filter_map(|row| match row {
-                Row::Choice(choice) => Some(choice.clone()),
+                Row::Choice(choice) if !picker::is_specialist(&choice.setting) => {
+                    Some(choice.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -103,27 +160,21 @@ impl ChatView {
             Row::Slider(slider) => Some(slider.clone()),
             _ => None,
         });
-        let width = m.em(29.0).min(place.size[0] - m.em(1.0)).max(m.em(8.0));
-        let left = anchor[0].clamp(
-            place.origin[0] + m.em(0.5),
-            (place.origin[0] + place.size[0] - width - m.em(0.5)).max(place.origin[0] + m.em(0.5)),
-        );
-        let bottom = (anchor[1] - m.em(0.5))
-            .max(place.origin[1] + m.em(17.0))
-            .min(place.origin[1] + place.size[1] - m.em(0.5));
+        let specialists = picker::specialist_choices(&self.node.settings);
+        let ModelLayout {
+            bounds,
+            specialist_width,
+            count,
+        } = ModelLayout::new(m, place, anchor, !specialists.is_empty());
+        let [left, top, width, height] = bounds;
+        let bottom = top + height;
         let search_height = m.em(3.2);
         let footer = m.em(4.1);
         let row_height = m.em(3.2);
-        let room = (bottom - place.origin[1] - m.em(0.5) - search_height - footer).max(row_height);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let count = ((room / row_height) as usize).clamp(1, 5);
-        #[allow(clippy::cast_precision_loss)]
-        let height = search_height + count as f32 * row_height + footer;
-        let top = (bottom - height).max(place.origin[1] + m.em(0.5));
-        let bounds = [left, top, width, (bottom - top).max(0.0)];
         let rail = m.em(3.4);
-        let content = left + rail + m.em(0.6);
-        let content_width = width - rail - m.em(1.2);
+        let rail_left = left;
+        let content = rail_left + rail + m.em(0.6);
+        let content_width = width - specialist_width - rail - m.em(1.2);
         let mut canvas = Canvas {
             paint,
             fonts,
@@ -136,15 +187,23 @@ impl ChatView {
         canvas.fill(
             Fill::rounded(bounds, Paint::Palette, m.em(0.65)).bordered(1.0, Paint::PaletteEdge),
         );
-        canvas.fill(Fill::solid(
-            [left + rail, top + m.em(0.6), 1.0, bounds[3] - m.em(1.2)],
-            Paint::RaisedEdge,
-        ));
+        divider(&mut canvas, m, [rail_left, top, rail, bounds[3]]);
+        if !specialists.is_empty() {
+            let specialist_left = left + width - specialist_width;
+            self.model_specialists(
+                &mut canvas,
+                m,
+                place,
+                [specialist_left, top, specialist_width, height],
+                &specialists,
+                (&menu, count),
+            );
+        }
         self.model_rail(
             &mut canvas,
             m,
             place,
-            [left, top, rail, bounds[3] - footer],
+            [rail_left, top, rail, bounds[3] - footer],
             &menu,
         );
         self.model_search(
@@ -160,7 +219,7 @@ impl ChatView {
             place,
             [content, top + search_height, content_width, row_height],
             &choices,
-            (&menu, count),
+            (&menu, count, false),
         );
         if let Some(slider) = slider {
             self.model_effort(
@@ -175,7 +234,7 @@ impl ChatView {
             &mut canvas,
             m,
             place,
-            [left, bottom - footer, rail, footer],
+            [rail_left, bottom - footer, rail, footer],
             &menu,
         );
         for (_, hit) in &mut self.hits[hits_start..] {
@@ -255,11 +314,16 @@ impl ChatView {
         place: Place,
         rect: [f32; 4],
         choices: &[ChoiceRow],
-        options: (&crate::chat::Menu, usize),
+        options: (&crate::chat::Menu, usize, bool),
     ) {
         let [content, list_top, content_width, row_height] = rect;
-        let (menu, count) = options;
-        let mut offset = menu.offset.min(choices.len().saturating_sub(count));
+        let (menu, count, specialists) = options;
+        let saved = if specialists {
+            menu.specialist_offset
+        } else {
+            menu.offset
+        };
+        let mut offset = saved.min(choices.len().saturating_sub(count));
         if menu.reveal
             && let Some(at) = choices.iter().position(|row| {
                 menu.highlighted
@@ -276,14 +340,22 @@ impl ChatView {
             }
         }
         if let Some(menu) = &mut self.menu {
-            menu.offset = offset;
+            if specialists {
+                menu.specialist_offset = offset;
+            } else {
+                menu.offset = offset;
+            }
             menu.reveal = false;
         }
         for (index, choice) in choices.iter().skip(offset).take(count).enumerate() {
             #[allow(clippy::cast_precision_loss)]
             let y = list_top + index as f32 * row_height;
             let rect = [content, y, content_width, row_height - m.em(0.2)];
-            self.model_row(canvas, m, place, rect, choice, menu);
+            if specialists {
+                self.specialist_row(canvas, m, place, rect, choice, menu);
+            } else {
+                self.model_row(canvas, m, place, rect, choice, menu);
+            }
         }
         if choices.is_empty() {
             let empty = self.short_label(

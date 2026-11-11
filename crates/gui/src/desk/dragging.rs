@@ -348,8 +348,28 @@ impl Desk {
             }
             Drop::Chat(pane, chat) => {
                 self.show_pane(pane);
+                let context = self.daemon_has(clackatoo_protocol::wire::CONTEXT);
+                let directory = self
+                    .explorers
+                    .panes
+                    .get(&from)
+                    .is_some_and(|e| e.directory(&path));
                 if let Some(chat) = self.chats.get_mut(&chat) {
-                    chat.paste(&format!("{path} "));
+                    if context {
+                        chat.view_mut().attach_context(
+                            if directory {
+                                clackatoo_protocol::ContextRef::Project { path: path.clone() }
+                            } else {
+                                clackatoo_protocol::ContextRef::File {
+                                    path: path.clone(),
+                                    lines: None,
+                                }
+                            },
+                            path,
+                        );
+                    } else {
+                        chat.paste(&format!("{path} "));
+                    }
                 }
             }
             Drop::No(why) => {

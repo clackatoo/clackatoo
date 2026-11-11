@@ -33,6 +33,11 @@ impl Desk {
             return Some(false);
         }
         let pane = self.wheel_target(point)?;
+        if let Some(changed) = self.outline_smooth_wheel(pane, point, lines) {
+            self.scrolling.remove(&pane);
+            self.scroll_extra(pane, false);
+            return Some(changed);
+        }
         let (kind, room, unit) = self.scroll_target(pane, lines > 0.0, modifiers)?;
         let mut disarmed = false;
         if let Kind::Chat(terminal) = kind

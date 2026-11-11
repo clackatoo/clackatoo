@@ -1,11 +1,11 @@
-//! A chat as a subagent: one another chat's agent started, as a profile
-//! (see [`crate::profiles`]), and the chats a chat's agent started, as
+//! A chat as a subagent: one another chat's agent started, as a specialist
+//! (see [`crate::specialists`]), and the chats a chat's agent started, as
 //! the card in its turns lists them.
 //!
-//! A chat started as a profile keeps the profile's name and its limits
+//! A chat started as a specialist keeps the specialist's name and its limits
 //! with the values the user chose for settings, as chat-wide ones, so
 //! they last through upgrades and moves to other agents, and each
-//! session opens with them again. The profile's role goes before its
+//! session opens with them again. The specialist's role goes before its
 //! first message, as a piece of text of its own, and the model, effort
 //! and mode it asks for are chosen as its first session opens, once the
 //! agent has said what it offers.
@@ -18,19 +18,19 @@ use clackatoo_protocol::{
     ToolKind,
 };
 
-use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, Message, PROFILE_SETTING, tool_kind};
+use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, Message, SPECIALIST_SETTING, tool_kind};
 use crate::handover;
-use crate::profiles::{self, Limits};
+use crate::specialists::{self, Limits};
 
 /// The most of a chat's first message a card shows as its task, in
 /// characters.
 const TASK: usize = 80;
 
-/// The settings a chat started as a profile asks for as its first
+/// The settings a chat started as a specialist asks for as its first
 /// session opens, where its agent offers them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Wanted {
-    /// The model, as the profile names it: `haiku` picks "Haiku 5.5".
+    /// The model, as the specialist names it: `haiku` picks "Haiku 5.5".
     pub(crate) model: Option<String>,
     /// How hard it thinks.
     pub(crate) effort: Option<String>,
@@ -52,8 +52,8 @@ pub(crate) struct Standing {
     pub(crate) root: Option<TerminalId>,
     /// How many chats started by agents lead down to it.
     pub(crate) depth: u8,
-    /// The profile it was started as, if one.
-    pub(crate) profile: Option<String>,
+    /// The specialist it was started as, if one.
+    pub(crate) specialist: Option<String>,
     /// What it may do beyond its agent's own settings.
     pub(crate) limits: Limits,
     /// The user had it in a pane and sent it back.
@@ -68,7 +68,7 @@ pub(crate) struct Standing {
 
 impl HostedChat {
     /// It's made again as the daemon starts afresh, as a chat an agent
-    /// started that stood as `standing` says: its parent, profile and
+    /// started that stood as `standing` says: its parent, specialist and
     /// limits, together, and the mode it had chosen, asked for as its
     /// session opens, if it's no more than its parent's (or with no
     /// parent, than the safest): else the safest, never the mode a new
@@ -79,7 +79,7 @@ impl HostedChat {
             parent,
             root,
             depth,
-            profile,
+            specialist,
             limits,
             kept,
             mode,
@@ -88,23 +88,30 @@ impl HostedChat {
         self.relations.parent = parent;
         self.relations.root = parent.and(root);
         self.relations.depth = depth;
-        self.starting_mode = None;
+        let delegated = parent.is_some() || depth > 0;
+        if delegated {
+            self.starting_mode = None;
+        }
         self.chosen
-            .retain(|(id, _)| id != PROFILE_SETTING && id != LIMITS_SETTING);
-        if let Some(profile) = profile {
-            (self.chosen).push((PROFILE_SETTING.to_owned(), profile));
+            .retain(|(id, _)| id != SPECIALIST_SETTING && id != LIMITS_SETTING);
+        if let Some(specialist) = specialist {
+            (self.chosen).push((SPECIALIST_SETTING.to_owned(), specialist));
         }
         (self.chosen).push((LIMITS_SETTING.to_owned(), limits.name().to_owned()));
         if kept {
             self.keep_for_user();
         }
         let saved = mode.as_ref().map(|(_, value)| value.as_str());
-        let value = super::modes::restored(&self.agent, saved, cap.as_deref());
-        match (value, mode) {
+        let value = if delegated {
+            super::modes::restored(&self.agent, saved, cap.as_deref())
+        } else {
+            saved
+        };
+        match (value, mode.as_ref()) {
             (Some(value), Some((setting, _))) => {
-                self.chosen.retain(|(id, _)| *id != setting);
+                self.chosen.retain(|(id, _)| id != setting);
                 (self.chosen).push((setting.clone(), value.to_owned()));
-                self.restored_mode = Some((setting, value.to_owned()));
+                self.restored_mode = Some((setting.clone(), value.to_owned()));
             }
             // Its setting's ID isn't known until its session opens.
             (Some(value), None) => self.starting_mode = Some(value.to_owned()),
@@ -164,10 +171,10 @@ impl HostedChat {
         }
     }
 
-    /// The profile it was started as, if it was.
-    pub(crate) fn profile(&self) -> Option<&str> {
+    /// The specialist it was started as, if it was.
+    pub(crate) fn specialist(&self) -> Option<&str> {
         (self.chosen.iter())
-            .find(|(id, _)| id == PROFILE_SETTING)
+            .find(|(id, _)| id == SPECIALIST_SETTING)
             .map(|(_, value)| value.as_str())
     }
 
@@ -440,19 +447,19 @@ impl HostedChat {
         (setting.choices.iter()).position(|choice| choice.value == setting.value)
     }
 
-    /// It's started as the profile `profile`, with `limits`: `role` goes
+    /// It's started as the specialist `specialist`, with `limits`: `role` goes
     /// before its first message, and it asks for `wanted` as its first
     /// session opens.
     pub(crate) fn start_as(
         &mut self,
-        profile: &str,
+        specialist: &str,
         limits: Limits,
         role: Option<String>,
         wanted: Wanted,
     ) {
         self.chosen
-            .retain(|(id, _)| id != PROFILE_SETTING && id != LIMITS_SETTING);
-        (self.chosen).push((PROFILE_SETTING.to_owned(), profile.to_owned()));
+            .retain(|(id, _)| id != SPECIALIST_SETTING && id != LIMITS_SETTING);
+        (self.chosen).push((SPECIALIST_SETTING.to_owned(), specialist.to_owned()));
         (self.chosen).push((LIMITS_SETTING.to_owned(), limits.name().to_owned()));
         self.role = role;
         self.wanted = Some(wanted);
@@ -484,13 +491,13 @@ impl HostedChat {
             let Some(setting) = self.setting_of(kind) else {
                 continue;
             };
-            match profiles::pick(&setting.choices, &want) {
+            match specialists::pick(&setting.choices, &want) {
                 Some(choice) => chosen.push((setting.id.clone(), choice.value.clone())),
                 None => missing.push(format!("{} {want:?}", setting.name.to_lowercase())),
             }
         }
         // Said, so the user sees why it's on the agent's own choice, which
-        // may cost more than the profile meant.
+        // may cost more than the specialist meant.
         if !missing.is_empty() {
             self.set_notice(Some(format!(
                 "{} offers no single {}, so it's on its own choice",
@@ -624,7 +631,7 @@ impl HostedChat {
         Subagent {
             chat: self.id,
             agent: self.node.agent.clone(),
-            profile: self.profile().map(str::to_owned),
+            specialist: self.specialist().map(str::to_owned),
             model: self.model_name().map(str::to_owned),
             task: short,
             status,
@@ -663,15 +670,15 @@ impl HostedChat {
 }
 
 /// The piece of text that goes before the first message of a chat
-/// started as `profile`, with its `role` and `limits`, if there's
+/// started as `specialist`, with its `role` and `limits`, if there's
 /// anything to say.
-pub(crate) fn role_for(profile: &str, role: &str, limits: Limits) -> Option<String> {
+pub(crate) fn role_for(specialist: &str, role: &str, limits: Limits) -> Option<String> {
     let told = limits.told();
     if role.trim().is_empty() && told.is_none() {
         return None;
     }
     let mut text = format!(
-        "[clackatoo started this chat for another agent, as its {profile:?} profile. This is \
+        "[This chat uses clackatoo's {specialist:?} specialist. This is \
          your role, from clackatoo, not a message:]\n"
     );
     if !role.trim().is_empty() {

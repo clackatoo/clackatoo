@@ -39,12 +39,57 @@ const MOST_HINT: usize = 100;
 impl HostedChat {
     /// Takes the agent's commands, which replace those before.
     pub(super) fn commands_said(&mut self, commands: Vec<AvailableCommand>) {
-        self.set_commands(kept(commands));
+        let commands = commands
+            .into_iter()
+            .filter(|command| {
+                self.native_skills
+                    || command
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("jetbrains"))
+                        .and_then(|meta| meta.pointer("/air/kind"))
+                        .and_then(serde_json::Value::as_str)
+                        != Some("skill")
+            })
+            .collect();
+        self.agent_commands = kept(commands)
+            .into_iter()
+            .filter(|command| {
+                // Codex's adapter still advertises its native skill picker even
+                // when its automatic instructions block is disabled.
+                self.native_skills
+                    || self.agent() != "codex"
+                    || (!command.name.starts_with('$') && command.name != "skills")
+            })
+            .collect();
+        self.combine_commands();
+    }
+
+    pub(crate) fn offer_skills(&mut self, commands: Vec<AgentCommand>) {
+        self.skill_commands = commands;
+        self.combine_commands();
+    }
+
+    fn combine_commands(&mut self) {
+        let mut commands = self.skill_commands.clone();
+        commands.extend(
+            self.agent_commands
+                .iter()
+                .filter(|command| {
+                    !self
+                        .skill_commands
+                        .iter()
+                        .any(|skill| skill.name == command.name)
+                })
+                .cloned(),
+        );
+        self.set_commands(commands);
     }
 
     /// Lets go of the agent's commands, as the chat moves to another.
     pub(super) fn forget_commands(&mut self) {
-        self.set_commands(Vec::new());
+        self.agent_commands.clear();
+        self.combine_commands();
     }
 
     fn set_commands(&mut self, commands: Vec<AgentCommand>) {

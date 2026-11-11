@@ -1129,6 +1129,9 @@ impl Daemon {
     /// The chat `id`, summed up.
     pub(super) fn chat_summary(&self, id: TerminalId) -> Option<ChatSummary> {
         let chat = self.chat_ref(id)?;
+        if chat.side_parent().is_some() {
+            return None;
+        }
         let node = chat.node();
         let active = node.turns.last().map_or(0, |turn| {
             turn.end
@@ -1145,7 +1148,7 @@ impl Daemon {
             parent: chat.relations().parent,
             workspace: self.workspace_of_chat(id),
             active,
-            profile: chat.profile().map(str::to_owned),
+            specialist: chat.specialist().map(str::to_owned),
             failed: Some(
                 (node.turns.last().and_then(|turn| turn.end.as_ref()))
                     .is_some_and(|end| matches!(end.outcome, Outcome::Failed(_))),
@@ -1164,7 +1167,8 @@ impl Daemon {
                     .find_pane(pane)
                     .map(|(workspace, ..)| workspace.id);
             }
-            id = self.chat_ref(id)?.relations().parent?;
+            let chat = self.chat_ref(id)?;
+            id = chat.side_parent().or(chat.relations().parent)?;
         }
         None
     }

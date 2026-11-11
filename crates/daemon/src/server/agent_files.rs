@@ -551,6 +551,20 @@ impl Daemon {
         path: &Path,
         (line, limit): (Option<u32>, Option<u32>),
     ) {
+        if self
+            .chat_in(name, session)
+            .is_some_and(|(_, chat)| chat.side_parent().is_some())
+        {
+            self.answer_agent(
+                agent,
+                request,
+                Err((
+                    crate::agent::FAILED,
+                    "Side questions cannot read files.".into(),
+                )),
+            );
+            return;
+        }
         let result = self
             .read_file(name, session, path)
             .map(|(chat, path, text)| {

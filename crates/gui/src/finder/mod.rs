@@ -79,11 +79,13 @@ pub(crate) enum Kind {
     /// The symbols in the focused editor's file, as its language server
     /// lists them, in the order of its outline.
     Symbols,
-    /// The symbols in the project whose names match what's typed, as the
-    /// focused editor's language server finds them.
+    /// Project symbols from the shared index, or from the language server
+    /// when connected to an older daemon.
     ProjectSymbols,
     /// The background tabs: the workspace shown's, then the others'.
     Background,
+    /// Daemon background work, separate from terminal commands.
+    Work,
     /// The messages sent in the focused chat, the newest first, to put
     /// one in its box (see `chat::prompts`).
     Prompts,
@@ -107,6 +109,7 @@ impl Kind {
             Self::Symbols => "Symbols",
             Self::ProjectSymbols => "Project symbols",
             Self::Background => "Background",
+            Self::Work => "Background work",
             Self::Prompts => "Messages sent",
             Self::Branches => "Branches",
         }
@@ -124,7 +127,12 @@ impl Kind {
     fn local(self) -> bool {
         matches!(
             self,
-            Self::Lessons | Self::News | Self::Background | Self::Prompts | Self::Branches
+            Self::Lessons
+                | Self::News
+                | Self::Background
+                | Self::Work
+                | Self::Prompts
+                | Self::Branches
         )
     }
 }
@@ -284,6 +292,7 @@ pub(crate) struct Finder {
     /// What the list says in place of how many things match, for now: as
     /// that a second key is needed.
     note: Option<String>,
+    remembered: Option<Entry>,
 }
 
 /// Something for a list the window makes itself: what [`Opening::path`]
@@ -329,6 +338,7 @@ impl Finder {
             preview: Preview::default(),
             local_previews: Vec::new(),
             note: None,
+            remembered: None,
         }
     }
 
@@ -465,8 +475,14 @@ impl Finder {
         }
     }
 
-    /// The query to a file's language server whose answer fills the list,
-    /// until it comes.
+    /// Refresh partial indexed results while keeping the selected location.
+    pub(crate) fn refreshing(&mut self, id: u64) {
+        let picked = self.picked().cloned();
+        self.searching(id);
+        self.remembered = picked;
+    }
+
+    /// The query whose answer fills the file-symbol picker, until it comes.
     pub(crate) fn asking(&self) -> Option<u64> {
         self.asking
     }
@@ -506,6 +522,7 @@ impl Finder {
 
     /// Takes in some of what the daemon's search found.
     pub(crate) fn found(&mut self, found: Found) {
+        let is_symbols = matches!(found, Found::Symbols(_));
         match found {
             Found::Root { path, name } => self.root = Some((path, name)),
             Found::Files(files) => {
@@ -581,6 +598,15 @@ impl Finder {
                     self.push_symbol(path, symbol, true);
                 }
             }
+            Found::IndexStatus {
+                complete,
+                scanning,
+                files,
+                message,
+                ..
+            } => {
+                self.note = Some(index_note(complete, scanning, files, message));
+            }
             Found::Preview { .. } => {}
             Found::Done(done) => {
                 self.search = None;
@@ -588,6 +614,15 @@ impl Finder {
             }
         }
         self.ranking.add(&self.items);
+        if is_symbols
+            && let Some(picked) = self.remembered.take()
+            && let Some(at) = self
+                .entries
+                .iter()
+                .position(|entry| entry.path == picked.path && entry.at == picked.at)
+        {
+            self.picker.set_selected(at);
+        }
     }
 
     /// Adds a line of a file, line `line` of `path`, whose text is `text`
@@ -677,6 +712,7 @@ impl Finder {
         fn stroke / describe_stroke(&mut self, stroke: Stroke) -> Outcome;
         prepare {
             let background = self.kind == Kind::Background;
+            let work = self.kind == Kind::Work;
         }
         match stroke => {
             Stroke::Escape | Stroke::Char { ch: 'c', ctrl: true } =>
@@ -689,8 +725,8 @@ impl Finder {
             Stroke::Char { ch: 'v' | 'x' | 't', ctrl: true } if background =>
                 Hint::Action("Bring back background tab"),
                 self.open(Place::Here);
-            Stroke::Char { ch: 'd', ctrl: true } if background =>
-                Hint::Action("Dismiss background tab"),
+            Stroke::Char { ch: 'd', ctrl: true } if background || work =>
+                Hint::Action("Cancel work or dismiss outcome"),
                 match self.picked() {
                     Some(entry) => Outcome::Dismiss(entry.path.clone()),
                     None => Outcome::NothingPicked,
@@ -933,7 +969,11 @@ impl Finder {
             title: self.kind.title(),
             place: self.root.as_ref().map(|(_, name)| name.clone()),
             query: picker::drawn(self.picker.query()),
-            count: self.note.clone().unwrap_or_else(|| self.count()),
+            count: if self.kind == Kind::Work && cols < 55 {
+                "Ctrl+D".into()
+            } else {
+                self.note.clone().unwrap_or_else(|| self.count())
+            },
             selected: self.picker.shown_selected(count),
             rows: shown,
             preview,
@@ -946,6 +986,9 @@ impl Finder {
     /// looking failed, which the count says, and not when it stopped short
     /// of all there was, where more might.
     fn nothing_matches(&self, cols: usize) -> Option<String> {
+        if self.kind == Kind::Work && self.entries.is_empty() && self.picker.query().is_empty() {
+            return Some("No background work".into());
+        }
         let looking = self.search.or(self.asking).is_some();
         let unsure = matches!(self.done, Some(Done::Failed(_) | Done::CutShort));
         if self.picker.query().is_empty() || self.ranking.len() > 0 || looking || unsure {
@@ -1035,7 +1078,10 @@ impl Finder {
             let lines = self.local_previews.get(index)?;
             // A background tab's screen, or a message, as it is: no line
             // numbers.
-            if matches!(self.kind, Kind::Background | Kind::Prompts | Kind::Branches) {
+            if matches!(
+                self.kind,
+                Kind::Background | Kind::Work | Kind::Prompts | Kind::Branches
+            ) {
                 return Some(PreviewView::screen(lines, (rows, cols)));
             }
             return Some(PreviewView::new(0, lines, None, (rows, cols)));
@@ -1138,3 +1184,15 @@ fn symbol_kind(kind: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+fn index_note(complete: bool, scanning: bool, files: u64, message: String) -> String {
+    if !message.is_empty() {
+        message
+    } else if scanning {
+        format!("Indexing… {files} files · partial results")
+    } else if !complete {
+        format!("Partial index · {files} files")
+    } else {
+        format!("{files} indexed files")
+    }
+}

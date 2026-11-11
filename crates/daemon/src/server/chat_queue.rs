@@ -1,5 +1,5 @@
 //! Accept and dispatch user messages through the existing chat lifecycle.
-use clackatoo_protocol::{ChatAction, Error, TerminalId};
+use clackatoo_protocol::{Error, TerminalId};
 
 use super::Daemon;
 
@@ -12,6 +12,32 @@ impl Daemon {
         target: Option<clackatoo_protocol::ChatTarget>,
         steer: bool,
     ) -> Result<(), Error> {
+        self.submit_chat_context(
+            chat,
+            super::context::Submission {
+                resolved_context: false,
+                text,
+                images,
+                target,
+                steer,
+            },
+            Vec::new(),
+        )
+    }
+
+    pub(super) fn submit_chat_context(
+        &mut self,
+        chat: TerminalId,
+        submission: super::context::Submission,
+        context: Vec<clackatoo_protocol::ContextSnapshot>,
+    ) -> Result<(), Error> {
+        let super::context::Submission {
+            resolved_context,
+            text,
+            images,
+            target,
+            steer,
+        } = submission;
         if let Some(target) = &target {
             self.config
                 .agents
@@ -33,7 +59,7 @@ impl Daemon {
             state.pause_queue(false);
         }
         let id = state
-            .enqueue_user(text, images, target)
+            .enqueue_user_context(text, images, target, context, resolved_context)
             .map_err(Error::Other)?;
         self.watch_chat_queue(chat);
         // Once accepted, the daemon owns the draft. A dispatch failure must
@@ -88,10 +114,7 @@ impl Daemon {
         let state = self.chat(chat).ok_or(Error::NotAChat(chat))?;
         state.resume_dispatched(id);
         let pending = state.take_queued_user(id).map_err(Error::Other)?;
-        let actions = state.act(ChatAction::SendImages {
-            text: pending.prompt.text,
-            images: pending.prompt.images,
-        });
+        let actions = state.send_captured(pending.prompt);
         self.act(chat, actions);
         self.collect_damage(chat);
         Ok(())

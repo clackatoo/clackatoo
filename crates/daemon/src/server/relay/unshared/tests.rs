@@ -598,7 +598,7 @@ fn a_daemon_relaying_is_told_nothing_of_it() {
         parent: None,
         workspace: Some(WorkspaceId(1)),
         active: 0,
-        profile: None,
+        specialist: None,
         failed: None,
     };
     let chats = ServerMessage::Event(Event::Chats(vec![chat]));
@@ -929,6 +929,14 @@ fn variant(request: &Request) -> &'static str {
         Request::DaemonSettings => "DaemonSettings",
         Request::SetDaemonOption { .. } => "SetDaemonOption",
         Request::Masked { .. } => "Masked",
+        Request::Work(_) => "Work",
+        Request::Skills { .. } => "Skills",
+        Request::Specialists { .. } => "Specialists",
+        Request::SaveSpecialist { .. } => "SaveSpecialist",
+        Request::SpecialistFiles { .. } => "SpecialistFiles",
+        Request::SaveSpecialistFile { .. } => "SaveSpecialistFile",
+        Request::Context { .. } => "Context",
+        Request::Side { .. } => "Side",
     }
 }
 

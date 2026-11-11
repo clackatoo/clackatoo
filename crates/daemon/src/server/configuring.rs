@@ -68,8 +68,25 @@ struct Running {
 #[derive(Debug, Clone)]
 struct Asked {
     token: Token,
-    info: &'static Info,
-    value: Option<Value>,
+    change: Change,
+}
+
+#[derive(Debug, Clone)]
+enum Change {
+    Option {
+        info: &'static Info,
+        value: Option<Value>,
+    },
+}
+impl Asked {
+    fn option_saved(&self, refused: Option<String>) -> OptionSaved {
+        let Change::Option { info, value } = &self.change;
+        OptionSaved {
+            name: info.name.into(),
+            value: value.as_ref().map(Value::text),
+            refused,
+        }
+    }
 }
 
 /// What a run off the loop came to: what the config set, and the daemon's
@@ -164,11 +181,8 @@ impl Daemon {
     /// noticed too.
     fn config_ran(&mut self, job: Option<&Asked>, ran: Ran) {
         let told = job.map(|asked| asked.token);
-        let saved = job.map(|asked| OptionSaved {
-            name: asked.info.name.to_owned(),
-            value: asked.value.as_ref().map(Value::text),
-            refused: ran.as_ref().err().cloned(),
-        });
+        let failure = ran.as_ref().err().cloned();
+        let saved = job.map(|asked| asked.option_saved(failure.clone()));
         // A run as the files changed that comes to what the daemon has, as
         // the one after a window's change does, is told no one; a folder
         // taken away and made again is watched again.
@@ -246,8 +260,27 @@ impl Daemon {
     /// Takes from `fresh`, the daemon's config as its own config is now,
     /// what changes as the daemon runs.
     fn take_live_config(&mut self, fresh: &DaemonConfig) {
+        let claude_plugins = self.config.agents.configured.claude_plugins;
+        let codex_plugins = self.config.agents.configured.codex_plugins;
         self.config.agents.configured = fresh.agents.configured.clone();
+        // Plugin ownership changes the subprocess and its prompt. Existing
+        // runtimes keep one policy until the daemon restarts or upgrades.
+        self.config.agents.configured.claude_plugins = claude_plugins;
+        self.config.agents.configured.codex_plugins = codex_plugins;
         self.refresh_subagent_limits();
+        let chats: Vec<_> = self
+            .terminals
+            .keys()
+            .copied()
+            .filter(|id| self.chat_ref(*id).is_some())
+            .collect();
+        for id in chats {
+            let specialists = self.specialists_for(id);
+            if let Some(chat) = self.chat(id) {
+                chat.offer_specialists(&specialists);
+            }
+            self.collect_damage(id);
+        }
         self.config.long_commands = fresh.long_commands;
         self.config.terminal.widths.vs16 = fresh.terminal.widths.vs16;
         if let (Some(history), Some(fresh)) = (&mut self.config.history, &fresh.history) {
@@ -336,7 +369,7 @@ impl Daemon {
     /// Why the client at `token` can't change the daemon's config, if it
     /// can't: a device on the web app, a daemon relaying, or what serves
     /// agents' tools never can.
-    fn not_a_window(&self, token: Token) -> Option<Error> {
+    pub(super) fn not_a_window(&self, token: Token) -> Option<Error> {
         let window = matches!(
             self.sources.get(token.0),
             Some(Source::Client(client))
@@ -393,11 +426,27 @@ impl Daemon {
                 info.name
             )));
         }
-        let asked = Asked { token, info, value };
+        let asked = Asked {
+            token,
+            change: Change::Option { info, value },
+        };
         self.configuring.jobs.push_back(asked);
         // Started at once, unless a run is under way.
         self.run_config_if_due();
         Ok(Response::Done)
+    }
+
+    pub(super) fn refuse_legacy_specialist_save(&mut self, token: Token) {
+        let Some(ticket) = self.take_place(token) else {
+            return;
+        };
+        self.hand_answer_with(
+            token,
+            ticket,
+            Response::Error(Error::Other(
+                "Update the window to save specialists as SPECIALIST.md files".into(),
+            )),
+        );
     }
 
     /// Before an upgrade allowed to wait until `until`: whether, at `now`,
@@ -406,7 +455,8 @@ impl Daemon {
     /// whole either way.
     pub(super) fn config_holds_upgrade(&self, until: Instant, now: Instant) -> bool {
         now < until
-            && (self.configuring.running.as_ref()).is_some_and(|running| running.job.is_some())
+            && (self.specialist_files_busy()
+                || (self.configuring.running.as_ref()).is_some_and(|running| running.job.is_some()))
     }
 
     /// As the upgrade is about to exec, past anything that could stop it:
@@ -430,12 +480,14 @@ impl Daemon {
             refused.insert(0, job);
         }
         for asked in refused {
-            let saved = OptionSaved {
-                name: asked.info.name.to_owned(),
-                value: asked.value.as_ref().map(Value::text),
-                refused: Some("the daemon upgraded before it was saved: try again".to_owned()),
-            };
-            self.tell_daemon_settings(Some(asked.token), Some(&saved), &[]);
+            let why = "the daemon upgraded before it was saved: try again".to_owned();
+            match &asked.change {
+                Change::Option { .. } => self.tell_daemon_settings(
+                    Some(asked.token),
+                    Some(&asked.option_saved(Some(why))),
+                    &[],
+                ),
+            }
         }
     }
 }
@@ -444,7 +496,10 @@ impl Daemon {
 /// then runs the config.
 fn run_job(dirs: &settings::Dirs, job: Option<Asked>) -> Ran {
     let ran = match job {
-        Some(asked) => settings::change(dirs, asked.info, asked.value),
+        Some(Asked {
+            change: Change::Option { info, value },
+            ..
+        }) => settings::change(dirs, info, value),
         None => settings::rerun(dirs),
     };
     // Made here, off the loop, as it reads the web app's password.
@@ -482,6 +537,22 @@ mod tests {
     use super::*;
     use crate::agents::Launch;
     use crate::server::agent_files::tests::daemon_with_chat;
+
+    #[test]
+    fn native_plugin_policy_waits_for_restart_while_other_agent_settings_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let settings = Settings::from_lua(
+            "daemon.plugins.claude = true\ndaemon.plugins.codex = true\ndaemon.upgrade.keep_agents = false"
+        ).unwrap();
+        let fresh = DaemonConfig::from_settings(&settings);
+        daemon.take_live_config(&fresh);
+        assert!(!daemon.config.agents.configured.native_plugins("claude"));
+        assert!(!daemon.config.agents.configured.native_plugins("codex"));
+        assert!(!daemon.config.agents.configured.keep_agents);
+        assert!(options::find("plugins.claude").unwrap().restart);
+        assert!(options::find("plugins.codex").unwrap().restart);
+    }
 
     /// A change to what runs programs made outside clackatoo, as an agent
     /// writing daemon/init.lua makes, applies, as the config says, and is

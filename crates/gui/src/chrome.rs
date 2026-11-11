@@ -457,6 +457,8 @@ pub(crate) struct Chrome {
     /// workspace's are running, and where: in the failed marks' red if
     /// one failed unseen. A click lists them.
     pub(crate) background: Option<(String, Rect, bool)>,
+    /// Ongoing daemon work, distinct from terminal tabs.
+    pub(crate) work: Option<(String, Rect, bool)>,
     /// A menu, if one is open: its box, and its items.
     pub(crate) menu: Option<(Rect, Vec<(String, Rect)>)>,
     /// Something gone wrong, such as the daemon being out of contact, and
@@ -519,6 +521,7 @@ pub(crate) struct Contents<'a> {
     /// The shown workspace's background tabs, for their icon after the
     /// tabs: shown only while one is running, or failed unseen.
     pub(crate) background: Option<BackgroundIcon>,
+    pub(crate) work: Option<(String, bool)>,
 }
 
 /// What the icon after the tabs says of the shown workspace's background
@@ -732,6 +735,7 @@ impl Chrome {
             &geometry,
             (&status, contents.waiting.as_deref()),
             (&contents.tabs, contents.background),
+            contents.work,
             contents.bottom_shown,
             contents.scrolls.tabs,
         );
@@ -811,6 +815,7 @@ impl Chrome {
             new_workspace,
             new_tab: bottom.new_tab,
             background: bottom.background,
+            work: bottom.work,
             menu,
             alert,
             grant,
@@ -905,6 +910,14 @@ impl Chrome {
         }
         if self.new_tab.is_some_and(|rect| rect.contains(point)) {
             return Hit::NewTab;
+        }
+        if self.bottom_shown
+            && self
+                .work
+                .as_ref()
+                .is_some_and(|(_, rect, _)| rect.contains(point))
+        {
+            return Hit::Work;
         }
         if (self.background.as_ref()).is_some_and(|(_, rect, _)| rect.contains(point)) {
             return Hit::Background;
@@ -1038,8 +1051,18 @@ impl Chrome {
         if let Some(rect) = self.new_tab {
             paint_plus(rect, hover == Hit::NewTab, metrics, &mut painted);
         }
-        if let Some((text, rect, failed)) = &self.background {
-            if hover == Hit::Background {
+        for (text, rect, failed, hit) in [
+            self.background
+                .as_ref()
+                .map(|(text, rect, failed)| (text, rect, failed, Hit::Background)),
+            self.work
+                .as_ref()
+                .map(|(text, rect, failed)| (text, rect, failed, Hit::Work)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if hover == hit {
                 self.push_bottom_fill(*rect, Paint::Hover, &mut painted.fills);
             }
             let bottom = self.geometry.bottom;
@@ -1527,6 +1550,7 @@ struct Bottom {
     tabs: Vec<Item<TabId>>,
     new_tab: Option<Rect>,
     background: Option<(String, Rect, bool)>,
+    work: Option<(String, Rect, bool)>,
     notes: Vec<Note>,
     /// The tabs' strip, and where it's scrolled to now.
     strip: strip::Strip,
@@ -1569,6 +1593,7 @@ fn lay_out_bottom(
     geometry: &Geometry,
     (status, waiting): (&Status, Option<&str>),
     (tabs, background): (&[(TabId, String, bool)], Option<BackgroundIcon>),
+    work: Option<(String, bool)>,
     shown: bool,
     scroll: Scroll,
 ) -> Bottom {
@@ -1632,7 +1657,18 @@ fn lay_out_bottom(
         let width = (mono(&text) + 4.0 * padding).round();
         (text, width, icon.failed.is_some())
     });
-    let plus = if shown { bottom.height } else { 0.0 } + icon.as_ref().map_or(0.0, |icon| icon.1);
+    let work = work.filter(|_| shown).map(|(text, failed)| {
+        let text = if bottom.width < 600.0 {
+            text.replace("Working", "Work")
+        } else {
+            text
+        };
+        let width = (mono(&text) + 4.0 * padding).round();
+        (text, width, failed)
+    });
+    let plus = if shown { bottom.height } else { 0.0 }
+        + icon.as_ref().map_or(0.0, |icon| icon.1)
+        + work.as_ref().map_or(0.0, |work| work.1);
     let cell = metrics.cell[0];
     let full = (tabs_start, (right - plus).max(tabs_start));
     let tab_width = |text: &str| (mono(text) + 6.0 * padding).round();
@@ -1692,6 +1728,19 @@ fn lay_out_bottom(
         y: bottom.y,
         width: bottom.height,
         height: bottom.height,
+    });
+    let work_start = strip.end + bottom.height + icon.as_ref().map_or(0.0, |icon| icon.1);
+    let work = work.map(|(text, width, failed)| {
+        (
+            text,
+            Rect {
+                x: work_start,
+                y: bottom.y,
+                width,
+                height: bottom.height,
+            },
+            failed,
+        )
     });
     let background = icon.map(|(text, width, failed)| {
         let rect = Rect {
@@ -1771,6 +1820,7 @@ fn lay_out_bottom(
         tabs: items,
         new_tab,
         background,
+        work,
         notes,
         strip,
         cut,
@@ -2837,6 +2887,8 @@ pub(crate) enum Hit {
     NewTab,
     /// The background tabs' icon, which lists them.
     Background,
+    /// Inspect daemon background work.
+    Work,
     /// The badge of a chat's access to the window, which goes to the
     /// chat...
     Grant,
@@ -2934,6 +2986,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         )
@@ -3002,6 +3055,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         );
@@ -3048,6 +3102,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         );
@@ -3108,6 +3163,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         );
@@ -3277,6 +3333,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         );
@@ -3333,6 +3390,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             };
             let chrome = Chrome::new(Geometry::new([width, 600], METRICS), contents, &mut measure);
             (chrome.workspaces.iter())
@@ -3559,6 +3617,7 @@ mod tests {
                 waiting: which.as_ref().map(|_| "^B".to_owned()),
                 which_keys: which,
                 background: None,
+                work: None,
             },
             &mut measure,
         )
@@ -3790,6 +3849,7 @@ mod tests {
                     waiting: Some("^B".into()),
                     which_keys: Some(ctrl_b()),
                     background: None,
+                    work: None,
                 },
                 &mut measure,
             );
@@ -3968,6 +4028,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         );
@@ -4003,6 +4064,7 @@ mod tests {
                     waiting: None,
                     which_keys: None,
                     background: None,
+                    work: None,
                 },
                 &mut measure,
             )
@@ -4054,6 +4116,7 @@ mod tests {
                         waiting: None,
                         which_keys: None,
                         background: None,
+                        work: None,
                     },
                     &mut measure,
                 );
@@ -4116,6 +4179,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut measure,
         );

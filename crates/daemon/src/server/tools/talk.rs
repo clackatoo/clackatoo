@@ -27,7 +27,7 @@
 //! - `start_chat` starts chats only inside the sender's project, and with
 //!   another agent only if it offers modes; the chat started gets the
 //!   sender's Tools setting and mode, or that agent's safest, and its
-//!   limits, if its profile's are fewer (see `subagents.rs`);
+//!   limits, if its specialist's are fewer (see `subagents.rs`);
 //! - what a message says reaches the other chat with its control
 //!   characters, and those that reorder text, shown, so none hides
 //!   anything from the user.
@@ -460,7 +460,7 @@ impl Daemon {
                 limits.started
             ));
         }
-        self.unstartable(own.agent(), starts)
+        self.unstartable(chat, own.agent(), starts)
     }
 
     /// The chats agents started, open now.
@@ -875,17 +875,20 @@ impl Daemon {
     }
 
     /// Why one of `starts`, chats a chat whose agent is `own` asks to
-    /// start, can't be, if one can't: its profile or its agent isn't
+    /// start, can't be, if one can't: its specialist or its agent isn't
     /// there.
-    fn unstartable(&self, own: &str, starts: &[NewChat]) -> Option<String> {
+    fn unstartable(&self, chat: TerminalId, own: &str, starts: &[NewChat]) -> Option<String> {
         for new in starts {
-            let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
-            let profile = match self.config.agents.profile(profile) {
-                Ok(profile) => profile,
+            let specialist = new
+                .specialist
+                .as_deref()
+                .unwrap_or(crate::specialists::DEFAULT);
+            let specialist = match self.specialist_for(chat, specialist, true) {
+                Ok(specialist) => specialist,
                 Err(why) => return Some(why),
             };
             let name = (new.agent.as_deref())
-                .or(profile.agent.as_deref())
+                .or(specialist.agent.as_deref())
                 .unwrap_or(own);
             if let Err(why) = self.config.agents.find(name) {
                 return Some(format!("there's no agent {name:?} to start: {why}"));
@@ -948,13 +951,13 @@ impl Daemon {
                 (None, Some(workspace)) => format!("in the background, workspace {workspace:?}"),
                 (_, None) => "in no pane".to_owned(),
             };
-            let profile = other
-                .profile()
-                .map(|profile| format!(", as {profile}"))
+            let specialist = other
+                .specialist()
+                .map(|specialist| format!(", as {specialist}"))
                 .unwrap_or_default();
             let _ = write!(
                 text,
-                "- chat {id}: {}{profile}, {:?}, in {}, {place}: {}",
+                "- chat {id}: {}{specialist}, {:?}, in {}, {place}: {}",
                 other.agent_title(),
                 other.info().title,
                 other.working_directory(),
@@ -1591,7 +1594,7 @@ impl Daemon {
             return Some(FinishedChat {
                 chat: child,
                 agent: kid.node().agent.clone(),
-                profile: kid.profile().map(str::to_owned),
+                specialist: kid.specialist().map(str::to_owned),
                 asked: String::new(),
                 started: 0,
                 ended: 0,
@@ -1613,7 +1616,7 @@ impl Daemon {
         Some(FinishedChat {
             chat: child,
             agent: kid.node().agent.clone(),
-            profile: kid.profile().map(str::to_owned),
+            specialist: kid.specialist().map(str::to_owned),
             asked: asked.map_or_else(String::new, |turn| quote(&turn.prompt)),
             started: asked.map_or(0, |turn| turn.sent),
             ended: ended.map_or(0, |end| end.at),
@@ -1625,25 +1628,28 @@ impl Daemon {
     /// Gives back what notices that chats finished said of them to those
     /// a build before handover version 48 handed over without it
     /// (CLACKA-244), read from what they told their agents, with each
-    /// chat's agent and profile as they are now, if it's still open.
+    /// chat's agent and specialist as they are now, if it's still open.
     pub(in crate::server) fn recover_notices(&mut self) {
         let known: BTreeMap<TerminalId, (String, Option<String>)> = (self.terminals.iter())
             .filter_map(|(&id, slot)| {
                 let chat = slot.terminal.chat_ref()?;
                 Some((
                     id,
-                    (chat.node().agent.clone(), chat.profile().map(str::to_owned)),
+                    (
+                        chat.node().agent.clone(),
+                        chat.specialist().map(str::to_owned),
+                    ),
                 ))
             })
             .collect();
         let read = |text: &str| -> Vec<FinishedChat> {
             (finished_in(text).into_iter())
                 .map(|(chat, outcome, answer)| {
-                    let (agent, profile) = known.get(&chat).cloned().unwrap_or_default();
+                    let (agent, specialist) = known.get(&chat).cloned().unwrap_or_default();
                     FinishedChat {
                         chat,
                         agent,
-                        profile,
+                        specialist,
                         asked: String::new(),
                         started: 0,
                         ended: 0,
@@ -2843,7 +2849,7 @@ mod tests {
     #[test]
     fn a_chat_in_the_background_keeps_its_limits_its_anchor_and_its_card_through_an_upgrade() {
         use crate::chat::Wanted;
-        use crate::profiles::Limits;
+        use crate::specialists::Limits;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
@@ -2863,7 +2869,7 @@ mod tests {
         daemon.note_subagent(b);
         let entry = daemon.chat_ref(a).unwrap().subagent(b).cloned().unwrap();
         assert_eq!(
-            (entry.profile.as_deref(), entry.shown),
+            (entry.specialist.as_deref(), entry.shown),
             (Some("explore"), false)
         );
         assert_eq!(entry.task, "look");
@@ -2876,7 +2882,7 @@ mod tests {
         drop(daemon);
         let resumed = Daemon::resume(handover, config).unwrap();
         assert_eq!(resumed.chat_ref(b).unwrap().limits(), Limits::ReadOnly);
-        assert_eq!(resumed.chat_ref(b).unwrap().profile(), Some("explore"));
+        assert_eq!(resumed.chat_ref(b).unwrap().specialist(), Some("explore"));
         let card = resumed.chat_ref(a).unwrap().subagent(b).cloned().unwrap();
         assert_eq!((card.task.as_str(), card.turn), ("look", 0));
         assert_eq!(resumed.anchor_pane(b), Some(pane));
@@ -2941,6 +2947,7 @@ mod tests {
 
     fn turn(items: Vec<Item>) -> Turn {
         Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),

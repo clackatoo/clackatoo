@@ -74,7 +74,7 @@ try {
   await page.locator('.conversation').evaluate(e=>{e.scrollTop=e.scrollHeight;});
   await noOverflow();
   await page.screenshot({path:`${output}/phone-chat.png`});
-  assert.equal(await page.locator('.composer-bar button').count(),2,'composer should only expose model/settings and usage');
+  assert.equal(await page.locator('.composer-bar button').count(),4,'composer exposes model/settings, usage, context and side questions');
   assert.equal(await page.locator('.turn').count(),8,'opening should only render the recent page');
   assert.equal(await page.locator('.turn').first().getAttribute('data-turn'),'32');
   const tightComposer=async()=>{
@@ -87,6 +87,58 @@ try {
     assert(gap>=-1 && gap<=7,`composer bottom gap ${gap}px`);
   };
   await tightComposer();
+  // Workspace attachments use the shared daemon search/preview API on a phone.
+  await page.getByRole('button',{name:'+ Context · 0',exact:true}).click();
+  await page.getByRole('heading',{name:'Workspace context',exact:true}).waitFor();
+  await page.getByLabel('Find workspace context').fill('auth');
+  await page.locator('.context-results').getByRole('button',{name:'src/auth.rs',exact:true}).click();
+  await page.locator('.context-preview').getByText('fn authenticate',{exact:false}).waitFor();
+  await page.getByLabel('Context line range').fill('1-3');
+  await page.getByRole('button',{name:'Narrow lines',exact:true}).click();
+  await page.getByRole('button',{name:'Attach',exact:true}).click();
+  await page.locator('.context-attached').waitFor();
+  await noOverflow();
+  await page.screenshot({path:`${output}/phone-context.png`});
+  await page.setViewportSize({width:320,height:568});
+  await noOverflow();
+  await page.screenshot({path:`${output}/small-phone-context.png`});
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('.context-attached').getByRole('button',{name:'Remove',exact:true}).click();
+  await page.locator('.sheet-close').click();
+
+  // Side questions use a parent-scoped sheet and leave the main draft intact.
+  await page.locator('#message').fill('Unsent main draft');
+  await page.getByRole('button',{name:'Side question',exact:true}).click();
+  const side=page.getByRole('dialog',{name:'Side question',exact:true});
+  await side.waitFor();
+  await side.getByLabel('Side question',{exact:true}).fill('Why cookies?');
+  await side.getByRole('button',{name:'Send',exact:true}).click();
+  await side.getByText('Use HTTP-only cookies',{exact:false}).waitFor();
+  assert.equal(await page.locator('#message').inputValue(),'Unsent main draft');
+  await side.getByLabel('Side question',{exact:true}).fill('Unsent side follow-up');
+  await page.waitForTimeout(600);
+  assert.equal(await side.getByLabel('Side question',{exact:true}).inputValue(),'Unsent side follow-up');
+  await noOverflow();
+  await page.screenshot({path:`${output}/phone-side-question.png`});
+  await page.setViewportSize({width:320,height:568});
+  await noOverflow();
+  await page.screenshot({path:`${output}/small-phone-side-question.png`});
+  await page.setViewportSize({width:390,height:844});
+  await side.locator('.sheet-close').click();
+  await page.getByRole('button',{name:'Side question',exact:true}).click();
+  await side.getByLabel('Side question',{exact:true}).waitFor();
+  assert.equal(await side.getByLabel('Side question',{exact:true}).inputValue(),'Unsent side follow-up');
+  await side.getByRole('button',{name:'Send to main',exact:true}).click();
+  await side.waitFor({state:'detached'});
+  await page.getByRole('button',{name:'+ Context · 1',exact:true}).waitFor();
+  assert.equal(await page.locator('#message').inputValue(),'Unsent main draft');
+  await page.getByRole('button',{name:'+ Context · 1',exact:true}).click();
+  await page.locator('.context-attached').getByRole('button',{name:'Remove',exact:true}).click();
+  await page.locator('.sheet-close').click();
+  await page.getByRole('button',{name:'Side question',exact:true}).click();
+  await side.getByRole('button',{name:'Discard',exact:true}).click();
+  await side.waitFor({state:'detached'});
+  await page.locator('#message').fill('');
 
   // The real file input, local decode/PNG normalization, thumbnails and wire
   // submission. No provider credentials or model requests are involved.
@@ -168,7 +220,7 @@ try {
   await page.locator('#message').fill('delayed');
   await page.getByRole('button',{name:'Queue message',exact:true}).click();
   await page.getByRole('button',{name:'All agents',exact:true}).click();
-  await page.waitForFunction(()=>sessionStorage.getItem('clackatoo.draft.1')===null);
+  await page.waitForFunction(()=>sessionStorage.getItem(`clackatoo.draft.${sessionStorage.getItem('clackatoo.run')}.1`)===null);
   await page.reload();
   await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).click();
   await page.locator('#message').waitFor();

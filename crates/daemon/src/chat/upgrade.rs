@@ -77,12 +77,17 @@ impl HostedChat {
             return false;
         }
         self.role = continuation.pending.as_ref().and_then(|p| p.role.clone());
+        let pending_context = self.node.turns[index].context.clone();
         let mut prompt = match continuation.pending {
             Some(pending) => Prompt {
+                resolved_context: !pending_context.is_empty(),
+                context: pending_context,
                 text: pending.text,
                 images: pending.images.into_iter().map(restore_image).collect(),
             },
             None => Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: CONTINUE.to_owned(),
                 images: Vec::new(),
             },

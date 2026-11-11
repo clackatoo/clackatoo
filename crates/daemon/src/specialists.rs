@@ -1,33 +1,180 @@
-//! Profiles: the kinds of chat an agent starts another chat as, such as
-//! `explore`, for cheap research that changes nothing. They're
-//! clackatoo's, not any agent's: a profile maps onto Claude Code, Codex
+//! Specialists: the kinds of chat an agent starts another chat as, such as
+//! `explore`, for quick code lookups, and `research`, for deeper investigation. They're
+//! clackatoo's, not any agent's: a specialist maps onto Claude Code, Codex
 //! or an agent of the user's alike.
 //!
-//! A profile has a name, a role, which goes before the chat's first
+//! A specialist has a name, a role, which goes before the chat's first
 //! message, limits on what the chat may do, and the agent, model and
-//! effort it starts with by default. Three are built in:
+//! effort it starts with by default. Four are built in:
 //!
 //! - `explore`: the agent's cheapest model, read-only, answering briefly;
+//! - `research`: the parent's model and effort, read-only, investigating deeply;
 //! - `plan`: a strong model that changes nothing and returns a plan;
 //! - `general`: the parent's agent and model, with no role or limits.
 //!
-//! The user adds their own, or changes the built-in ones, in the
-//! daemon's config (see [`crate::settings`]), read as it starts:
-//!
-//! ```lua
-//! daemon.profiles.review = {
-//!   about = "Reviews a change for bugs",
-//!   agent = "codex",
-//!   model = "gpt-6-luna",          -- or a table, by agent: { claude = "haiku" }
-//!   effort = "low",
-//!   limits = "read-only",          -- or "no-commands", or "none"
-//!   prompt = "You review changes for bugs. Say what's wrong, briefly.",
-//! }
-//! ```
-//!
-//! How far limits hold depends on the agent (see [`Limits`]).
+//! Custom specialists are Markdown packages in .agents/specialists or the
+//! clackatoo config's specialists directory. See `skills::specialist_files`.
 
 use clackatoo_protocol::SettingChoice;
+use serde::{Deserialize, Serialize};
+
+/// Optional capabilities and launch restrictions shared by configured and
+/// packaged specialists. None means inherit, while an empty list selects none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Extras {
+    pub(crate) when_to_use: String,
+    pub(crate) user_invocable: bool,
+    pub(crate) agent_invocable: bool,
+    pub(crate) delegates_to: Option<Vec<String>>,
+    pub(crate) skills: Option<Vec<String>>,
+    pub(crate) skillsets: Option<Vec<String>>,
+    pub(crate) budget: Budget,
+    pub(crate) directories: Vec<std::path::PathBuf>,
+}
+
+impl Default for Extras {
+    fn default() -> Self {
+        Self {
+            when_to_use: String::new(),
+            user_invocable: true,
+            agent_invocable: true,
+            delegates_to: None,
+            skills: None,
+            skillsets: None,
+            budget: Budget::default(),
+            directories: Vec::new(),
+        }
+    }
+}
+
+/// Per-request ceilings. USD is kept in millionths to avoid rounding while
+/// inheriting a ceiling. Turn and cost limits require native runtime support.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Budget {
+    pub(crate) seconds: Option<u64>,
+    pub(crate) turns: Option<u32>,
+    pub(crate) usd_micros: Option<u64>,
+}
+
+impl Budget {
+    pub(crate) fn capped(self, parent: Self) -> Self {
+        fn cap<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        }
+        Self {
+            seconds: cap(self.seconds, parent.seconds),
+            turns: cap(self.turns, parent.turns),
+            usd_micros: cap(self.usd_micros, parent.usd_micros),
+        }
+    }
+
+    pub(crate) fn check(self, agent: &str) -> Result<(), String> {
+        if agent != "claude" && (self.turns.is_some() || self.usd_micros.is_some()) {
+            return Err(format!(
+                "{agent} cannot enforce specialist turn or USD budgets through its adapter; use a time budget or Claude Code"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Extras {
+    pub(crate) fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        let mut extra = Self::default();
+        if let Some(value) = value.get("when_to_use") {
+            extra.when_to_use = value.as_str().ok_or("when_to_use must be a string")?.into();
+        }
+        for (name, target) in [
+            ("user_invocable", &mut extra.user_invocable),
+            ("agent_invocable", &mut extra.agent_invocable),
+        ] {
+            if let Some(value) = value.get(name) {
+                *target = value
+                    .as_bool()
+                    .ok_or_else(|| format!("{name} must be true or false"))?;
+            }
+        }
+        for (name, target) in [
+            ("delegates_to", &mut extra.delegates_to),
+            ("skills", &mut extra.skills),
+            ("skillsets", &mut extra.skillsets),
+        ] {
+            if let Some(value) = value.get(name) {
+                let values = value
+                    .as_array()
+                    .ok_or_else(|| format!("{name} must be a list of names"))?;
+                if values.len() > 256 {
+                    return Err(format!("{name} has more than 256 entries"));
+                }
+                *target = Some(
+                    values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .filter(|value| !value.trim().is_empty())
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("{name} entries must be nonempty strings"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+        }
+        if let Some(limits) = value.get("limits").and_then(serde_json::Value::as_object) {
+            for key in limits.keys() {
+                if !["access", "seconds", "turns", "cost_usd"].contains(&key.as_str()) {
+                    return Err(format!("unsupported limit {key}"));
+                }
+            }
+            let number = |name: &str, max: u64| -> Result<Option<u64>, String> {
+                limits
+                    .get(name)
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .filter(|value| *value > 0 && *value <= max)
+                            .ok_or_else(|| format!("limits.{name} must be between 1 and {max}"))
+                    })
+                    .transpose()
+            };
+            extra.budget.seconds = number("seconds", 7 * 24 * 60 * 60)?;
+            extra.budget.turns =
+                number("turns", 1_000_000)?.map(|value| u32::try_from(value).expect("bounded"));
+            if let Some(cost) = limits.get("cost_usd") {
+                let cost = cost
+                    .as_f64()
+                    .filter(|cost| cost.is_finite() && *cost >= 0.000_001 && *cost <= 1_000_000.0)
+                    .ok_or("limits.cost_usd must be a positive USD amount up to 1000000")?;
+                extra.budget.usd_micros =
+                    clackatoo_protocol::Cost::of(cost, "USD").map(|cost| cost.micros);
+            }
+        }
+        Ok(extra)
+    }
+}
+
+pub(crate) fn access(value: Option<&serde_json::Value>) -> Result<Option<Limits>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let value = if value.is_object() {
+        let Some(access) = value.get("access") else {
+            return Ok(None);
+        };
+        access
+    } else {
+        value
+    };
+    let name = value
+        .as_str()
+        .ok_or("limits must be an access name or table")?;
+    Limits::named(name)
+        .map(Some)
+        .ok_or_else(|| format!("unknown access limit {name}; use none, no-commands or read-only"))
+}
 
 /// What a chat may do, beyond what its agent's own settings allow. A chat
 /// started by another never has fewer limits than the chat that started
@@ -47,7 +194,7 @@ use clackatoo_protocol::SettingChoice;
 ///   agent's questions about tools that would edit or run, which is
 ///   enough for an agent that asks first. An agent that writes files
 ///   itself without asking is only asked not to, by its role.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum Limits {
     /// None of its own.
     #[default]
@@ -167,13 +314,14 @@ impl Limits {
 }
 
 /// A kind of chat an agent starts another chat as.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Profile {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Specialist {
     pub(crate) name: String,
     /// What it's for, in a line, for agents choosing one.
-    pub(crate) about: String,
+    pub(crate) description: String,
     /// Its role, which goes before the chat's first message.
-    pub(crate) prompt: String,
+    pub(crate) instructions: String,
     pub(crate) limits: Limits,
     /// The agent it starts with, by name, unless asked for another:
     /// `None` for the parent's.
@@ -185,9 +333,33 @@ pub(crate) struct Profile {
     pub(crate) inherit_model: bool,
     /// How hard it thinks, by the agent it applies to, as `models`.
     pub(crate) efforts: Vec<(String, String)>,
+    pub(crate) extra: Extras,
 }
 
-impl Profile {
+impl Default for Specialist {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            instructions: String::new(),
+            limits: Limits::None,
+            agent: None,
+            models: Vec::new(),
+            inherit_model: false,
+            efforts: Vec::new(),
+            extra: Extras::default(),
+        }
+    }
+}
+
+impl Specialist {
+    /// Supporting paths in instructions are relative to the owning bundle.
+    pub(crate) fn instruction_text(&self) -> std::borrow::Cow<'_, str> {
+        self.extra.directories.first().and_then(|p|p.parent()).map_or_else(||std::borrow::Cow::Borrowed(self.instructions.as_str()),|directory| {
+            std::borrow::Cow::Owned(format!("Specialist directory: {}\nResolve relative supporting-file paths from this directory.\n\n{}",directory.display(),self.instructions))
+        })
+    }
+
     /// The model it starts on with the agent called `agent`, if it names
     /// one.
     pub(crate) fn model_for(&self, agent: &str) -> Option<&str> {
@@ -207,125 +379,55 @@ fn for_agent<'a>(values: &'a [(String, String)], agent: &str) -> Option<&'a str>
         .map(|(_, value)| value.as_str())
 }
 
-/// The profile a chat is started as when it's asked for none.
+/// The specialist a chat is started as when it's asked for none.
 pub(crate) const DEFAULT: &str = "general";
 
-/// The profiles clackatoo has, before the user's.
-pub(crate) fn built_in() -> Vec<Profile> {
-    let pairs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
-        (pairs.iter())
-            .map(|&(agent, value)| (agent.to_owned(), value.to_owned()))
+/// The specialists clackatoo has, before the user's.
+pub(crate) fn built_in() -> Vec<Specialist> {
+    // The same Markdown format as user packages, embedded so installation needs
+    // no extra files. Parse once; listing and selecting roles do no disk work.
+    static BUILT_IN: std::sync::OnceLock<Vec<Specialist>> = std::sync::OnceLock::new();
+    BUILT_IN
+        .get_or_init(|| {
+            [
+                (
+                    "explore",
+                    include_str!("../specialists/explore/SPECIALIST.md"),
+                ),
+                (
+                    "research",
+                    include_str!("../specialists/research/SPECIALIST.md"),
+                ),
+                ("plan", include_str!("../specialists/plan/SPECIALIST.md")),
+                (
+                    DEFAULT,
+                    include_str!("../specialists/general/SPECIALIST.md"),
+                ),
+            ]
+            .into_iter()
+            .map(|(expected, text)| {
+                let (name, _, includes, specialist) = crate::skills::specialist_files::parse(text)
+                    .expect("valid built-in specialist");
+                assert_eq!(
+                    name, expected,
+                    "built-in specialist name matches its folder"
+                );
+                assert!(
+                    includes.is_empty(),
+                    "built-in specialists are self-contained"
+                );
+                specialist
+            })
             .collect()
-    };
-    vec![
-        Profile {
-            name: "explore".to_owned(),
-            about: "fast, cheap research on the cheapest model: finds and reads code, changes \
-                    nothing, answers briefly"
-                .to_owned(),
-            prompt: "You are an explorer, started by another agent to find something out. Find \
-                     and read what you need, quickly: search before you read whole files. \
-                     Answer briefly: what you found, with file paths and line numbers, and \
-                     nothing else. Your answer goes back to the agent that started you."
-                .to_owned(),
-            limits: Limits::ReadOnly,
-            agent: None,
-            models: pairs(&[("claude", "haiku"), ("codex", "gpt-6-luna")]),
-            inherit_model: false,
-            efforts: pairs(&[("codex", "low")]),
-        },
-        Profile {
-            name: "plan".to_owned(),
-            about: "a strong model that reads and thinks, changes nothing, and returns a plan"
-                .to_owned(),
-            prompt: "You are a planner, started by another agent. Read what you need, think it \
-                     through, and answer with a plan: the steps, in order, the files each \
-                     touches, and the risks. Change nothing. Your answer goes back to the \
-                     agent that started you."
-                .to_owned(),
-            limits: Limits::ReadOnly,
-            agent: None,
-            models: pairs(&[("claude", "opus")]),
-            inherit_model: false,
-            efforts: pairs(&[("codex", "high")]),
-        },
-        Profile {
-            name: DEFAULT.to_owned(),
-            about: "the parent's agent and model, free to do whatever the parent may".to_owned(),
-            prompt: String::new(),
-            limits: Limits::None,
-            agent: None,
-            models: Vec::new(),
-            inherit_model: true,
-            efforts: Vec::new(),
-        },
-    ]
-}
-
-/// What the daemon's config gives a profile, as `daemon.profiles.NAME`:
-/// a profile of its own, or of a built-in one's name, changes to it, of
-/// only what it gives.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Change {
-    pub(crate) name: String,
-    pub(crate) about: Option<String>,
-    pub(crate) prompt: Option<String>,
-    pub(crate) limits: Option<Limits>,
-    pub(crate) agent: Option<String>,
-    /// The model by agent, `*` for any, `inherit` for the parent's.
-    pub(crate) models: Option<Vec<(String, String)>>,
-    /// How hard it thinks, by agent, as `models`.
-    pub(crate) efforts: Option<Vec<(String, String)>>,
-}
-
-/// `changes`, in turn, over `base`, the built-in profiles.
-pub(crate) fn apply(changes: &[Change], base: &mut Vec<Profile>) {
-    for change in changes {
-        let known = base.iter().position(|profile| profile.name == change.name);
-        let at = known.unwrap_or_else(|| {
-            base.push(Profile {
-                name: change.name.clone(),
-                about: String::new(),
-                prompt: String::new(),
-                limits: Limits::None,
-                agent: None,
-                models: Vec::new(),
-                inherit_model: false,
-                efforts: Vec::new(),
-            });
-            base.len() - 1
-        });
-        let profile = &mut base[at];
-        if let Some(about) = &change.about {
-            profile.about.clone_from(about);
-        }
-        if let Some(prompt) = &change.prompt {
-            profile.prompt.clone_from(prompt);
-        }
-        if let Some(limits) = change.limits {
-            profile.limits = limits;
-        }
-        if let Some(agent) = &change.agent {
-            profile.agent = Some(agent.clone());
-        }
-        if let Some(models) = &change.models {
-            profile.inherit_model = models.iter().any(|(_, model)| model == "inherit");
-            profile.models = (models.iter())
-                .filter(|(_, model)| model != "inherit")
-                .cloned()
-                .collect();
-        }
-        if let Some(efforts) = &change.efforts {
-            profile.efforts.clone_from(efforts);
-        }
-    }
+        })
+        .clone()
 }
 
 /// The choice `wanted` names, among `choices`: by its value, or else its
 /// name, or else the one choice whose value or name has it in, ignoring
 /// case. With several that have it in, as `opus` in "Opus" and "Opus
 /// (1M context)", or none, it's none: the agent's own choice stands,
-/// rather than one that may cost more than the profile meant.
+/// rather than one that may cost more than the specialist meant.
 pub(crate) fn pick<'a>(choices: &'a [SettingChoice], wanted: &str) -> Option<&'a SettingChoice> {
     let lower = wanted.to_lowercase();
     if let Some(exact) = (choices.iter().find(|choice| choice.value == wanted))
@@ -404,55 +506,5 @@ mod tests {
         for limits in [Limits::None, Limits::NoCommands, Limits::ReadOnly] {
             assert_eq!(Limits::named(limits.name()), Some(limits));
         }
-    }
-
-    #[test]
-    fn config_adds_profiles_and_changes_the_built_in_ones() {
-        let settings = crate::settings::Settings::from_lua(
-            r#"
-            daemon.profiles.review = {
-              about = "Reviews a change",
-              agent = "codex",
-              model = "gpt-6-luna",
-              effort = "low",
-              limits = "read-only",
-              prompt = "You review.",
-            }
-            daemon.profiles.explore = { model = { claude = "sonnet" } }
-            daemon.profiles.mine = { model = "inherit" }
-            "#,
-        )
-        .unwrap();
-        let mut profiles = built_in();
-        apply(&settings.agents().profiles, &mut profiles);
-        let named = |name: &str| {
-            profiles
-                .iter()
-                .find(|profile| profile.name == name)
-                .unwrap()
-        };
-        let review = named("review");
-        assert_eq!(review.agent.as_deref(), Some("codex"));
-        assert_eq!(review.model_for("codex"), Some("gpt-6-luna"));
-        assert_eq!(review.model_for("claude"), Some("gpt-6-luna"));
-        assert_eq!(review.effort_for("codex"), Some("low"));
-        assert_eq!(review.limits, Limits::ReadOnly);
-        assert_eq!(review.prompt, "You review.");
-        // Only what's given changes.
-        let explore = named("explore");
-        assert_eq!(explore.model_for("claude"), Some("sonnet"));
-        assert_eq!(explore.model_for("codex"), None);
-        assert_eq!(explore.limits, Limits::ReadOnly);
-        assert!(!explore.prompt.is_empty());
-        assert!(named("mine").inherit_model);
-
-        let refused =
-            crate::settings::Settings::from_lua("daemon.profiles.x = { limits = \"loose\" }")
-                .unwrap_err();
-        assert!(
-            refused.said.contains("daemon.profiles.x.limits"),
-            "{refused:?}"
-        );
-        assert_eq!(refused.at.unwrap().line, 1);
     }
 }

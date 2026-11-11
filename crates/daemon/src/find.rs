@@ -505,7 +505,7 @@ fn symbols_found(
 }
 
 /// Says where a search looks: at `root`, written with `~` for `home`.
-fn root_found(root: &Path, home: &Path) -> Found {
+pub(crate) fn root_found(root: &Path, home: &Path) -> Found {
     let name = match root.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Ok(rest) => format!("~/{}", rest.display()),

@@ -381,6 +381,19 @@ impl Review {
             .filter(|&turn| turn != clackatoo_protocol::TURN_NOT_SHOWN)
     }
 
+    pub(crate) fn context_ref(&self) -> Option<clackatoo_protocol::ContextRef> {
+        let (file, hunk) = self.lines.get(self.cursor)?.hunk()?;
+        let file = &self.list.files[file];
+        let hunk = &file.hunks[hunk];
+        Some(clackatoo_protocol::ContextRef::Change {
+            chat: self.list.chat.unwrap_or(TerminalId(0)),
+            path: file.path.clone(),
+            hunk: clackatoo_protocol::ContextRef::hunk_id(
+                &file.path, hunk.line, &hunk.base, &hunk.text,
+            ),
+        })
+    }
+
     // --- The daemon's news --------------------------------------------------
 
     /// Takes the list the daemon sent, keeping the cursor on the hunk it

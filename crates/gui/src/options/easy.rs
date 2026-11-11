@@ -26,20 +26,32 @@ pub(crate) enum Page {
     Editor,
     Terminals,
     Agents,
+    Skills,
+    Specialists,
     Keys,
     Machines,
 }
 
 impl Page {
     /// Every page, in the order the side lists them.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Appearance,
         Self::Editor,
         Self::Terminals,
-        Self::Agents,
         Self::Keys,
         Self::Machines,
+        Self::Agents,
+        Self::Specialists,
+        Self::Skills,
     ];
+
+    /// Settings pages are grouped by what they configure.
+    pub(crate) fn group(self) -> &'static str {
+        match self {
+            Self::Agents | Self::Skills | Self::Specialists => "Agents",
+            _ => "General",
+        }
+    }
 
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -47,6 +59,8 @@ impl Page {
             Self::Editor => "Editor",
             Self::Terminals => "Terminals",
             Self::Agents => "Agents",
+            Self::Skills => "Skills",
+            Self::Specialists => "Specialists",
             Self::Keys => "Keys",
             Self::Machines => "Phone & other machines",
         }
@@ -59,6 +73,8 @@ impl Page {
             Self::Editor => "Indenting, searching, and what language servers add.",
             Self::Terminals => "Marks, what's kept after a restart, and pasting.",
             Self::Agents => "Which agent a new chat starts with, and what it may do.",
+            Self::Specialists => "Create and customize reusable agent roles.",
+            Self::Skills => "Shared skills and skillsets available to every agent in this project.",
             Self::Keys => "Keys for what you do most, recorded as you press them.",
             Self::Machines => "Working on other machines, and how they show here.",
         }
@@ -76,9 +92,15 @@ impl Page {
                  can start with it at once. Advanced has every limit on subagents.",
             ),
             Self::Keys => Some("Every key, in every mode, and what set it, is in Advanced."),
+            Self::Skills => Some(
+                "Add skills in .agents/skills, or bundles in .agents/skillsets. Use ~/.agents for every project. Reopen Settings to refresh; invoking a skill reads its latest instructions.",
+            ),
             Self::Machines => Some(
                 "The phone app and the web's password are the daemon's: clackatoo web sets them \
                  up.",
+            ),
+            Self::Specialists => Some(
+                "Specialists are SPECIALIST.md files. Create personal or project roles, or copy a packaged role to customize it. Existing chats keep their current role.",
             ),
             Self::Appearance | Self::Editor => None,
         }
@@ -87,9 +109,9 @@ impl Page {
     pub(crate) fn icon(self) -> Icon {
         match self {
             Self::Appearance => Icon::Appearance,
-            Self::Editor => Icon::Code,
+            Self::Editor | Self::Skills => Icon::Code,
             Self::Terminals => Icon::Terminal,
-            Self::Agents => Icon::Star,
+            Self::Agents | Self::Specialists => Icon::Star,
             Self::Keys => Icon::Keyboard,
             Self::Machines => Icon::Phone,
         }
@@ -657,6 +679,20 @@ pub(crate) const ENTRIES: &[Entry] = &[
             choice("Keep them", &["keep"]),
         ],
     ),
+    toggle(
+        Agents,
+        "Native plugins",
+        "Allow Claude Code plugins",
+        "Use Claude's plugins and native skill catalogue alongside shared skills. Takes effect after a daemon restart or upgrade.",
+        "plugins.claude",
+    ),
+    toggle(
+        Agents,
+        "Native plugins",
+        "Allow Codex plugins",
+        "Use Codex's plugins and native skill catalogue alongside shared skills. Takes effect after a daemon restart or upgrade.",
+        "plugins.codex",
+    ),
     // Keys.
     keys("New tab", Action::NewTab),
     keys(
@@ -823,6 +859,10 @@ mod tests {
             }
         }
         for page in Page::ALL {
+            // Catalogue pages are populated by the daemon, rather than static options.
+            if matches!(page, Page::Skills | Page::Specialists) {
+                continue;
+            }
             assert!(on(page).next().is_some(), "{page:?} shows nothing");
         }
     }

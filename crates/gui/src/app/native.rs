@@ -60,11 +60,12 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
             | ChatAction::Remedy { .. }
             | ChatAction::Submit {
                 target: Some(_), ..
-            } => true,
+            } | ChatAction::SubmitContext {target:Some(_),..}=>true,
             // What the user says or does in another chat, as the user.
             ChatAction::Send(_)
             | ChatAction::SendImages { .. }
             | ChatAction::Submit { .. }
+            | ChatAction::SubmitContext { .. }
             | ChatAction::SendQueued { .. }
             | ChatAction::Resend
             | ChatAction::Undo { .. }
@@ -72,6 +73,7 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
             | ChatAction::Rewind { .. }
             | ChatAction::SwitchBranch { .. }
             | ChatAction::Draft { .. }
+            | ChatAction::DraftContext { .. }
             | ChatAction::TakeBack { .. }
             | ChatAction::RemoveQueued { .. }
             | ChatAction::Stop
@@ -85,6 +87,7 @@ pub(super) fn changes_authority(message: &ClientMessage, granted: Option<Termina
         | Request::Split { terminal, .. }
         | Request::SplitTab { terminal, .. }
         | Request::Lend { terminal, .. } => starts(terminal),
+        Request::Work(action) => !matches!(action, clackatoo_protocol::WorkAction::List),
         Request::Background(action) => matches!(
             action,
             BackgroundAction::Start { .. } | BackgroundAction::Dismiss { .. }

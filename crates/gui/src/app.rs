@@ -845,6 +845,7 @@ impl App {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             }
         } else {
             let mut status = self.desk.status();
@@ -881,6 +882,7 @@ impl App {
                 waiting: self.desk.keys_waiting(),
                 which_keys: self.desk.which_keys(),
                 background: self.desk.background_icon(),
+                work: self.desk.work_badge(),
             }
         };
         if let Some(help) = &mut self.shortcut_help {
@@ -1043,6 +1045,7 @@ impl App {
             | Hit::NewWorkspace
             | Hit::NewTab
             | Hit::Background
+            | Hit::Work
             | Hit::Grant
             | Hit::Revoke
             | Hit::Cog
@@ -1105,6 +1108,7 @@ impl App {
                     | Hit::NewWorkspace
                     | Hit::NewTab
                     | Hit::Background
+                    | Hit::Work
                     | Hit::Grant
                     | Hit::Revoke
                     | Hit::Cog
@@ -1432,6 +1436,10 @@ impl App {
             }
             Hit::NewTab => {
                 self.desk.new_tab();
+                Ok(())
+            }
+            Hit::Work => {
+                self.desk.open_work();
                 Ok(())
             }
             Hit::Background => {
@@ -2917,6 +2925,10 @@ impl App {
         let quoted = self.desk.daemon_has(clackatoo_protocol::wire::COLOURS);
         let handoff = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_HANDOFF);
         let queue = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_QUEUE);
+        let context = self.desk.daemon_has(clackatoo_protocol::wire::CONTEXT);
+        let side_questions = self
+            .desk
+            .daemon_has(clackatoo_protocol::wire::SIDE_QUESTIONS);
         let resend = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_FACTS);
         let cost = self.desk.options().chatcost;
         let drafts = self.desk.daemon_has(clackatoo_protocol::wire::PROMPT_BOX);
@@ -2936,6 +2948,8 @@ impl App {
             view.set_quoted(quoted);
             view.handoff_supported = handoff;
             view.queue_supported = queue;
+            view.context_supported = context;
+            view.side_supported = side_questions;
             view.set_resend_supported(resend);
             view.set_show_cost(cost);
             view.drafts_supported = drafts;
@@ -2974,6 +2988,7 @@ impl App {
             .copied()
             .collect();
         for (pane, tile) in editors {
+            let tile = self.desk.editor_tile(pane, tile);
             let size = tile.cells_size(cell);
             if let Some(paint) =
                 (self.desk).paint_rendered(pane, &mut frame.fonts, tile.origin, size)
@@ -3110,9 +3125,23 @@ fn drawings<'a>(
                 let Some(editor) = desk.editor(id) else {
                     continue;
                 };
+                if let Some(side) = desk.outline_tile(id, tile) {
+                    drawings.push(Drawing {
+                        scroll: None,
+                        terminal: None,
+                        tile: side,
+                        rows: desk.outline_rows(id),
+                        marked: Vec::new(),
+                        cursor: None,
+                        highlights: Vec::new(),
+                        normal_mode: false,
+                        focused: false,
+                    });
+                }
+                let tile = desk.editor_tile(id, tile);
                 let (rows, mut cursor) = editor.scene();
                 if let Some(cursor) = &mut cursor
-                    && !(has_focus && keys_here)
+                    && (!(has_focus && keys_here) || desk.outline_focused(id))
                 {
                     cursor.style = CursorStyle::Hollow;
                 }
@@ -3124,7 +3153,9 @@ fn drawings<'a>(
                     marked: Vec::new(),
                     cursor,
                     highlights: editor.highlights(),
-                    normal_mode: has_focus && editor.mode != Mode::Insert,
+                    normal_mode: has_focus
+                        && !desk.outline_focused(id)
+                        && editor.mode != Mode::Insert,
                     focused: has_focus,
                 });
                 continue;
@@ -3262,6 +3293,7 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::NewWorkspace
         | Hit::NewTab
         | Hit::Background
+        | Hit::Work
         | Hit::Grant
         | Hit::Revoke
         | Hit::Cog
@@ -4408,6 +4440,10 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Work(items))) => {
+                self.desk.work_changed(items);
+                self.request_redraw();
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);
                 self.update_title();
@@ -4896,6 +4932,7 @@ mod tests {
                     waiting: None,
                     which_keys: None,
                     background: None,
+                    work: None,
                 },
                 &mut |_, _| 0.0,
             )
@@ -4941,6 +4978,7 @@ mod tests {
                 waiting: None,
                 which_keys: None,
                 background: None,
+                work: None,
             },
             &mut |_, _| 0.0,
         );

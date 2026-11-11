@@ -116,7 +116,7 @@ sees files from the one you left.
 `:fork` is the deliberate way to a separate chat, when you want both
 conversations side by side. The copy has the same agent, folder and settings,
 and only the branch shown, with no other branches. A copy of a chat another
-agent started keeps that chat's limits and profile, so it can never do more; a
+agent started keeps that chat's limits and specialist, so it can never do more; a
 browser the chat was let use must be allowed again in the copy. Its agent's
 session is forked from the chat's where it can be, so it knows the
 conversation exactly; otherwise it's told it as a summary with your first

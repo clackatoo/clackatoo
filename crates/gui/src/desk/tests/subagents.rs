@@ -35,7 +35,7 @@ fn subagent_desk() -> Desk {
 fn subagent(chat: u32, parent: u32) -> ChatSummary {
     ChatSummary {
         parent: Some(TerminalId(parent)),
-        profile: Some("explore".into()),
+        specialist: Some("explore".into()),
         ..summary(chat, 1, ChatState::Ready)
     }
 }

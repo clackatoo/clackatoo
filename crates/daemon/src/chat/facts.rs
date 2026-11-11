@@ -309,6 +309,7 @@ impl HostedChat {
         let item = Item::Compacted(details);
         items[at] = item.clone();
         self.facts.compactions[known].line = Some(at);
+        self.context_epoch = self.context_epoch.wrapping_add(1);
         self.patch_item(turn, at, item);
     }
 
@@ -334,6 +335,7 @@ impl HostedChat {
             return false;
         };
         let item = Item::Compacted(String::new());
+        self.context_epoch = self.context_epoch.wrapping_add(1);
         self.node.turns[turn].items.push(item.clone());
         let at = self.node.turns[turn].items.len() - 1;
         self.patch_item(turn, at, item);
@@ -481,6 +483,7 @@ impl HostedChat {
             return;
         };
         let turn = &self.node.turns[index];
+        let captured_context = turn.context.clone();
         let failed = matches!(
             turn.end.as_ref().map(|end| &end.outcome),
             Some(Outcome::Failed(_))
@@ -509,7 +512,10 @@ impl HostedChat {
                             .to_owned(),
                     ));
                 }
-                Prompt::from(words)
+                let mut prompt = Prompt::from(words);
+                prompt.resolved_context = !captured_context.is_empty();
+                prompt.context = captured_context;
+                prompt
             }
         };
         // The role or brief it went with goes again, if the agent never
@@ -540,9 +546,9 @@ pub(super) fn outcome_of(result: Result<StopReason, String>) -> Outcome {
     match result {
         Ok(StopReason::Cancelled) => Outcome::Stopped,
         Ok(StopReason::MaxTokens) => Outcome::Failed("the answer hit its length limit".to_owned()),
-        Ok(StopReason::MaxTurnRequests) => {
-            Outcome::Failed("the answer took too many steps".to_owned())
-        }
+        Ok(StopReason::MaxTurnRequests) => Outcome::Failed(
+            "the agent reached a turn, budget or output limit; its answer is partial".to_owned(),
+        ),
         Ok(StopReason::Refusal) => Outcome::Failed("the agent refused".to_owned()),
         // Done, or a reason newer than this build knows.
         Ok(_) => Outcome::Done,

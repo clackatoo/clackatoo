@@ -560,7 +560,7 @@ fn no_rules(language: &str) -> String {
 /// The WebAssembly engine grammars run in. Each grammar's memory is
 /// reserved as it grows, rather than 4 GiB of address space up front for
 /// each, which is wasmtime's default.
-fn engine() -> wasmtime::Engine {
+pub(crate) fn engine() -> wasmtime::Engine {
     let mut config = wasmtime::Config::new();
     config.memory_reservation(0);
     config.memory_guard_size(0);

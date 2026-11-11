@@ -53,6 +53,7 @@ use crate::buffer::{self, Buffer, DiskStamp, PreparedStep};
 use crate::changes::{Compared, listed};
 use crate::chat::TurnUid;
 use crate::handover;
+mod context;
 
 /// The biggest file not open whose hunks a review shows, in bytes: it's
 /// read on the event loop, as a buffer opening is.
@@ -161,6 +162,8 @@ struct Comment {
 /// A review: what it lists, and who it's sent to.
 #[derive(Debug)]
 struct Review {
+    /// Last rendered source hunks, reused by context capture without disk I/O.
+    context: Vec<ReviewFile>,
     chat: Option<TerminalId>,
     /// What it lists: a turn by its uid (see `chat/uids.rs`), so it stays
     /// with the turn; clients are told the turn's index.
@@ -668,11 +671,11 @@ impl Daemon {
     }
 
     /// What chat `chat` is called: for a subagent, open or closed, its
-    /// profile, or else its agent, and its number, as its card says, as
+    /// specialist, or else its agent, and its number, as its card says, as
     /// `explore (chat 7)`; for another, its title, or its agent's name.
     fn chat_name(&self, chat: TerminalId) -> String {
         if let Some(card) = self.card(chat) {
-            let name = card.profile.as_deref().unwrap_or(&card.agent);
+            let name = card.specialist.as_deref().unwrap_or(&card.agent);
             return format!("{name} (chat {chat})");
         }
         match self.chat_ref(chat) {
@@ -1455,6 +1458,7 @@ impl Daemon {
         self.reviews.list.insert(
             id,
             Review {
+                context: Vec::new(),
                 chat,
                 scope,
                 root,
@@ -1632,6 +1636,9 @@ impl Daemon {
         let chats = self.review_chats(&files, &family);
         let mut files = files;
         self.show_turns(&mut files);
+        if let Some(review) = self.reviews.list.get_mut(&review) {
+            review.context = files.iter().take(256).cloned().collect();
+        }
         let lost = chat
             .and_then(|chat| self.reviews.lost.get(&chat))
             .map(|&count| {
@@ -2037,6 +2044,7 @@ impl Daemon {
             self.reviews.list.insert(
                 id,
                 Review {
+                    context: Vec::new(),
                     chat: review.chat.map(TerminalId),
                     scope,
                     root: path(review.root),
@@ -2649,12 +2657,12 @@ mod tests {
     }
 
     /// A subagent of chat `parent`'s, numbered `id`, on session `s{id}`,
-    /// started as `profile` in `parent`'s turn going now, its agent
+    /// started as `specialist` in `parent`'s turn going now, its agent
     /// answering its first message.
-    fn subagent(world: &mut World, parent: TerminalId, id: u32, profile: &str) -> TerminalId {
+    fn subagent(world: &mut World, parent: TerminalId, id: u32, specialist: &str) -> TerminalId {
         use crate::agent::Opened;
         use crate::chat::{HostedChat, Wanted};
-        use crate::profiles::Limits;
+        use crate::specialists::Limits;
 
         let agent = crate::AgentConfig::default().find("claude").unwrap();
         let size = clackatoo_protocol::Size::new(40, 10).unwrap();
@@ -2667,7 +2675,7 @@ mod tests {
         });
         let depth = world.daemon.chat_ref(parent).unwrap().relations().depth;
         chat.started_by(parent, world.chat, depth + 1, None);
-        chat.start_as(profile, Limits::None, None, Wanted::default());
+        chat.start_as(specialist, Limits::None, None, Wanted::default());
         chat.act(ChatAction::Send("look into it".into()));
         world.daemon.add_chat(chat);
         world.daemon.note_subagent(TerminalId(id));

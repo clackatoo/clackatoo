@@ -3,6 +3,9 @@
 //! shown, with what's changed in it since it was last drawn. No browser
 //! in here: messages in, messages out, so it's tested on its own.
 
+pub mod context;
+pub mod side;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use clackatoo_protocol::{
@@ -147,9 +150,17 @@ pub struct OpenChat {
 /// if it fails.
 #[derive(Clone, Debug)]
 enum Asked {
+    Side {
+        chat: TerminalId,
+        serial: u64,
+    },
     Capabilities(TerminalId),
     /// Nothing to say: its failure is only logged.
     Quiet,
+    Context {
+        chat: TerminalId,
+        serial: u64,
+    },
     ChatHistory {
         terminal: TerminalId,
         before: u32,
@@ -159,6 +170,7 @@ enum Asked {
         chat: TerminalId,
         text: String,
         images: Vec<u64>,
+        context: Vec<clackatoo_protocol::ContextSelection>,
     },
     /// Something the user did, as "sending the message".
     Doing(&'static str),
@@ -186,6 +198,8 @@ enum Asked {
 /// What the app knows.
 #[derive(Debug)]
 pub struct State {
+    pub(crate) context: context::Context,
+    pub(crate) side: side::Side,
     pub online: Online,
     pub workspaces: Workspaces,
     /// The daemon's connections to other machines, as it last said them,
@@ -312,6 +326,8 @@ pub enum Received {
 impl Default for State {
     fn default() -> Self {
         Self {
+            context: context::Context::default(),
+            side: side::Side::default(),
             online: Online::Connecting,
             workspaces: Workspaces::default(),
             connections: Vec::new(),
@@ -412,6 +428,7 @@ impl State {
 
     /// The connection was lost, and is tried again in `retry` seconds.
     pub fn lost(&mut self, retry: u32) {
+        self.side_lost();
         self.online = Online::Lost(retry);
         if !self.submitting.is_empty() {
             self.note = Some("Connection lost before delivery was confirmed. Your draft is kept; check the conversation before retrying.".into());
@@ -455,9 +472,18 @@ impl State {
     fn answered(&mut self, response: Response) {
         let asked = self.asked.pop_front().map(|(asked, _)| asked);
         self.keys_heard();
-        if let Some(Asked::Submitted { chat, text, images }) = &asked {
+        if let Some(Asked::Submitted {
+            chat,
+            text,
+            images,
+            context,
+        }) = &asked
+        {
             self.submitting.remove(chat);
             if !matches!(response, Response::Error(_)) {
+                if let Some(current) = self.context.attached.get_mut(chat) {
+                    current.retain(|s| !context.contains(s));
+                }
                 if self.drafts.get(chat) == Some(text) {
                     self.drafts.remove(chat);
                 }
@@ -467,6 +493,10 @@ impl State {
             }
         }
         match (response, asked) {
+            (reply, Some(Asked::Side { chat, serial })) => self.side_answer(chat, serial, reply),
+            (Response::Context(reply), Some(Asked::Context { chat, serial })) => {
+                self.context_answer(chat, serial, reply);
+            }
             (Response::Workspaces(workspaces), _) => {
                 self.workspaces_came(workspaces);
                 self.dirty.home = true;
@@ -523,8 +553,20 @@ impl State {
     /// said, and gives up what waited on it.
     fn failed(&mut self, err: &clackatoo_protocol::Error, asked: &Asked) {
         let note = match asked {
+            Asked::Side { chat, serial } => {
+                self.side_answer(*chat, *serial, Response::Error(err.clone()));
+                None
+            }
             Asked::Capabilities(_) => Some(format!("Could not inspect capabilities: {err}")),
             Asked::Quiet => None,
+            Asked::Context { chat, serial } => {
+                if self.context.chat == Some(*chat) && self.context.serial == *serial {
+                    self.context.status = format!("Context unavailable: {err}");
+                    Some(format!("Context unavailable: {err}"))
+                } else {
+                    None
+                }
+            }
             Asked::ChatHistory { terminal, before } => {
                 if let Some(open) = self
                     .open
@@ -675,6 +717,8 @@ impl State {
         self.drafts_loaded.clear();
         self.drafts_changed.clear();
         self.images.clear();
+        self.context = context::Context::default();
+        self.side = side::Side::default();
         self.loading_images.clear();
         self.images_let_go();
         self.submitting.clear();
@@ -701,6 +745,10 @@ impl State {
             }
             return;
         }
+        let context_draft = match &update {
+            ViewUpdate::Snapshot(v) => v.chat().map(|n| n.draft_context.clone()),
+            ViewUpdate::Patch(_) => None,
+        };
         let whole = match &update {
             // Not known, from a daemon that keeps none: the page's own stays.
             ViewUpdate::Snapshot(view) => view.chat().and_then(|chat| chat.draft.clone()),
@@ -765,6 +813,9 @@ impl State {
                 }
             }
             (None, ViewUpdate::Patch(_)) => {}
+        }
+        if let Some(selections) = context_draft {
+            self.context_draft_came(terminal, selections);
         }
         if let Some(draft) = whole {
             self.draft_came(terminal, draft);
@@ -844,11 +895,25 @@ impl State {
             return;
         }
         let text = self.drafts.get(&terminal).cloned().unwrap_or_default();
-        if self.drafts_synced.get(&terminal).map_or("", String::as_str) == text {
+        let context = self
+            .context
+            .attached
+            .get(&terminal)
+            .cloned()
+            .unwrap_or_default();
+        if self.drafts_synced.get(&terminal).map_or("", String::as_str) == text
+            && self
+                .context
+                .synced
+                .get(&terminal)
+                .map_or(&[][..], Vec::as_slice)
+                == context
+        {
             return;
         }
         self.drafts_synced.insert(terminal, text.clone());
-        let action = ChatAction::Draft { text };
+        self.context.synced.insert(terminal, context.clone());
+        let action = ChatAction::DraftContext { text, context };
         self.request(Request::Chat { terminal, action }, Asked::Quiet);
     }
 
@@ -1357,8 +1422,20 @@ impl State {
             return;
         };
         let text = self.drafts.get(&terminal).cloned().unwrap_or_default();
+        if let Some((name, question)) = clackatoo_protocol::slash_command(&text)
+            && name.eq_ignore_ascii_case("btw")
+        {
+            self.side_open(question.to_owned(), Some(text));
+            return;
+        }
         let attachments = self.images.get(&terminal).cloned().unwrap_or_default();
-        if (text.trim().is_empty() && attachments.is_empty())
+        let context = self
+            .context
+            .attached
+            .get(&terminal)
+            .cloned()
+            .unwrap_or_default();
+        if (text.trim().is_empty() && attachments.is_empty() && context.is_empty())
             || self.submitting.contains(&terminal)
             || self.loading_images.contains(&terminal)
         {
@@ -1392,7 +1469,8 @@ impl State {
         self.request(
             Request::Chat {
                 terminal,
-                action: ChatAction::Submit {
+                action: ChatAction::SubmitContext {
+                    context: context.clone(),
                     text: text.clone(),
                     images: attachments.iter().map(|a| (*a.image).clone()).collect(),
                     target: None,
@@ -1403,6 +1481,7 @@ impl State {
                 chat: terminal,
                 text,
                 images: attachments.iter().map(|a| a.id).collect(),
+                context,
             },
         );
         self.dirty.footer = true;
@@ -1526,6 +1605,7 @@ mod tests {
 
     fn turn(prompt: &str) -> Turn {
         Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -1600,7 +1680,7 @@ mod tests {
         (state.take_outbox().into_iter())
             .filter_map(|message| match message {
                 ClientMessage::Request(Request::Chat {
-                    action: ChatAction::Draft { text },
+                    action: ChatAction::DraftContext { text, .. },
                     ..
                 }) => Some(text),
                 _ => None,
@@ -2552,7 +2632,7 @@ mod tests {
             parent: None,
             workspace: Some(WorkspaceId(1)),
             active: 0,
-            profile: None,
+            specialist: None,
             failed: None,
         }];
         let ids = |list: Vec<&TerminalInfo>| list.iter().map(|info| info.id.0).collect::<Vec<_>>();
@@ -2622,7 +2702,7 @@ mod tests {
         assert!(matches!(
             &sent[0],
             ClientMessage::Request(Request::Chat {
-                action: ChatAction::Submit { steer: true, .. },
+                action: ChatAction::SubmitContext { steer: true, .. },
                 ..
             })
         ));
@@ -2652,7 +2732,7 @@ mod tests {
         assert!(state.take_outbox().iter().all(|m| !matches!(
             m,
             ClientMessage::Request(Request::Chat {
-                action: ChatAction::Submit { .. },
+                action: ChatAction::SubmitContext { .. },
                 ..
             })
         )));

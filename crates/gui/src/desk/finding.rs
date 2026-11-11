@@ -57,6 +57,7 @@ impl Desk {
             Kind::Lessons => return self.tutor(None),
             Kind::News => return self.tutor(Some("new")),
             Kind::Background => return self.open_background_list(),
+            Kind::Work => return self.open_work(),
             Kind::Prompts => return self.list_prompts(&query),
             Kind::Branches => return self.list_branches(),
             Kind::Symbols if !self.needs_daemon("listing a file's symbols", SYMBOLS) => return,
@@ -112,6 +113,7 @@ impl Desk {
             | Kind::News
             | Kind::Symbols
             | Kind::Background
+            | Kind::Work
             | Kind::Prompts
             | Kind::Branches => {}
         }
@@ -146,6 +148,7 @@ impl Desk {
         self.start = None;
         self.settings = None;
         self.grep_at = None;
+        self.symbol_refresh = false;
         self.boards_on = None;
         let Some(finder) = self.finder.take() else {
             return;
@@ -221,12 +224,28 @@ impl Desk {
                 self.grep_at = None;
                 self.grep();
             }
-            Outcome::Search => self.grep_at = Some(Instant::now() + GREP_WAIT),
+            Outcome::Search => {
+                self.symbol_refresh = false;
+                self.grep_at = Some(Instant::now() + GREP_WAIT);
+            }
             Outcome::Close => self.close_finder(),
             // Said, and a macro typing it stops, as at a key that fails.
             Outcome::NothingPicked => self.refuse("nothing in the finder is picked".into()),
+            Outcome::Dismiss(path)
+                if self
+                    .finder
+                    .as_ref()
+                    .is_some_and(|finder| finder.kind() == Kind::Work) =>
+            {
+                self.work_action(&path);
+            }
             Outcome::Dismiss(path) => self.dismiss_background(&path),
             Outcome::Forward(path) => self.forward_background(&path),
+            Outcome::Open(_)
+                if self
+                    .finder
+                    .as_ref()
+                    .is_some_and(|finder| finder.kind() == Kind::Work) => {}
             Outcome::Open(opening) => {
                 let kind = self.finder.as_ref().map(Finder::kind);
                 let boards_on = self.boards_on;
@@ -270,7 +289,16 @@ impl Desk {
             self.stop_search(id);
         }
         if symbols {
-            self.search(Search::Symbols { query: pattern });
+            if self.daemon_has(clackatoo_protocol::wire::CODE_OUTLINES) {
+                let refresh = std::mem::take(&mut self.symbol_refresh);
+                self.search(Search::CodeSymbols {
+                    query: pattern,
+                    file: false,
+                    refresh,
+                });
+            } else {
+                self.search(Search::Symbols { query: pattern });
+            }
         } else if !pattern.is_empty() {
             let exact = Case::of(&self.options).exact(&pattern);
             self.search(Search::Grep { pattern, exact });
@@ -300,9 +328,14 @@ impl Desk {
     /// Asks the daemon for `search`, from the focused pane, to fill the
     /// finder's list.
     fn search(&mut self, search: Search) {
+        let refresh = matches!(search, Search::CodeSymbols { .. });
         let id = self.send_search(search);
         if let Some(finder) = &mut self.finder {
-            finder.searching(id);
+            if refresh {
+                finder.refreshing(id);
+            } else {
+                finder.searching(id);
+            }
         }
     }
 
@@ -338,7 +371,7 @@ impl Desk {
 
     /// Asks the daemon for `search`, from `pane`. Returns the search's
     /// number.
-    fn send_search_from(&mut self, pane: Option<PaneId>, search: Search) -> u64 {
+    pub(super) fn send_search_from(&mut self, pane: Option<PaneId>, search: Search) -> u64 {
         self.searches += 1;
         let id = self.searches;
         if self.connected {
@@ -369,7 +402,7 @@ impl Desk {
         }
     }
 
-    fn stop_search(&mut self, id: u64) {
+    pub(super) fn stop_search(&mut self, id: u64) {
         if self.connected {
             self.outbox.push(ClientMessage::StopFinding { id });
         }
@@ -378,6 +411,9 @@ impl Desk {
     /// Takes in what the daemon's search numbered `id` found. Returns
     /// whether the window must be redrawn.
     pub(crate) fn found(&mut self, id: u64, found: Found) -> bool {
+        if self.outline_found(id, &found) {
+            return true;
+        }
         if let Some((asked, terminal)) = self.chat_files
             && asked == id
         {
@@ -393,6 +429,11 @@ impl Desk {
             return false;
         };
         if finder.search() == Some(id) {
+            if matches!(&found, Found::IndexStatus { scanning: true, .. }) && self.grep_at.is_none()
+            {
+                self.symbol_refresh = true;
+                self.grep_at = Some(Instant::now() + Duration::from_millis(500));
+            }
             finder.found(found);
             // A macro waiting for what it finds goes on.
             self.type_macros();

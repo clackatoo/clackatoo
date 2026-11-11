@@ -171,6 +171,7 @@ mod tests {
         ChatNode {
             state: ChatState::Ready,
             turns: vec![Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),
@@ -292,7 +293,7 @@ mod tests {
         node.subagents = vec![Subagent {
             chat: TerminalId(5),
             agent: "Claude Code".into(),
-            profile: None,
+            specialist: None,
             model: None,
             task: "Serve the docs".into(),
             status: SubagentStatus::Done,

@@ -672,7 +672,8 @@ a project is searched, never a bare directory.
 |---|---|
 | `<Space>pf` | The project's files |
 | `<Space>bs` | The symbols in the focused editor's file: its functions, types and their fields, in the order of the file's outline, each indented inside what it's in, with what it is; past 5000, the count ends `+` |
-| `<Space>ps` | The symbols in the whole project whose names match what you type, as the file's language server finds them, asked again each time typing pauses, with the letters you typed picked out in their names |
+| `<Space>ps` | The shared index's project symbols, matched by identifier and path word prefixes as typing pauses, with previews and partial-index status |
+| `<Space>bo`, `<Space>bO` | Toggle the editor's outline panel, or focus it without closing it |
 | `<Space>e` | Opens the tab's [file explorer](~clackatoo/reference/explorer), goes to it, or closes it |
 | `<Space>a` | Mentions the focused editor's selection, or its file, in the chat beside it, as `:Ask` does (see [Mentioning files](~clackatoo/reference/chatting#mentioning-files)) |
 | `<Space>pgf` | A grep of them, as you type |
@@ -683,6 +684,13 @@ What you type matches as fzf's does: letters in order, words each on their
 own, `'word` exactly, `^word` at the start, `word$` at the end, `!word` leaves
 out. A grep's pattern is a regular expression, or plain text if it isn't one.
 The letters it matched are picked out, in every list.
+
+The [project symbol finder](~clackatoo/reference/code-outlines#project-symbol-finder)
+uses the shared code index and installed grammars. It does not need a language
+server, and shows partial results while indexing. An older daemon keeps its
+language-server symbol search. `<Space>bs` remains the language-server file
+picker. The [outline panel](~clackatoo/reference/code-outlines#editor-outline)
+uses the shared index and follows the editor's file and cursor.
 
 When nothing matches what you type, the list says so once it has finished
 looking.
@@ -714,3 +722,10 @@ empty file says so. Opening one is a
 <kbd>Ctrl</kbd>+<kbd>O</kbd> comes back. <kbd>Space</kbd> starts these keys in
 normal mode, so <kbd>Space</kbd> alone doesn't move the cursor, unless a
 command is half typed, as in `d<Space>`.
+
+
+## Daemon background work
+
+The bottom bar's **Working · N** indicator opens the daemon's live work list.
+`:Work` opens it too. See [Background work](~clackatoo/reference/background-work)
+for progress, cancellation and recent outcomes.

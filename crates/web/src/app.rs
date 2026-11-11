@@ -442,7 +442,50 @@ pub(crate) fn start() {
         LIST_EVERY,
     );
     tick.forget();
+    let side_tick = Closure::<dyn FnMut()>::new(|| {
+        with_app(|app| {
+            if app.document.visibility_state() == VisibilityState::Visible {
+                app.state.now = js_sys::Date::now();
+                app.state.side_poll();
+                app.send();
+            }
+        });
+    });
+    let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+        side_tick.as_ref().unchecked_ref(),
+        500,
+    );
+    side_tick.forget();
     spawn_local(boot());
+}
+
+fn side_input(event: &web_sys::Event) -> bool {
+    if target_id(event).is_none_or(|id| id != "side-draft") {
+        return false;
+    }
+    with_app(|app| {
+        if let Some(parent) = app.state.side.parent
+            && let Some(area) = event
+                .target()
+                .and_then(|t| t.dyn_into::<HtmlTextAreaElement>().ok())
+        {
+            app.state.side.drafts.insert(parent, area.value());
+        }
+    });
+    true
+}
+
+fn side_submit_key(event: &web_sys::Event, key: &KeyboardEvent) -> bool {
+    if target_id(event).is_some_and(|id| id == "side-draft")
+        && key.key() == "Enter"
+        && !key.shift_key()
+    {
+        event.prevent_default();
+        with_app(|app| app.act(Action::Side(crate::state::side::Control::Send)));
+        true
+    } else {
+        false
+    }
 }
 
 fn listen_for_chat_input(root: &DomElement) {
@@ -464,6 +507,22 @@ fn listen_for_chat_input(root: &DomElement) {
                 {
                     app.draw_soon();
                 }
+            });
+        }
+        if side_input(&event) {
+            return;
+        }
+        if target_id(&event).is_some_and(|id| id == "context-range") {
+            with_app(|app| {
+                app.state.context.range = app.input("context-range").unwrap_or_default();
+            });
+        }
+        if target_id(&event).is_some_and(|id| id == "context-search") {
+            with_app(|app| {
+                let query = app.input("context-search").unwrap_or_default();
+                app.state.context_search(&query);
+                app.send();
+                app.draw_soon();
             });
         }
         if target_id(&event).is_some_and(|id| id == "home-search") {
@@ -512,6 +571,9 @@ fn listen_for_chat_input(root: &DomElement) {
                 with_app(|app| app.act(action));
                 return;
             }
+        }
+        if side_submit_key(&event, key) {
+            return;
         }
         let in_message = target_id(&event).is_some_and(|id| id == "message");
         if in_message && key.key() == "Enter" && (key.meta_key() || key.ctrl_key()) {
@@ -1871,6 +1933,7 @@ impl App {
             || el("div"),
             |node| view::box_bar(node, open, now, &zone_offset),
         );
+        let menus = menus.child(self.state.context_panels());
         if fresh || menus != page.shown_menus {
             dom::replace_panel(&self.document, &page.menus, &el("div").child(menus.clone()));
             page.shown_menus = menus;
@@ -2135,6 +2198,21 @@ impl App {
                 "doing what the failed turn asked",
             ),
             Action::Command(name) => self.put_command(&name),
+            Action::Side(crate::state::side::Control::Copy(turn)) => {
+                let text = self.state.side_copy(turn);
+                let promise = self.window.navigator().clipboard().write_text(&text);
+                spawn_local(async move {
+                    if JsFuture::from(promise).await.is_err() {
+                        with_app(|app| {
+                            app.state.note =
+                                Some("Copy failed. Select the answer and copy it manually.".into());
+                            app.draw_soon();
+                        });
+                    }
+                });
+            }
+            Action::Side(control) => self.state.side_control(control),
+            Action::Context(control) => self.state.context_control(control),
             Action::AttachPhotos => self.attach_photos(),
             Action::RemovePhoto(id) => self.remove_photo(id),
             Action::Send | Action::Steer => {
@@ -2321,8 +2399,9 @@ impl App {
             return;
         };
         let id = open.id;
-        let offered = (open.view.as_ref().and_then(|view| view.chat()))
-            .is_some_and(|node| node.commands.iter().any(|command| command.name == name));
+        let offered = (open.view.as_ref().and_then(|view| view.chat())).is_some_and(|node| {
+            name == "btw" || node.commands.iter().any(|command| command.name == name)
+        });
         if offered {
             self.state.drafts.insert(id, format!("/{name} "));
             self.save_draft(id);
@@ -2416,6 +2495,11 @@ impl App {
         };
         if key.key() == "Escape" {
             key.prevent_default();
+            if self.state.side.open {
+                self.state.side_control(crate::state::side::Control::Hide);
+                self.draw_soon();
+                return true;
+            }
             if let Some(open) = &mut self.state.open {
                 open.folds.insert(view::SETTINGS_FOLD.into(), false);
                 open.folds.insert(view::USAGE_FOLD.into(), false);
@@ -2426,7 +2510,7 @@ impl App {
         }
         if key.key() == "Tab"
             && let Ok(items) = sheet.query_selector_all(
-                "button:not([disabled]), select:not([disabled]), input:not([disabled])",
+                "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled])",
             )
         {
             let first = items.item(0).and_then(|n| n.dyn_into::<HtmlElement>().ok());

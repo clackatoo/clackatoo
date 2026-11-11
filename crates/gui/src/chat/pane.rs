@@ -30,6 +30,8 @@ use clackatoo_term::mouse::{MouseAction, MouseButton};
 /// A request sent to the daemon and not yet answered.
 #[derive(Debug)]
 enum Pending {
+    Context(u64),
+    Side(u64),
     /// Anything answered with just "done" or an error.
     Other,
     /// The original of an image, asked for by one opening of the image
@@ -164,7 +166,7 @@ impl ChatPane {
     /// Where typed text goes in it: the message, in insert mode, or the
     /// model search.
     pub(crate) fn takes_text(&self) -> bool {
-        self.mode == Mode::Insert || self.searching_models()
+        self.view.side.open || self.mode == Mode::Insert || self.searching_models()
     }
 
     /// Tells it the daemon has gone out of reach, if `offline`, or come
@@ -344,6 +346,24 @@ impl ChatPane {
         let original = self.view.take_original_request();
         let first_turn = self.view.first_turn();
         let terminal = self.terminal();
+        for (serial, action) in self.view.take_side_requests() {
+            self.requests.request(
+                Request::Side {
+                    chat: terminal,
+                    action,
+                },
+                Pending::Side(serial),
+            );
+        }
+        for (serial, action) in self.view.take_context_requests() {
+            self.requests.request(
+                Request::Context {
+                    chat: terminal,
+                    action,
+                },
+                Pending::Context(serial),
+            );
+        }
         for id in settled.cancel_activities {
             self.requests
                 .request(Request::CancelActivity { terminal, id }, Pending::Other);
@@ -364,12 +384,18 @@ impl ChatPane {
             if let ChatAction::Submit {
                 target: Some(target),
                 ..
+            }
+            | ChatAction::SubmitContext {
+                target: Some(target),
+                ..
             } = &mut action
             {
                 target.budget = self.carryover;
             }
             let pending = match action {
-                ChatAction::SendTo { .. } | ChatAction::Submit { .. } => Pending::Handoff,
+                ChatAction::SendTo { .. }
+                | ChatAction::Submit { .. }
+                | ChatAction::SubmitContext { .. } => Pending::Handoff,
                 ChatAction::TakeBack { queued } => Pending::TakeBack(queued),
                 ChatAction::RemoveQueued { .. } | ChatAction::SendQueued { .. } => Pending::Control,
                 ChatAction::Rewind { .. } | ChatAction::SwitchBranch { .. } => Pending::Branch,
@@ -396,7 +422,15 @@ impl ChatPane {
         let Some(text) = self.view.take_draft(now) else {
             return false;
         };
-        self.ask(ChatAction::Draft { text }, Pending::Other);
+        let action = if self.view.context_supported {
+            ChatAction::DraftContext {
+                text,
+                context: self.view.context.selections(),
+            }
+        } else {
+            ChatAction::Draft { text }
+        };
+        self.ask(action, Pending::Other);
         true
     }
 
@@ -474,7 +508,7 @@ impl ChatPane {
     /// Shows what an input method is composing in its box, if it's being
     /// typed in. Returns whether it is.
     pub(crate) fn compose(&mut self, composing: Option<(String, Option<(usize, usize)>)>) -> bool {
-        if self.mode != Mode::Insert {
+        if self.mode != Mode::Insert && !self.view.side.open {
             return false;
         }
         self.view.compose(composing);
@@ -668,6 +702,7 @@ impl ChatPane {
     /// snapshot. Whatever was sent on the old one is forgotten, unanswered.
     pub(crate) fn reconnected(&mut self) {
         self.requests.reconnected();
+        self.view.side_reconnected();
     }
 
     /// Asks the daemon to make the chat `size`. Asked every time the
@@ -696,6 +731,12 @@ impl ChatPane {
     /// must be redrawn.
     pub(crate) fn answered(&mut self, response: Response) -> bool {
         match (self.requests.answered(), response) {
+            (Some(Pending::Side(serial)), response) => {
+                self.view.side_answer(serial, response);
+            }
+            (Some(Pending::Context(serial)), response) => {
+                self.view.context_answer(serial, response);
+            }
             (Some(Pending::History(before)), response) => {
                 self.view.history_answer(before, response);
             }

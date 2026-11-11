@@ -141,7 +141,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "subagents",
         date: "2026-10-13",
         lesson: "agents",
-        what: "Subagents: background chats agents start, several at once, as profiles like explore, shown as a card",
+        what: "Subagents: background chats agents start, several at once, as specialists like explore, shown as a card",
     },
     News {
         id: "explorer-text",
@@ -1113,7 +1113,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "subagents-restored",
         date: "2026-10-29",
         lesson: "agents",
-        what: "A subagent in a pane comes back a subagent after a restart: its band, its card, its profile and its limits",
+        what: "A subagent in a pane comes back a subagent after a restart: its band, its card, its specialist and its limits",
     },
     News {
         id: "chat-branches",
@@ -1576,6 +1576,60 @@ pub(crate) const NEWS: &[News] = &[
         date: "2026-11-10",
         lesson: "shell",
         what: "Through :connect, password prompts show in your window and zv works; zv shows a line's pictures too",
+    },
+    News {
+        id: "specialists",
+        date: "2026-11-10",
+        lesson: "agents",
+        what: "Specialists: reusable roles for your own chats and delegation, with nested skillsets, invocation controls and budgets",
+    },
+    News {
+        id: "specialist-settings",
+        date: "2026-11-10",
+        lesson: "agents",
+        what: "Create and edit Specialists in Settings; the model selector's cog opens the editor directly",
+    },
+    News {
+        id: "specialist-files",
+        date: "2026-11-10",
+        lesson: "agents",
+        what: "Specialists are SPECIALIST.md packages, with personal and project files edited directly from Settings",
+    },
+    News {
+        id: "background-work",
+        date: "2026-11-10",
+        lesson: "background",
+        what: "Background work: a live bottom-bar indicator and :Work list with progress, cancellation and recent outcomes",
+    },
+    News {
+        id: "project-code-outlines",
+        date: "2026-11-10",
+        lesson: "agents",
+        what: "Project outlines: shared indexing, symbol search and repository maps, with unsaved source",
+    },
+    News {
+        id: "outline-navigation",
+        date: "2026-11-10",
+        lesson: "finder",
+        what: "Editor outline and project symbol finder share the code index, including unsaved edits",
+    },
+    News {
+        id: "research-specialist",
+        date: "2026-11-10",
+        lesson: "agents",
+        what: "Research investigates codebases with code citations; Explore handles quick, narrow lookups",
+    },
+    News {
+        id: "workspace-context",
+        date: "2026-11-11",
+        lesson: "agents",
+        what: "Attach workspace objects with + Context; inspect immutable snapshots in sent messages",
+    },
+    News {
+        id: "side-questions",
+        date: "2026-11-11",
+        lesson: "agents",
+        what: "/btw asks a side question; keep the chat or attach its answer to the main draft",
     },
 ];
 

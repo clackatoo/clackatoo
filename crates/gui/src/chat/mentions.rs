@@ -258,6 +258,10 @@ impl super::ChatView {
     /// Takes in the message being typed, as the `@` menu reads it, once it
     /// may have changed: asking for the project's files if it opens.
     pub(crate) fn refresh_mentions(&mut self) {
+        if self.context_supported && self.context_prefix() {
+            self.mentions.close(self.editor.raw_text());
+            return;
+        }
         let typing = !self.reading
             && self.node.question.is_none()
             && self.menu.is_none()
@@ -307,6 +311,21 @@ impl super::ChatView {
     /// Puts `text` at the end of the message being typed, after a space if
     /// the message doesn't end in one.
     pub(super) fn settle_append(&mut self, fonts: &mut Fonts, text: String) {
+        if self.context_supported {
+            for mention in clackatoo_protocol::mentions(&text) {
+                self.attach_context(
+                    clackatoo_protocol::ContextRef::File {
+                        path: mention.path.into(),
+                        lines: mention.lines,
+                    },
+                    format!(
+                        "{}{}",
+                        mention.path,
+                        clackatoo_protocol::lines_suffix(mention.lines)
+                    ),
+                );
+            }
+        }
         let message = self.editor.raw_text();
         let space = !message.is_empty() && !message.ends_with(char::is_whitespace);
         let text = if space { format!(" {text}") } else { text };
@@ -386,6 +405,17 @@ impl super::ChatView {
         let Some((at, end, with)) = self.mentions.completion(self.folder.as_deref()) else {
             return false;
         };
+        if self.context_supported {
+            for mention in clackatoo_protocol::mentions(&with) {
+                self.attach_context(
+                    clackatoo_protocol::ContextRef::File {
+                        path: mention.path.into(),
+                        lines: mention.lines,
+                    },
+                    mention.path.into(),
+                );
+            }
+        }
         self.drive(fonts, |driver| {
             driver.select_byte_range(at, end);
             driver.insert_or_replace_selection(&with);

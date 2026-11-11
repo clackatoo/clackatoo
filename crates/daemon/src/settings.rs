@@ -8,7 +8,6 @@
 //! daemon.web.mode = "tailscale"
 //! daemon.history.lines = 20000
 //! daemon.agents.opencode = { name = "OpenCode", command = { "opencode", "acp" } }
-//! daemon.profiles.review = { about = "Reviews a change for bugs", limits = "read-only" }
 //! ```
 //!
 //! Its options are declared in [`options`]. It's run as the daemon
@@ -41,16 +40,13 @@ use std::time::Duration;
 use literal::Literal;
 
 use crate::agents::{self, CustomAgent, SubagentLimits};
-use crate::profiles::Change;
 use crate::schema::{Info, Place, SetBy, Source, Value};
 
-/// What the daemon's config set: its options, its agents and its
-/// profiles, each with what set it.
+/// What the daemon's config set: its options and agents, each with its source.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     options: BTreeMap<&'static str, (Value, SetBy)>,
     agents: Vec<(CustomAgent, SetBy)>,
-    profiles: Vec<(Change, SetBy)>,
     /// The modules it required, as files, to watch for changes.
     modules: Vec<PathBuf>,
 }
@@ -278,19 +274,14 @@ impl Settings {
         Ok(())
     }
 
-    /// What it says of agents: those it adds, the profiles it adds or
-    /// changes, the limits on chats agents start, and whether agents go
+    /// What it says of agents: those it adds, the limits on chats agents
+    /// start, and whether agents go
     /// on through upgrades.
     #[must_use]
     pub fn agents(&self) -> agents::Configured {
         let small = |name| u8::try_from(self.number(name)).unwrap_or(u8::MAX);
         agents::Configured {
             agents: self.agents.iter().map(|(agent, _)| agent.clone()).collect(),
-            profiles: self
-                .profiles
-                .iter()
-                .map(|(change, _)| change.clone())
-                .collect(),
             subagents: SubagentLimits {
                 working: small("subagents.working"),
                 default: u8::try_from(self.subagents_default()).unwrap_or(u8::MAX),
@@ -301,6 +292,8 @@ impl Settings {
                 notice_turns: self.number("subagents.notice_turns"),
             },
             keep_agents: self.on("upgrade.keep_agents"),
+            claude_plugins: self.on("plugins.claude"),
+            codex_plugins: self.on("plugins.codex"),
         }
     }
 
@@ -425,13 +418,6 @@ impl Settings {
                 &agent_literal(agent),
             ));
         }
-        for (change, _) in &self.profiles {
-            text.push_str(&statement(
-                "daemon.profiles",
-                &change.name,
-                &profile_literal(change),
-            ));
-        }
         text
     }
 }
@@ -458,36 +444,6 @@ fn agent_literal(agent: &CustomAgent) -> Literal {
     }
     if let Some(tasks) = agent.tasks {
         fields.push(("tasks".to_owned(), Literal::Bool(tasks)));
-    }
-    Literal::Table(fields)
-}
-
-/// `change`, as config sets it.
-fn profile_literal(change: &Change) -> Literal {
-    let mut fields = Vec::new();
-    let mut text = |name: &str, value: &Option<String>| {
-        if let Some(value) = value {
-            fields.push((name.to_owned(), Literal::Text(value.clone())));
-        }
-    };
-    text("about", &change.about);
-    text("prompt", &change.prompt);
-    text(
-        "limits",
-        &change.limits.map(|limits| limits.name().to_owned()),
-    );
-    text("agent", &change.agent);
-    for (name, values) in [("model", &change.models), ("effort", &change.efforts)] {
-        let Some(values) = values else { continue };
-        let literal = match values.as_slice() {
-            [(any, value)] if any == "*" => Literal::Text(value.clone()),
-            values => Literal::Table(
-                (values.iter())
-                    .map(|(agent, value)| (agent.clone(), Literal::Text(value.clone())))
-                    .collect(),
-            ),
-        };
-        fields.push((name.to_owned(), literal));
     }
     Literal::Table(fields)
 }
@@ -759,6 +715,13 @@ pub fn rerun(dirs: &Dirs) -> Result<Settings, String> {
 /// Why it wasn't saved: what's wrong with `settings.lua`, or writing it, or
 /// running the config with it.
 pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings, String> {
+    change_model(dirs, |model| model.set(info, value))
+}
+
+fn change_model(
+    dirs: &Dirs,
+    apply: impl FnOnce(&mut saving::Model) -> Result<(), String>,
+) -> Result<Settings, String> {
     let _lock = file::lock(&dirs.daemon)?;
     let path = dirs.daemon.join("settings.lua");
     // A link to nothing isn't written through: where it goes is the
@@ -774,7 +737,7 @@ pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings
     let before = lua::read(&path)?;
     let mut model = saving::Model::parse(before.as_deref().unwrap_or_default())
         .map_err(|why| format!("daemon/settings.lua's {why}, so it wasn't changed"))?;
-    model.set(info, value)?;
+    apply(&mut model)?;
     let text = model.render();
     // Nothing to take out of no file makes none.
     let written = before.as_deref() != Some(text.as_str())

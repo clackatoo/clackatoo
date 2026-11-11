@@ -51,6 +51,7 @@ pub(crate) const DRAFT_MOST: Duration = Duration::from_secs(3);
 /// What the box remembers, beside what's in it.
 #[derive(Debug, Default)]
 pub(super) struct Memory {
+    pub(super) synced_context: Vec<clackatoo_protocol::ContextSelection>,
     /// Where Up and Down have gone through the messages sent, and the text
     /// they showed: typing anything else forgets it.
     pub(super) recall: Option<(Walk, String)>,
@@ -108,6 +109,35 @@ impl ChatView {
             return;
         };
         if !self.memory.touched
+            && self.context.attached.is_empty()
+            && !self.node.draft_context.is_empty()
+        {
+            self.memory.synced_context = self.node.draft_context.clone();
+            self.context.attached = self
+                .node
+                .draft_context
+                .iter()
+                .map(|selection| super::context::Attached {
+                    ready: true,
+                    selection: selection.clone(),
+                    preview: clackatoo_protocol::ContextSnapshot {
+                        grant: String::new(),
+                        bytes: 0,
+                        id: String::new(),
+                        source: selection.source.clone(),
+                        label: format!("{:?}", selection.source),
+                        location: String::new(),
+                        mode: selection.mode,
+                        text: String::new(),
+                        revision: selection.expected.clone().unwrap_or_default(),
+                        captured: 0,
+                        partial: false,
+                        note: "Restored draft selection · preview before sending".into(),
+                    },
+                })
+                .collect();
+        }
+        if !self.memory.touched
             && !self.editing()
             && self.editor.raw_text().is_empty()
             && self.images.is_empty()
@@ -141,7 +171,8 @@ impl ChatView {
     /// Notes whether what's typed has changed since the daemon was last
     /// told, and when, for it to be told as typing pauses.
     pub(super) fn note_draft(&mut self) {
-        let changed = self.editor.raw_text() != self.memory.synced;
+        let changed = self.editor.raw_text() != self.memory.synced
+            || self.context.selections() != self.memory.synced_context;
         self.memory.touched |= changed;
         let changed = changed || self.memory.tell_now;
         if !changed || !self.drafts_supported {
@@ -177,6 +208,7 @@ impl ChatView {
         self.memory.tell_now = false;
         let mut text = self.editor.raw_text().to_owned();
         self.memory.synced.clone_from(&text);
+        self.memory.synced_context = self.context.selections();
         if text.len() > DRAFT_LONGEST {
             text.truncate(text.floor_char_boundary(DRAFT_LONGEST));
         }
@@ -197,6 +229,15 @@ impl ChatView {
             return;
         }
         match response {
+            Response::Context(clackatoo_protocol::ContextReply::Draft {
+                text: message,
+                context,
+            }) => {
+                self.restore_context_draft(&context);
+                let text = joined(&message, self.editor.raw_text());
+                self.put_taken_back(&text);
+                self.tell_draft_at_once();
+            }
             Response::Text(message) => {
                 let text = joined(&message, self.editor.raw_text());
                 self.put_taken_back(&text);
@@ -445,6 +486,7 @@ mod tests {
 
     fn queued(id: u64, text: &str, images: u8) -> QueuedMessage {
         QueuedMessage {
+            context_count: 0,
             id,
             text: text.into(),
             images,

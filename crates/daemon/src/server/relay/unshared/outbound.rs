@@ -134,6 +134,7 @@ impl Daemon {
             | Event::Notified { .. }
             // Sent only to the machine the pane is lent to, of its own.
             | Event::LendBeside { .. }
+            | Event::Work(_)
             | Event::DaemonSettings { .. }
             | Event::Connections(_)
             | Event::Login { .. }
@@ -197,6 +198,13 @@ impl Daemon {
             | Response::Image(_)
             | Response::Picture(_)
             | Response::DaemonSettings(_)
+            | Response::Work(_)
+            | Response::Side(_)
+            | Response::Context(_)
+            | Response::Skills(_)
+            | Response::Specialists(_)
+            | Response::SpecialistSaved
+            | Response::SpecialistFiles(_)
             | Response::HiddenRun { .. }) => response,
         }
     }

@@ -15,7 +15,7 @@ shot easy-terminals
 keys j<CR>
 sleep 800
 shot easy-terminals-changed
-keys }
+keys }}}
 # Down to the subagents working, which the daemon's init.lua sets.
 keys jjjj
 shot easy-agents

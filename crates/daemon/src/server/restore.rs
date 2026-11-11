@@ -18,7 +18,7 @@
 //! each chat on its agent's session, which it opens only once it's shown
 //! or sent a message, loading it so the conversation so far is told, and
 //! nothing told acts (see `chat::resume`); a chat an agent started is
-//! its parent's subagent again, as its profile, with no more than it had
+//! its parent's subagent again, as its specialist, with no more than it had
 //! ([`Daemon::restore_standing`]). A terminal whose shell was
 //! running a command comes back with it in [`Workspaces::restored`], for
 //! windows to offer to put at the new shell's prompt; it's never run by
@@ -46,8 +46,8 @@ use clackatoo_term::Progress;
 
 use super::{Daemon, Hosted};
 use crate::chat::{HostedChat, Standing};
-use crate::profiles::Limits;
 use crate::saved::{self, Pane, Scope, State, Tools};
+use crate::specialists::Limits;
 use crate::workspaces::{Borrowed, MadeTab};
 
 /// How long after something kept changes the workspaces are written: so
@@ -1104,16 +1104,17 @@ impl Daemon {
     /// Where the chat `id`, `chat`, stands among the chats agents
     /// started, to keep: `None` for one the user started.
     fn kept_standing(&self, id: TerminalId, chat: &HostedChat) -> Option<saved::Started> {
-        if !chat.agents_chat() && chat.profile().is_none() {
+        if !chat.agents_chat() && chat.specialist().is_none() {
             return None;
         }
         let relations = chat.relations();
         let parent = (relations.parent).filter(|&parent| self.chat_ref(parent).is_some());
         Some(saved::Started {
+            definition: chat.specialist_definition().cloned().map(Box::new),
             parent: parent.map(|parent| parent.0),
             depth: relations.depth,
             turn: parent.and_then(|parent| Some(self.chat_ref(parent)?.subagent(id)?.turn)),
-            profile: chat.profile().map(str::to_owned),
+            specialist: chat.specialist().map(str::to_owned),
             limits: Some(chat.limits().name().to_owned()),
             kept: chat.kept_by_user(),
             mode: (chat.kept_mode()).map(|(setting, value)| saved::Mode { setting, value }),
@@ -1125,7 +1126,7 @@ impl Daemon {
 
     /// Makes each chat an agent started, made again in `chats` by its ID
     /// in the run that kept `state`, stand as it did: under its parent, on
-    /// its parent's card, as its profile, with its limits, and the mode it
+    /// its parent's card, as its specialist, with its limits, and the mode it
     /// chose, never more than it had nor than its parent has. A chat whose
     /// parent wasn't made again, or in another workspace, is on its own,
     /// with what it may do as it was, and says so. A
@@ -1186,7 +1187,12 @@ impl Daemon {
                         .then(|| of.mode_to_be().map(str::to_owned))
                         .flatten(),
                 ),
-                None => (None, 1, Limits::None, None),
+                None => (
+                    None,
+                    u8::from(started.parent.is_some() || started.depth > 0),
+                    Limits::None,
+                    None,
+                ),
             };
             let limits = match started.limits.as_deref() {
                 Some(name) => Limits::named(name).unwrap_or_else(|| {
@@ -1196,15 +1202,15 @@ impl Daemon {
                     );
                     Limits::ReadOnly
                 }),
-                // A profile is never made again without its limits.
-                None if started.profile.is_some() => Limits::ReadOnly,
+                // A specialist is never made again without its limits.
+                None if started.specialist.is_some() => Limits::ReadOnly,
                 None => Limits::None,
             };
             let standing = Standing {
                 parent,
                 root,
                 depth: started.depth.max(depth),
-                profile: started.profile.clone(),
+                specialist: started.specialist.clone(),
                 limits: limits.max(parent_limits),
                 kept: started.kept,
                 mode: (started.mode.as_ref())
@@ -1222,6 +1228,9 @@ impl Daemon {
                 continue;
             };
             hosted.stand_again(standing);
+            if let Some(definition) = &started.definition {
+                hosted.remember_specialist(definition.as_ref().clone());
+            }
             if let Some(above) = above {
                 hosted.set_subagents(hosted.subagents().min(above));
             }
@@ -1861,6 +1870,53 @@ mod tests {
         }}}]})
     }
 
+    #[test]
+    fn a_user_selected_specialist_restores_as_a_user_chat_with_its_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        let definition = crate::specialists::Specialist {
+            name: "review".into(),
+            instructions: "SAVED REVIEW ROLE".into(),
+            ..crate::specialists::Specialist::default()
+        };
+        let started = serde_json::json!({
+            "specialist": "review", "depth": 0, "limits": "none",
+            "definition": definition,
+            "mode": {"setting":"mode", "value":"acceptEdits"},
+        });
+        let state = serde_json::json!({
+            "clackatoo_workspaces": 1,
+            "workspaces": [kept_workspace("here", &[kept_chat(20, "own specialist", Some(started))])],
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        daemon.restore_workspaces();
+        let chat = daemon
+            .terminals
+            .values()
+            .find_map(|slot| {
+                slot.terminal
+                    .chat_ref()
+                    .filter(|chat| chat.info().title == "own specialist")
+            })
+            .unwrap();
+        assert!(!chat.agents_chat());
+        assert_eq!(chat.relations().depth, 0);
+        assert_eq!(chat.mode_to_be(), Some("acceptEdits"));
+        assert_eq!(chat.specialist_definition(), Some(&definition));
+        assert_eq!(
+            daemon
+                .kept_standing(chat.sender().chat, chat)
+                .unwrap()
+                .definition
+                .as_deref(),
+            Some(&definition)
+        );
+    }
+
     /// A subagent made again never stands with more than it had, nor more
     /// than its parent has, whatever the file says: its limits are its
     /// parent's at least, its depth no less than its parent's and one,
@@ -1880,7 +1936,7 @@ mod tests {
         daemon.keeping = super::Keeping::new(&config);
         let started = |parent: u32, depth: u8, limits: &str, mode: Option<&str>| {
             let mut started = serde_json::json!({
-                "parent": parent, "depth": depth, "profile": "general", "limits": limits,
+                "parent": parent, "depth": depth, "specialist": "general", "limits": limits,
             });
             if let Some(mode) = mode {
                 started["mode"] = serde_json::json!({ "setting": "mode", "value": mode });
@@ -2095,7 +2151,7 @@ mod tests {
         config.workspaces = Some(path.clone());
         daemon.keeping = super::Keeping::new(&config);
         let started = serde_json::json!({
-            "parent": 20, "depth": 1, "profile": "general", "limits": "none", "off_branch": true,
+            "parent": 20, "depth": 1, "specialist": "general", "limits": "none", "off_branch": true,
         });
         let state = serde_json::json!({
             "clackatoo_workspaces": 1,

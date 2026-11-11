@@ -544,6 +544,16 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ];
+    samples.extend(
+        context_samples()
+            .into_iter()
+            .map(|sample| (crate::wire::CONTEXT, sample)),
+    );
+    samples.extend(
+        side_samples()
+            .into_iter()
+            .map(|sample| (crate::wire::SIDE_QUESTIONS, sample)),
+    );
     samples.extend(more().into_iter().map(|sample| (FIRST, sample)));
     // The fallbacks a newer daemon sends in place of what's newer.
     samples.extend([
@@ -932,7 +942,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                             crate::FinishedChat {
                                 chat: TerminalId(7),
                                 agent: "Claude Code".into(),
-                                profile: Some("explore".into()),
+                                specialist: Some("explore".into()),
                                 asked: "Find where turns are drawn".into(),
                                 started: 1_760_000_000,
                                 ended: 1_760_000_042,
@@ -942,7 +952,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                             crate::FinishedChat {
                                 chat: TerminalId(9),
                                 agent: "Codex".into(),
-                                profile: None,
+                                specialist: None,
                                 asked: String::new(),
                                 started: 0,
                                 ended: 0,
@@ -1347,6 +1357,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
                 index: 0,
                 turn: Box::new(Turn {
+                    context: Vec::new(),
                     woke: None,
                     notice: None,
                     prompt: "[Image]".into(),
@@ -1443,6 +1454,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     sending: Some(9),
                     native_steering: true,
                     queued: vec![crate::QueuedMessage {
+                        context_count: 0,
                         id: 9,
                         text: "next".into(),
                         images: 1,
@@ -1799,14 +1811,14 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::SEARCH_COUNT, sample)),
     );
-    // The profile a chat an agent started was started as (CLACKA-179).
-    let profiled = ChatSummary {
-        profile: Some("explore".into()),
+    // The specialist a chat an agent started was started as (CLACKA-179).
+    let specialized = ChatSummary {
+        specialist: Some("explore".into()),
         ..summary()
     };
     samples.push((
-        crate::wire::SUBAGENT_PROFILE,
-        Server(ServerMessage::Event(Event::Chats(vec![profiled]))),
+        crate::wire::SUBAGENT_SPECIALIST,
+        Server(ServerMessage::Event(Event::Chats(vec![specialized]))),
     ));
     samples.extend(
         agent_tasks()
@@ -2258,6 +2270,156 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::RELAY_HINTS, sample)),
     );
+    samples.extend([
+        (
+            crate::wire::SKILLS,
+            Client(ClientMessage::Request(Request::Skills {
+                pane: Some(PaneId(3)),
+            })),
+        ),
+        (
+            crate::wire::SKILLS,
+            Server(ServerMessage::Response(Response::Skills(vec![
+                crate::Skill {
+                    name: "migrate-db".into(),
+                    description: "Create a database migration.".into(),
+                    path: "/project/.agents/skills/migrate-db/SKILL.md".into(),
+                    source: "Project".into(),
+                    problem: Some("context requires runtime-specific execution".into()),
+                    implicit: true,
+                    user_invocable: true,
+                },
+            ]))),
+        ),
+    ]);
+    let specialist = crate::SpecialistDefinition {
+        name: "review".into(),
+        settings: r#"{"instructions":"Review changes"}"#.into(),
+        saved: None,
+        locked: None,
+    };
+    samples.extend([
+        (
+            crate::wire::SPECIALIST_SETTINGS,
+            Client(ClientMessage::Request(Request::Specialists {
+                pane: Some(PaneId(3)),
+            })),
+        ),
+        (
+            crate::wire::SPECIALIST_SETTINGS,
+            Client(ClientMessage::Request(Request::SaveSpecialist {
+                specialist: specialist.clone(),
+            })),
+        ),
+        (
+            crate::wire::SPECIALIST_SETTINGS,
+            Server(ServerMessage::Response(Response::Specialists(vec![
+                specialist,
+            ]))),
+        ),
+        (
+            crate::wire::SPECIALIST_SETTINGS,
+            Server(ServerMessage::Response(Response::SpecialistSaved)),
+        ),
+    ]);
+    let file = crate::SpecialistFile {
+        definition: crate::SpecialistDefinition {
+            name: "reviewer".into(),
+            settings: r#"{"instructions":"Review"}"#.into(),
+            saved: Some("---\nname: reviewer\n---\nReview\n".into()),
+            locked: None,
+        },
+        path: "/project/.agents/specialists/reviewer/SPECIALIST.md".into(),
+        scope: crate::SpecialistScope::Project,
+        editable: true,
+    };
+    samples.extend([
+        (
+            crate::wire::SPECIALIST_FILES,
+            Client(ClientMessage::Request(Request::SpecialistFiles {
+                pane: None,
+            })),
+        ),
+        (
+            crate::wire::SPECIALIST_FILES,
+            Client(ClientMessage::Request(Request::SaveSpecialistFile {
+                pane: Some(PaneId(3)),
+                specialist: file.definition.clone(),
+                scope: crate::SpecialistScope::Project,
+                path: Some(file.path.clone()),
+            })),
+        ),
+        (
+            crate::wire::SPECIALIST_FILES,
+            Server(ServerMessage::Response(Response::SpecialistFiles(vec![
+                file,
+            ]))),
+        ),
+    ]);
+    for state in [
+        crate::WorkState::Queued,
+        crate::WorkState::Running,
+        crate::WorkState::Cancelling,
+        crate::WorkState::Completed,
+        crate::WorkState::Failed,
+        crate::WorkState::Cancelled,
+    ] {
+        let item = crate::WorkItem {
+            id: 7,
+            title: "Indexing outline".into(),
+            scope: Some("/project".into()),
+            state,
+            detail: "Reading files".into(),
+            completed: 3,
+            total: Some(9),
+            cancellable: state.active(),
+        };
+        samples.push((
+            crate::wire::WORK,
+            Server(ServerMessage::Event(Event::Work(vec![item.clone()]))),
+        ));
+        samples.push((
+            crate::wire::WORK,
+            Server(ServerMessage::Response(Response::Work(vec![item]))),
+        ));
+    }
+    for action in [
+        crate::WorkAction::List,
+        crate::WorkAction::Cancel(7),
+        crate::WorkAction::Dismiss(7),
+    ] {
+        samples.push((
+            crate::wire::WORK,
+            Client(ClientMessage::Request(Request::Work(action))),
+        ));
+    }
+    for file in [false, true] {
+        samples.push((
+            crate::wire::CODE_OUTLINES,
+            Client(ClientMessage::Find {
+                id: 81,
+                pane: Some(PaneId(2)),
+                search: Search::CodeSymbols {
+                    query: "auth".into(),
+                    file,
+                    refresh: file,
+                },
+            }),
+        ));
+    }
+    samples.push((
+        crate::wire::CODE_OUTLINES,
+        Server(ServerMessage::Event(Event::Found {
+            id: 81,
+            found: Found::IndexStatus {
+                complete: true,
+                scanning: true,
+                files: 23,
+                message: "partial coverage".into(),
+                ends: vec![11],
+            },
+        })),
+    ));
     samples
 }
 
@@ -4267,7 +4429,7 @@ fn summary() -> ChatSummary {
         parent: Some(TerminalId(7)),
         workspace: Some(WorkspaceId(1)),
         active: 9,
-        profile: None,
+        specialist: None,
         failed: None,
     }
 }
@@ -4621,6 +4783,7 @@ fn links() -> Vec<(LinkId, LinkTarget)> {
 
 fn chat() -> ChatNode {
     ChatNode {
+        draft_context: Vec::new(),
         agent: "Claude Code".into(),
         turns: vec![turn()],
         state: ChatState::Answering,
@@ -4660,6 +4823,7 @@ fn chat() -> ChatNode {
 
 fn turn() -> Turn {
     Turn {
+        context: Vec::new(),
         woke: None,
         notice: None,
         previews: Vec::new(),
@@ -4781,7 +4945,7 @@ fn subagent() -> Subagent {
     Subagent {
         chat: TerminalId(8),
         agent: "claude".into(),
-        profile: Some("explore".into()),
+        specialist: Some("explore".into()),
         model: Some("haiku".into()),
         task: "look".into(),
         status: SubagentStatus::Failed("no".into()),
@@ -4807,6 +4971,209 @@ fn agent_task(kind: crate::AgentTaskKind, state: crate::AgentTaskState) -> crate
         can_stop: true,
         output: None,
     }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one populated sample for every new context variant"
+)]
+fn context_samples() -> Vec<Sample> {
+    use crate::{
+        ContextAction as A, ContextCandidate, ContextKind as K, ContextMode as M, ContextRef as R,
+        ContextReply as P, ContextSelection as S, ContextSnapshot,
+    };
+    let refs = [
+        R::File {
+            path: "src/main.rs".into(),
+            lines: Some((3, 8)),
+        },
+        R::Symbol {
+            path: "src/main.rs".into(),
+            name: "main".into(),
+            lines: (3, 8),
+            signature: true,
+        },
+        R::Diagnostics {
+            path: Some("src/main.rs".into()),
+        },
+        R::Command {
+            terminal: TerminalId(2),
+            line: 14,
+        },
+        R::Terminal {
+            terminal: TerminalId(2),
+            first: 3,
+            last: 8,
+        },
+        R::Change {
+            chat: TerminalId(3),
+            path: "src/main.rs".into(),
+            hunk: 7,
+        },
+        R::Chat {
+            chat: TerminalId(3),
+            first: 1,
+            last: 2,
+            requests: true,
+        },
+        R::Board {
+            board: "work".into(),
+            entry: 5,
+        },
+        R::Project { path: "src".into() },
+        R::Retained {
+            id: "a".repeat(64),
+            grant: "b".repeat(64),
+        },
+        R::Owned {
+            machine: MachineId([4; 16]),
+            source: Box::new(R::File {
+                path: "a".into(),
+                lines: None,
+            }),
+        },
+    ];
+    let selection = S {
+        source: refs[0].clone(),
+        mode: M::Contents,
+        expected: Some("revision".into()),
+    };
+    let snapshot = ContextSnapshot {
+        grant: "grant".into(),
+        id: "snapshot".into(),
+        source: refs[0].clone(),
+        label: "Main source".into(),
+        location: "file:///src/main.rs#L3-L8".into(),
+        mode: M::Contents,
+        text: "fn main() {}".into(),
+        bytes: 12,
+        revision: "revision".into(),
+        captured: 7,
+        partial: true,
+        note: "Unsaved excerpt".into(),
+    };
+    let request = |action| {
+        Sample::Client(ClientMessage::Request(Request::Context {
+            chat: TerminalId(7),
+            action,
+        }))
+    };
+    let reply = |reply| Sample::Server(ServerMessage::Response(Response::Context(reply)));
+    let mut samples = refs
+        .iter()
+        .map(|source| {
+            request(A::Preview(S {
+                source: source.clone(),
+                ..selection.clone()
+            }))
+        })
+        .collect::<Vec<_>>();
+    for kind in [
+        K::All,
+        K::File,
+        K::Symbol,
+        K::Diagnostics,
+        K::Command,
+        K::Change,
+        K::Chat,
+        K::Board,
+        K::Project,
+    ] {
+        samples.push(request(A::Search {
+            kind,
+            query: "auth".into(),
+            offset: 100,
+        }));
+    }
+    samples.push(request(A::Read {
+        turn: 3,
+        id: snapshot.id.clone(),
+    }));
+    samples.push(request(A::Preview(S {
+        mode: M::Reference,
+        ..selection.clone()
+    })));
+    samples.push(reply(P::Snapshot(snapshot.clone())));
+    samples.push(reply(P::Candidates {
+        notice: "Bounded search".into(),
+        items: vec![ContextCandidate {
+            kind: K::Symbol,
+            label: "main".into(),
+            detail: "src/main.rs".into(),
+            source: refs[1].clone(),
+        }],
+        more: true,
+    }));
+    samples.push(reply(P::Draft {
+        text: "draft".into(),
+        context: vec![selection.clone()],
+    }));
+    for action in [
+        ChatAction::SubmitContext {
+            text: "explain".into(),
+            images: vec![],
+            context: vec![selection.clone()],
+            target: Some(crate::ChatTarget {
+                agent: "claude".into(),
+                model: Some("sonnet".into()),
+                budget: 8000,
+            }),
+            steer: true,
+        },
+        ChatAction::DraftContext {
+            text: "draft".into(),
+            context: vec![selection.clone()],
+        },
+    ] {
+        samples.push(Sample::Client(ClientMessage::Request(Request::Chat {
+            terminal: TerminalId(7),
+            action,
+        })));
+    }
+    let mut node = chat();
+    node.draft_context = vec![selection];
+    node.turns[0].context = vec![snapshot];
+    samples.push(Sample::Server(ServerMessage::Response(Response::View(
+        View {
+            title: "Context".into(),
+            cwd: Some("/src".into()),
+            root: Node::Chat(Box::new(node)),
+        },
+    ))));
+    samples
+}
+
+fn side_samples() -> Vec<Sample> {
+    use crate::{SideAction, SideReply};
+    let mut samples = vec![Sample::Server(ServerMessage::Response(Response::Side(
+        SideReply {
+            node: Some(Box::new(ChatNode::default())),
+            notice: "Captured context".into(),
+        },
+    )))];
+    samples.extend(
+        [
+            SideAction::Open {
+                question: "Why cookies?".into(),
+            },
+            SideAction::Read,
+            SideAction::Send {
+                text: "And why HTTP-only?".into(),
+            },
+            SideAction::Stop,
+            SideAction::Discard,
+            SideAction::Keep,
+            SideAction::Attach { turn: 2 },
+        ]
+        .into_iter()
+        .map(|action| {
+            Sample::Client(ClientMessage::Request(Request::Side {
+                chat: crate::TerminalId(1),
+                action,
+            }))
+        }),
+    );
+    samples
 }
 
 #[cfg(test)]

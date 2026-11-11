@@ -147,6 +147,10 @@ pub(crate) enum Action {
     /// Shows the focused editor's Markdown rendered, or its text again, as
     /// `:markdown` does.
     ToggleMarkdown,
+    /// Toggle the outline panel of the current editor.
+    ToggleOutline,
+    /// Focus the outline without closing it.
+    FocusOutline,
     /// Background tabs, as `:bg`, `:bgpane` and `:Background` do.
     Background(crate::command::BackgroundCommand),
     /// From a subagent's pane to the chat that started it.
@@ -344,6 +348,13 @@ fn defaults() -> Keymap<Binding> {
         Action::ToggleInlayHints,
         Some("inlay hints"),
     );
+    bind("nv", "<Space>bo", Action::ToggleOutline, Some("outline"));
+    bind(
+        "nv",
+        "<Space>bO",
+        Action::FocusOutline,
+        Some("focus outline"),
+    );
     // Beside it: `m` for Markdown.
     bind(
         "nv",
@@ -425,6 +436,7 @@ fn name_groups(map: &mut Keymap<Binding>) {
     let modes = parse_modes("nv").expect("the defaults' modes are valid");
     for (keys, name) in [
         ("<Space>p", "project"),
+        ("<Space>b", "buffer"),
         ("<Space>h", "git hunks"),
         ("<Space>g", "agent changes"),
         ("<Space>t", "toggles"),
@@ -610,6 +622,8 @@ impl Desk {
                 );
             }
             Action::ToggleMarkdown => self.run(Command::Markdown),
+            Action::ToggleOutline => self.run(Command::Outline { focus: false }),
+            Action::FocusOutline => self.run(Command::Outline { focus: true }),
             Action::Background(command) => self.run(Command::Background(command)),
         }
     }

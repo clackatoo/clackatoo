@@ -26,6 +26,7 @@ mod highlight;
 mod indents;
 pub mod install;
 mod known;
+pub mod outline;
 pub mod pack;
 mod pieces;
 mod server;

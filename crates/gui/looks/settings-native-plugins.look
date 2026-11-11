@@ -1,0 +1,7 @@
+# Native provider plugins are opt-in, independently for each known runtime.
+size 1280x800
+keys <C-;>:Settings<CR>
+wait-for Appearance
+keys /plugins
+wait-for Allow Claude Code plugins
+shot native-plugins

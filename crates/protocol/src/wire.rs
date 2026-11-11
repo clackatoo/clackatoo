@@ -264,8 +264,8 @@ gates! {
     /// A terminal's search for the match a count says, in one answer:
     /// `Request::Search`'s `count`, answered with `Response::Searched`.
     SEARCH_COUNT = 108,
-    /// The profile a chat an agent started was started as, for windows to
-    /// mark its pane by: `ChatSummary`'s `profile`.
+    /// The specialist a chat an agent started was started as, for windows to
+    /// mark its pane by: `ChatSummary`'s `specialist`.
     SUBAGENT_PROFILE = 109,
     /// What an agent runs in the background of a chat: `ChatNode`'s and
     /// `Subagent`'s `tasks` (`AgentTask`, `AgentTaskKind`,
@@ -487,7 +487,25 @@ gates! {
     /// daemon relaying, which shows the lines to the client that asked
     /// itself.
     RELAY_HINTS = 153,
+    /// Shared skills, discovered by the daemon for Settings.
+    SKILLS = 154,
+    /// Native specialist Settings browser and saved overrides.
+    SPECIALIST_SETTINGS = 155,
+    /// Markdown specialist files, source information and scoped saves.
+    SPECIALIST_FILES = 156,
+    /// Shared daemon background work, its progress and native-window controls.
+    WORK = 157,
+    /// Shared-index editor outlines and project symbol searches.
+    CODE_OUTLINES = 158,
+    /// Captured workspace context attachments.
+    CONTEXT = 159,
+    /// Temporary side questions addressed through a parent chat.
+    SIDE_QUESTIONS = 160,
 }
+
+/// The specialist field's gate. Its historical release name remains in
+/// GATES so the protocol fixtures continue to describe their actual release.
+pub const SUBAGENT_SPECIALIST: u32 = SUBAGENT_PROFILE;
 
 /// The oldest protocol version any peer of this build can speak: older
 /// gates and fixtures are of no more use.
@@ -763,6 +781,7 @@ impl Since for Found {
             | Self::Preview { .. }
             | Self::Done(_) => EARLIER,
             Self::Symbols(_) => SYMBOLS,
+            Self::IndexStatus { .. } => CODE_OUTLINES,
         }
     }
 }
@@ -810,6 +829,7 @@ impl Since for ConnectionState {
 impl Since for Event {
     fn since(&self) -> u32 {
         match self {
+            Self::Work(_) => WORK,
             Self::View { .. }
             | Self::Workspaces(_)
             | Self::Buffer { .. }
@@ -908,6 +928,12 @@ pub fn newest(message: &ServerMessage) -> u32 {
             Response::View(view) => newest_in_node(&view.root),
             Response::Searched { .. } => SEARCH_COUNT,
             Response::HiddenRun { .. } => RELAY_HINTS,
+            Response::Skills(_) => SKILLS,
+            Response::Specialists(_) | Response::SpecialistSaved => SPECIALIST_SETTINGS,
+            Response::SpecialistFiles(_) => SPECIALIST_FILES,
+            Response::Work(_) => WORK,
+            Response::Context(_) => CONTEXT,
+            Response::Side(_) => SIDE_QUESTIONS,
             _ => EARLIER,
         },
         ServerMessage::Event(event) => {
@@ -1333,6 +1359,50 @@ impl Downgrade for ClientMessage {
         {
             return Downgraded::Refused;
         }
+        if wire < SIDE_QUESTIONS && matches!(self, Self::Request(crate::Request::Side { .. })) {
+            return Downgraded::Refused;
+        }
+        if wire < CONTEXT && matches!(self, Self::Request(crate::Request::Context { .. })) {
+            return Downgraded::Refused;
+        }
+        if wire < CODE_OUTLINES
+            && matches!(
+                self,
+                Self::Find {
+                    search: crate::Search::CodeSymbols { .. },
+                    ..
+                }
+            )
+        {
+            return Downgraded::Refused;
+        }
+        if wire < WORK && matches!(self, Self::Request(crate::Request::Work(_))) {
+            return Downgraded::Refused;
+        }
+        if wire < SPECIALIST_FILES
+            && matches!(
+                self,
+                Self::Request(
+                    crate::Request::SpecialistFiles { .. }
+                        | crate::Request::SaveSpecialistFile { .. }
+                )
+            )
+        {
+            return Downgraded::Refused;
+        }
+        if wire < SPECIALIST_SETTINGS
+            && matches!(
+                self,
+                Self::Request(
+                    crate::Request::Specialists { .. } | crate::Request::SaveSpecialist { .. }
+                )
+            )
+        {
+            return Downgraded::Refused;
+        }
+        if wire < SKILLS && matches!(self, Self::Request(crate::Request::Skills { .. })) {
+            return Downgraded::Refused;
+        }
         if let Some(inside) = inside_masked(self, wire) {
             return inside;
         }
@@ -1410,6 +1480,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
+        ChatAction::SubmitContext { .. } | ChatAction::DraftContext { .. } => CONTEXT,
         ChatAction::Remedy { .. } => FAILURE_REMEDY,
         ChatAction::Fork { .. } => CHAT_FORK,
         ChatAction::Rewind { .. } | ChatAction::SwitchBranch { .. } => CHAT_BRANCHES,
@@ -1917,7 +1988,8 @@ impl Downgrade for ServerMessage {
         }
         match self {
             Self::Event(
-                Event::NativeGrantAck { .. }
+                Event::Work(_)
+                | Event::NativeGrantAck { .. }
                 | Event::NativeRequest { .. }
                 | Event::Exited { .. }
                 | Event::Coloured { .. }
@@ -1976,9 +2048,18 @@ impl Downgrade for ServerMessage {
                 Downgraded::To(Self::Response(Response::Found(*found)))
             }
             // Only ever answers a daemon relaying of its protocol.
-            Self::Response(Response::HiddenRun { .. }) if wire >= FALLBACKS => Downgraded::To(
-                Self::Response(Response::Error(Error::Other(TOO_NEW.into()))),
-            ),
+            Self::Response(
+                Response::HiddenRun { .. }
+                | Response::Context(_)
+                | Response::Side(_)
+                | Response::Skills(_)
+                | Response::Specialists(_)
+                | Response::SpecialistSaved
+                | Response::SpecialistFiles(_)
+                | Response::Work(_),
+            ) if wire >= FALLBACKS => Downgraded::To(Self::Response(Response::Error(
+                Error::Other(TOO_NEW.into()),
+            ))),
             Self::Response(_) => Downgraded::Refused,
             _ if wire < FALLBACKS => Downgraded::Dropped,
             // What's newer than the fallbacks has no arm yet, so nothing is.
@@ -2362,6 +2443,7 @@ mod tests {
             Item::Words("Done.".into()),
         ];
         let turn = Turn {
+            context: Vec::new(),
             prompt: "go".into(),
             sent: 1,
             items: items.clone(),
@@ -2692,6 +2774,7 @@ mod tests {
         image.preview = None;
         assert_eq!(read::<crate::ChatImage>(CHAT_IMAGES, &bytes), image);
         let mut turn = crate::Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             prompt: "[Image]".into(),
@@ -2988,7 +3071,8 @@ mod tests {
         // came of image work, and what a picture pane shows, which only a
         // client that asked is sent; and a program's notification, which
         // only a newer window is sent; and the daemon's settings, which an
-        // older window's menu doesn't show.
+        // older window's menu doesn't show; and daemon background work,
+        // which an older window has no indicator or inspector for.
         matches!(
             message,
             ServerMessage::Event(
@@ -2999,6 +3083,7 @@ mod tests {
                     ..
                 } | Event::Paired { .. }
                     | Event::DaemonSettings { .. }
+                    | Event::Work(_)
                     | Event::Image(_)
                     | Event::Picture { .. }
                     | Event::Notified { .. }
@@ -3862,6 +3947,98 @@ mod image_tests {
             let message = ClientMessage::Request(request);
             assert_eq!(message.downgrade(IMAGES), Downgraded::AsIs);
             assert_eq!(message.downgrade(IMAGES - 1), Downgraded::Refused);
+        }
+    }
+}
+
+#[cfg(test)]
+mod code_outline_tests {
+    use super::*;
+    #[test]
+    fn shared_index_searches_are_refused_before_their_protocol_gate() {
+        let request = ClientMessage::Find {
+            id: 41,
+            pane: Some(crate::PaneId(2)),
+            search: crate::Search::CodeSymbols {
+                query: "auth".into(),
+                file: false,
+                refresh: false,
+            },
+        };
+        assert!(matches!(
+            request.downgrade(CODE_OUTLINES - 1),
+            Downgraded::Refused
+        ));
+        assert!(matches!(request.downgrade(CODE_OUTLINES), Downgraded::AsIs));
+        let reply = ServerMessage::Event(Event::Found {
+            id: 41,
+            found: Found::IndexStatus {
+                complete: false,
+                scanning: true,
+                files: 1,
+                message: String::new(),
+                ends: vec![11],
+            },
+        });
+        assert!(matches!(
+            reply.downgrade(CODE_OUTLINES - 1),
+            Downgraded::To(ServerMessage::Event(Event::Found {
+                found: Found::Done(Done::Failed(_)),
+                ..
+            }))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    #[test]
+    fn captures_never_silently_downgrade_to_plain_text() {
+        for action in [
+            crate::ChatAction::SubmitContext {
+                text: "context".into(),
+                images: vec![],
+                context: vec![],
+                target: None,
+                steer: false,
+            },
+            crate::ChatAction::DraftContext {
+                text: "draft".into(),
+                context: vec![],
+            },
+        ] {
+            let message = crate::ClientMessage::Request(crate::Request::Chat {
+                terminal: crate::TerminalId(1),
+                action,
+            });
+            assert!(matches!(
+                message.downgrade(CONTEXT - 1),
+                Downgraded::Refused
+            ));
+            assert!(matches!(message.downgrade(CONTEXT), Downgraded::AsIs));
+        }
+        let message = crate::ClientMessage::Request(crate::Request::Context {
+            chat: crate::TerminalId(1),
+            action: crate::ContextAction::Search {
+                kind: crate::ContextKind::All,
+                query: String::new(),
+                offset: 0,
+            },
+        });
+        assert!(matches!(
+            message.downgrade(CONTEXT - 1),
+            Downgraded::Refused
+        ));
+        let samples = crate::corpus::corpus(CONTEXT);
+        let bytes = crate::corpus::fixture(CONTEXT);
+        let decoded = crate::corpus::read_fixture(CONTEXT, &bytes).unwrap();
+        for (original, decoded) in samples.iter().zip(&decoded) {
+            let encode = |sample: &crate::corpus::Sample| match sample {
+                crate::corpus::Sample::Client(m) => crate::frame::encode(CONTEXT, m).unwrap(),
+                crate::corpus::Sample::Server(m) => crate::frame::encode(CONTEXT, m).unwrap(),
+            };
+            assert_eq!(encode(original), encode(decoded));
         }
     }
 }

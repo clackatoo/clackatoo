@@ -376,3 +376,24 @@ img.image-preview.dropped { width: auto; height: auto; border: none; background:
 .away .ring { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--accent); flex: none; }
 .away.connecting .ring, .away.down .ring { border-color: var(--danger); }
 .away.password .ring { border-color: var(--caution); background: var(--caution); }
+
+/* Workspace context: bounded results and scrollable, selectable snapshots. */
+.context-categories { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; }
+.context-categories button { flex: none; }
+.context-categories [aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.context-browser input { width: 100%; min-height: 44px; }
+.context-results { display: grid; gap: 6px; margin-top: 12px; }
+.context-results button { text-align: left; overflow-wrap: anywhere; }
+.context-attached { display: flex; gap: 8px; align-items: center; justify-content: space-between; overflow-wrap: anywhere; }
+.context-preview { max-height: 40dvh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: 12px; }
+.context-captured { display: block; margin: 8px 0; text-align: left; }
+
+/* Temporary side conversations share the accessible sheet frame. */
+.side-conversation > p { margin: 0; font-size: 13px; }
+.side-conversation { display: flex; flex-direction: column; min-width: 0; gap: .6rem; }
+.side-turns { max-height: 48dvh; overflow: auto; min-width: 0; overflow-wrap: anywhere; }
+.side-turns article { padding: .8rem 0; border-bottom: 1px solid var(--line); }
+.side-turns .prompt { white-space: pre-wrap; margin-bottom: .6rem; }
+.side-turns pre { overflow-x: auto; max-width: 100%; }
+#side-draft { width: 100%; min-height: 5rem; box-sizing: border-box; resize: vertical; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .5rem; padding: .6rem; }
+@media (max-width: 420px) { .side-turns { max-height: 43dvh; } }

@@ -14,6 +14,10 @@ program.
 
 These pages cover chats and their agents, each listed with its sections:
 
+- [Shared Skills](~clackatoo/reference/skills): procedures and skillset bundles
+  shared across agents, their slash commands, discovery folders, native-plugin
+  controls and the Settings browser.
+
 - [Chatting with an Agent](~clackatoo/reference/chatting):
   <span id="opening-a-chat"></span>[Opening a chat](~clackatoo/reference/chatting#opening-a-chat),
   <span id="the-start-page"></span>[The start page](~clackatoo/reference/chatting#the-start-page),
@@ -57,7 +61,7 @@ These pages cover chats and their agents, each listed with its sections:
   <span id="subagents"></span>[Subagents](~clackatoo/reference/chats-together#subagents),
   <span id="a-subagent-s-pane"></span>[A subagent's pane](~clackatoo/reference/chats-together#a-subagent-s-pane),
   <span id="closing"></span>[Closing](~clackatoo/reference/chats-together#closing),
-  <span id="profiles"></span>[Profiles](~clackatoo/reference/chats-together#profiles),
+  <span id="specialists"></span>[Specialists](~clackatoo/reference/chats-together#specialists),
   <span id="subagent-limits"></span>[Subagent limits](~clackatoo/reference/chats-together#subagent-limits).
 - [What an Agent Can Use](~clackatoo/reference/agent-tools):
   <span id="what-the-agent-can-show-you"></span>[What the agent can show you](~clackatoo/reference/agent-tools#what-the-agent-can-show-you),

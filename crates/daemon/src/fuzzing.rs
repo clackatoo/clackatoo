@@ -100,7 +100,7 @@ pub fn saved_workspaces(bytes: &[u8]) {
 
 /// Moves `text`, as an old `agents.toml`, into the daemon's Luau config,
 /// as the first build with it does (see `settings/migrate.rs`), and runs
-/// what it comes to: its agents, profiles and limits on subagents.
+/// what it comes to: its agents, specialists and limits on subagents.
 ///
 /// # Panics
 ///
@@ -114,8 +114,6 @@ pub fn agents_toml(text: &str) {
     assert!((1..=64).contains(&limits.working));
     assert!(limits.default <= limits.working);
     assert!((1..=DEEPEST_SUBAGENTS).contains(&limits.depth));
-    let mut profiles = crate::profiles::built_in();
-    crate::profiles::apply(&settings.agents().profiles, &mut profiles);
 }
 
 /// Reads `pieces`, one after another, as what an agent (one message a

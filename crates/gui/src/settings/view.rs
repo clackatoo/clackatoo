@@ -123,6 +123,12 @@ pub(crate) enum ControlView {
     },
     /// A setting only Advanced has, which a search found.
     Advanced,
+    /// Open a shared skill's source file.
+    Open,
+    /// An explicit draft action.
+    Button(&'static str),
+    /// Wrapped instructions, edited within the draft.
+    Paragraph { text: String, editing: bool },
 }
 
 /// An agent's card.
@@ -386,6 +392,22 @@ impl Lay<'_> {
         width
     }
 
+    /// Fits fixed chrome text to its own available width.
+    fn shortened(&mut self, text: &str, width: f32, font: TextFont, ink: Ink) -> String {
+        if self.width(text, font, ink) <= width {
+            return text.into();
+        }
+        let mut shown = text.to_owned();
+        while !shown.is_empty() {
+            shown.pop();
+            let candidate = format!("{shown}…");
+            if self.width(&candidate, font, ink) <= width {
+                return candidate;
+            }
+        }
+        String::new()
+    }
+
     /// Adds `text` centred on the line through `middle`, from `x`.
     fn text_mid(&mut self, x: f32, middle: f32, text: &str, ink: Ink, font: TextFont) -> f32 {
         let top = middle - self.line(font) / 2.0;
@@ -466,6 +488,20 @@ impl Lay<'_> {
         let mut lines: Vec<String> = Vec::new();
         let mut line = String::new();
         for word in text.split(' ').filter(|word| !word.is_empty()) {
+            if self.width(word, font, ink) > width {
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                for ch in word.chars() {
+                    let mut tried = line.clone();
+                    tried.push(ch);
+                    if !line.is_empty() && self.width(&tried, font, ink) > width {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    line.push(ch);
+                }
+                continue;
+            }
             let tried = if line.is_empty() {
                 word.to_owned()
             } else {
@@ -584,10 +620,15 @@ fn lay_header(lay: &mut Lay<'_>, header: Rect, mode: Mode, search: &Search<'_>) 
     let edge = lay.geometry.edge;
     let middle = header.y + header.height / 2.0;
     let title_x = header.x + lay.u(24.0);
-    let title_width = lay.text_mid(title_x, middle, "Settings", Ink::Bold, HEADER);
+    let compact = header.width < lay.u(700.0);
+    let title_width = if compact {
+        0.0
+    } else {
+        lay.text_mid(title_x, middle, "Settings", Ink::Bold, HEADER)
+    };
     let switch_x = lay_switch(lay, header, mode);
     let rect = Rect {
-        x: title_x + title_width + lay.u(28.0),
+        x: title_x + title_width + if compact { 0.0 } else { lay.u(28.0) },
         y: (middle - lay.u(19.0)).round(),
         width: 0.0,
         height: lay.u(38.0),
@@ -615,12 +656,23 @@ fn lay_header(lay: &mut Lay<'_>, header: Rect, mode: Mode, search: &Search<'_>) 
         lay.text_mid(right, middle, count, Ink::Muted, SMALL_VALUE);
     }
     if search.shown.is_empty() {
-        let placeholder = if search.mono {
+        let placeholder = if compact {
+            "Search…"
+        } else if search.mono {
             "numberwidth, scrolloff, keys…"
         } else {
             "Search every setting…"
         };
-        lay.text_mid(text_x, middle, placeholder, Ink::Muted, TextFont::Ui);
+        let available = (right
+            - text_x
+            - if search.count.is_none() {
+                lay.u(26.0)
+            } else {
+                0.0
+            })
+        .max(0.0);
+        let placeholder = lay.shortened(placeholder, available, TextFont::Ui, Ink::Muted);
+        lay.text_mid(text_x, middle, &placeholder, Ink::Muted, TextFont::Ui);
         if search.count.is_none() {
             // The key that starts a search.
             let cap = Rect {
@@ -762,10 +814,21 @@ pub(crate) fn lay_out(
     } else {
         Ink::Muted
     };
-    lay.text_mid(x, foot_middle, &view.footer, said_ink, HELP);
+
     let mut right = foot.right() - lay.u(24.0);
-    let hints: &[(&str, &str)] = if view.fonts.is_some() {
+    let hints: &[(&str, &str)] = if panel.width < lay.u(700.0) {
+        &[("Esc", "close")]
+    } else if view.title == "Specialists" {
+        &[("Ctrl+S", "save"), ("Esc", "close")]
+    } else if view.fonts.is_some() {
         &[("Enter", "pick"), ("Tab", "every font"), ("Esc", "back")]
+    } else if view.title == "Skills" {
+        &[
+            ("Enter", "open"),
+            ("/", "search"),
+            ("m", "Advanced"),
+            ("Esc", "close"),
+        ]
     } else {
         &[
             ("u", "undo"),
@@ -786,14 +849,27 @@ pub(crate) fn lay_out(
         }
     }
 
+    let footer = lay.shortened(
+        &view.footer,
+        (right - lay.u(16.0) - x).max(0.0),
+        HELP,
+        said_ink,
+    );
+    lay.text_mid(x, foot_middle, &footer, said_ink, HELP);
+
     // The pages, down the side.
     let body = Rect {
         y: header.bottom() + edge,
         height: (foot.y - header.bottom() - edge).max(0.0),
         ..panel
     };
+    let compact = panel.width < lay.u(700.0);
     let side = Rect {
-        width: lay.u(248.0).min(panel.width / 3.0),
+        width: if compact {
+            lay.u(56.0)
+        } else {
+            lay.u(248.0).min(panel.width / 3.0)
+        },
         ..body
     };
     lay.fill(Fill::solid(
@@ -802,7 +878,24 @@ pub(crate) fn lay_out(
     ));
     let mut y = side.y + lay.u(16.0);
     let item_height = lay.u(40.0);
+    let mut group = "";
     for (index, page) in crate::options::easy::Page::ALL.iter().enumerate() {
+        if page.group() != group {
+            if !group.is_empty() {
+                y += lay.u(14.0);
+            }
+            group = page.group();
+            if !compact {
+                lay.text_mid(
+                    side.x + lay.u(24.0),
+                    y + lay.u(10.0),
+                    group,
+                    Ink::Muted,
+                    SMALL,
+                );
+                y += lay.u(28.0);
+            }
+        }
         let item = Rect {
             x: side.x + lay.u(12.0),
             y,
@@ -838,13 +931,10 @@ pub(crate) fn lay_out(
             icon_paint,
         );
         let ink = if picked { Ink::Bold } else { Ink::Plain };
-        lay.text_mid(
-            item.x + lay.u(42.0),
-            middle,
-            page.title(),
-            ink,
-            TextFont::Ui,
-        );
+        if !compact {
+            let title = lay.shortened(page.title(), item.width - lay.u(48.0), TextFont::Ui, ink);
+            lay.text_mid(item.x + lay.u(42.0), middle, &title, ink, TextFont::Ui);
+        }
         lay.hit(item, hit);
         y += item_height + lay.u(2.0);
     }
@@ -865,7 +955,7 @@ pub(crate) fn lay_out(
     #[allow(clippy::cast_precision_loss)]
     let note_height = note_lines as f32 * lay.line(SMALL);
     let note_y = body.bottom() - lay.u(20.0) - note_height;
-    if note_y > y {
+    if !compact && note_y > y {
         let (_, links) = lay.paragraph([side.x + lay.u(24.0), note_y], note_width, &runs, SMALL);
         for link in links {
             lay.hit(link, SettingsHit::Advanced);
@@ -873,11 +963,12 @@ pub(crate) fn lay_out(
     }
 
     // The page.
-    let main_x = side.right() + lay.u(40.0);
+    let main_pad = if compact { 16.0 } else { 40.0 };
+    let main_x = side.right() + lay.u(main_pad);
     let main = Rect {
         x: main_x,
         y: body.y + lay.u(28.0),
-        width: (panel.right() - lay.u(40.0) - main_x)
+        width: (panel.right() - lay.u(main_pad) - main_x)
             .min(lay.u(860.0))
             .max(0.0),
         height: 0.0,
@@ -885,14 +976,14 @@ pub(crate) fn lay_out(
     let title_height = lay.line(TITLE);
     lay.text([main.x, main.y], &view.title, Ink::Bold, TITLE);
     let subtitle_y = main.y + title_height + lay.u(6.0);
-    lay.text(
+    let (subtitle_height, _) = lay.paragraph(
         [main.x, subtitle_y],
-        &view.subtitle,
-        Ink::Muted,
+        main.width,
+        &[(&view.subtitle, Ink::Muted, false)],
         TextFont::Ui,
     );
     let room = Rect {
-        y: subtitle_y + lay.line(TextFont::Ui) + lay.u(22.0),
+        y: subtitle_y + subtitle_height + lay.u(22.0),
         height: 0.0,
         ..main
     };
@@ -1255,7 +1346,8 @@ fn shape(lay: &mut Lay<'_>, row: &RowView, width: f32) -> Shaped {
     }
     let control = control_size(lay, &row.control);
     let beside = width - lay.u(36.0) - control[0] - lay.u(24.0) - lock;
-    let stacked = beside < lay.u(NARROWEST_WORDS);
+    let stacked =
+        matches!(row.control, ControlView::Paragraph { .. }) || beside < lay.u(NARROWEST_WORDS);
     let text_width = if stacked { width - lay.u(36.0) } else { beside };
     let label = lay.lines_of(&row.label, text_width, TextFont::Ui, Ink::Plain);
     let lines = help_lines(lay, &row.help, &row.notes, text_width);
@@ -1322,6 +1414,11 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
         }
         ControlView::Slider { .. } => [lay.u(260.0), lay.u(20.0)],
         ControlView::Stepper(_) => [lay.u(110.0), lay.u(34.0)],
+        ControlView::Paragraph { .. } => [lay.u(440.0), lay.u(134.0)],
+        ControlView::Button(label) => [
+            lay.width(label, HELP, Ink::Accent) + lay.u(28.0),
+            lay.u(28.0),
+        ],
         ControlView::Font(name) => {
             let text = lay.width(name, VALUE, Ink::Plain);
             [(text + lay.u(50.0)).max(lay.u(220.0)), lay.u(36.0)]
@@ -1345,7 +1442,7 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
             width += lay.width("Record…", HELP, Ink::Plain) + lay.u(28.0);
             [width, lay.u(30.0)]
         }
-        ControlView::Advanced => [
+        ControlView::Advanced | ControlView::Open => [
             lay.width("in Advanced", HELP, Ink::Accent) + lay.u(28.0),
             lay.u(28.0),
         ],
@@ -1685,6 +1782,52 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
                 lay.hit(rect, whole);
             }
         }
+        ControlView::Paragraph { text, editing } => {
+            lay.fill(
+                Fill::rounded(rect.to_array(), Paint::Well, lay.u(8.0)).bordered(
+                    edge,
+                    if *editing {
+                        Paint::Accent
+                    } else {
+                        Paint::PaletteEdge
+                    },
+                ),
+            );
+            let shown = if text.is_empty() {
+                "Click to write instructions"
+            } else {
+                text
+            };
+            let mut lines = Vec::new();
+            for line in shown.split('\n') {
+                if line.is_empty() {
+                    lines.push(String::new());
+                } else {
+                    lines.extend(lay.lines_of(line, rect.width - lay.u(24.0), VALUE, Ink::Plain));
+                }
+            }
+            let capacity = (1_u16..=16)
+                .take_while(|n| f32::from(*n) * lay.line(VALUE) + lay.u(16.0) <= rect.height)
+                .count();
+            let cursor = if *editing {
+                lines.iter().position(|l| l.contains('│')).unwrap_or(0)
+            } else {
+                0
+            };
+            let start = cursor.saturating_sub(capacity.saturating_sub(1));
+            for (i, line) in lines.iter().skip(start).take(capacity).enumerate() {
+                lay.text(
+                    [
+                        rect.x + lay.u(12.0),
+                        rect.y + lay.u(8.0) + i as f32 * lay.line(VALUE),
+                    ],
+                    line,
+                    Ink::Plain,
+                    VALUE,
+                );
+            }
+            lay.hit(rect, whole);
+        }
         ControlView::Field { text, editing } => {
             let border = if *editing {
                 Paint::Accent
@@ -1759,7 +1902,7 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
                 lay.hit(rect, whole);
             }
         }
-        ControlView::Advanced => {
+        ControlView::Advanced | ControlView::Open | ControlView::Button(_) => {
             lay.fill(
                 Fill::rounded(rect.to_array(), Paint::AccentFaint, rect.height / 2.0)
                     .bordered(edge, Paint::AccentEdge),
@@ -1767,7 +1910,11 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
             lay.text_mid(
                 rect.x + lay.u(14.0),
                 middle,
-                "in Advanced",
+                match control {
+                    ControlView::Button(label) => label,
+                    ControlView::Open => "Open file",
+                    _ => "in Advanced",
+                },
                 Ink::Accent,
                 HELP,
             );

@@ -412,6 +412,8 @@ mod tests {
             false,
         );
         let prompt = Prompt {
+            resolved_context: false,
+            context: Vec::new(),
             text: "look".into(),
             images: Vec::new(),
         };

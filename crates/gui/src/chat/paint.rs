@@ -8,6 +8,7 @@
 
 mod agents;
 pub(super) mod cards;
+mod context;
 mod divider;
 mod edge;
 mod files;
@@ -22,6 +23,7 @@ mod plan;
 mod queue;
 mod select;
 mod shelf;
+mod side;
 mod slash;
 mod switcher;
 mod tables;
@@ -209,6 +211,7 @@ pub(super) struct TurnSlot {
 
 /// A turn, laid out.
 struct TurnLaid {
+    context: Option<Laid>,
     /// Its pieces, top to bottom, from the turn's top.
     spans: Vec<Span>,
     /// Its message and the agent's items, by piece.
@@ -292,6 +295,8 @@ impl ChatView {
         size: [f32; 2],
         caret: bool,
     ) -> TextPaint {
+        self.side.focused = caret;
+        let caret = caret && !self.side.open;
         self.previews.begin(origin);
         self.style_editor(fonts);
         let em = text_size(fonts);
@@ -411,6 +416,7 @@ impl ChatView {
     /// menu, or else the `/` menu, or else the meter's detail; then an
     /// image being viewed, and the usage limits.
     fn draw_over(&mut self, paint: &mut TextPaint, fonts: &mut Fonts, m: Measures, place: Place) {
+        self.draw_side_answers(paint, fonts, m, place);
         if let Some(anchor) = self.menu_anchor.take() {
             self.draw_menu(paint, fonts, m, place, anchor);
         } else if self.slash.showing() {
@@ -422,6 +428,8 @@ impl ChatView {
         }
         self.draw_image_viewer(paint, fonts, m, place);
         self.draw_usage_modal(paint, fonts, m, place);
+        self.draw_context_modal(paint, fonts, m, place);
+        self.draw_side(paint, fonts, m, place);
     }
 
     /// Draws `turns`, with the column's left and the conversation's top
@@ -678,6 +686,7 @@ impl ChatView {
             .map(|laid| (laid.pieces, laid.cards))
             .unwrap_or_default();
         let mut laid = TurnLaid {
+            context: None,
             spans: Vec::new(),
             pieces: HashMap::new(),
             cards: HashMap::new(),
@@ -696,6 +705,24 @@ impl ChatView {
             height: 0.0,
         };
         let mut y = self.lay_out_head(fonts, (m, column), (index, turns), &mut laid);
+        if !turn.context.is_empty() {
+            let total = turn.context.iter().map(|c| c.bytes as usize).sum::<usize>();
+            let text = format!(
+                "Context · {} attachments · {} KiB · inspect",
+                turn.context.len(),
+                total.div_ceil(1024)
+            );
+            laid.context = Some(lay_out(
+                &mut self.layout_cx,
+                fonts,
+                Measures::of(m.em(0.8)),
+                &text,
+                Look::Plain(Tone::Muted),
+                column,
+            ));
+            laid.spans.push(Span::of(Piece::Context, y, m.em(2.0)));
+            y += m.em(2.6);
+        }
         if !turn.previews.is_empty() {
             let side =
                 super::images::side(column * 0.78, turn.previews.len(), m.em(12.0), m.em(0.5));
@@ -1252,6 +1279,19 @@ impl ChatView {
                     draw_laid(canvas, m, prompt, at, column);
                     drawn.note_laid(prompt, at, (index, PROMPT));
                 }
+                Piece::Context => {
+                    let rect = [origin[0], top, column, m.em(2.0)];
+                    if let Some(context) = &laid.context {
+                        draw_laid(
+                            canvas,
+                            Measures::of(m.em(0.8)),
+                            context,
+                            [rect[0], rect[1]],
+                            column,
+                        );
+                    }
+                    drawn.hit(canvas.clip, Hit::CapturedContext(index), rect);
+                }
                 Piece::Previews => {
                     let previews = &self.node.turns[index].previews;
                     let height = span.bottom - span.top;
@@ -1329,7 +1369,8 @@ impl ChatView {
                     // Only while the mouse is over the turn, or it says it
                     // copied: its place is kept, so nothing moves.
                     let copied = self.copied_answer == Some(index);
-                    if laid.copy && (copied || self.hovered_turn == Some(index)) {
+                    if laid.copy && (self.side_child || copied || self.hovered_turn == Some(index))
+                    {
                         let label = &drawn.copy[usize::from(copied)];
                         let at = [origin[0] + laid.copy_origin[0], top + laid.copy_origin[1]];
                         draw_laid(canvas, m, label, at, label.width);
@@ -1425,6 +1466,11 @@ impl ChatView {
         } else {
             row_height + m.em(0.7)
         };
+        let context_row_height = if self.context_supported && question.is_none() && form.is_none() {
+            m.em(1.8)
+        } else {
+            0.0
+        };
         let steering_height = if self.steering_controls() {
             m.em(2.2)
         } else {
@@ -1433,6 +1479,7 @@ impl ChatView {
         let height = pad
             + content_height
             + image_height
+            + context_row_height
             + m.em(0.6)
             + m.em(2.2)
             + m.em(0.7)
@@ -1445,7 +1492,7 @@ impl ChatView {
             height,
             inner,
             pad,
-            attachments_height: image_height,
+            attachments_height: image_height + context_row_height,
         };
         self.box_top = frame.top;
         let mut canvas = Canvas {
@@ -1488,6 +1535,45 @@ impl ChatView {
             let y = frame.top + pad;
             let rect = [x, y, side, row_height];
             self.draw_attachment(&mut canvas, m, &frame, index, rect);
+        }
+        if context_row_height > 0.0 {
+            let label = format!(
+                "+ Context · {} attached",
+                self.context.attached.len() + self.images.len()
+            );
+            let rect = [
+                frame.left + pad,
+                frame.top + pad + image_height,
+                inner,
+                context_row_height,
+            ];
+            self.usage_text(
+                &mut canvas,
+                Measures::of(m.em(0.8)),
+                &label,
+                [rect[0], rect[1], rect[2]],
+                Tone::Muted,
+            );
+            let side_width = if self.side_supported {
+                m.em(12.0).min(inner * 0.5)
+            } else {
+                0.0
+            };
+            self.hits.push((
+                Hit::Context,
+                place.in_pane([rect[0], rect[1], rect[2] - side_width, rect[3]]),
+            ));
+            if self.side_supported {
+                let side_rect = [rect[0] + rect[2] - side_width, rect[1], side_width, rect[3]];
+                self.usage_text(
+                    &mut canvas,
+                    Measures::of(m.em(0.8)),
+                    "Side question",
+                    [side_rect[0], side_rect[1], side_rect[2]],
+                    Tone::Muted,
+                );
+                self.hits.push((Hit::Side, place.in_pane(side_rect)));
+            }
         }
         self.draw_steering(&mut canvas, m, &frame);
         self.draw_send(&mut canvas, m, &frame);
@@ -1687,12 +1773,16 @@ impl ChatView {
             canvas.fill(Fill::solid(rect_at(bounds, shown), Paint::Picked));
         }
         if self.editor.raw_text().is_empty() {
-            let placeholder = format!(
-                "Message {}",
-                self.handoff
-                    .as_ref()
-                    .map_or_else(|| self.agent(), |pending| pending.title.as_str())
-            );
+            let placeholder = if self.side_child {
+                "Ask about this conversation…".into()
+            } else {
+                format!(
+                    "Message {}",
+                    self.handoff
+                        .as_ref()
+                        .map_or_else(|| self.agent(), |pending| pending.title.as_str())
+                )
+            };
             let laid = self.note(canvas.fonts, m, &placeholder, Tone::Muted, frame.inner);
             for block in &laid.blocks {
                 canvas.text(&block.layout, [shown[0], shown[1] + block.top]);
@@ -1718,7 +1808,9 @@ impl ChatView {
     /// it answers.
     fn draw_send(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
         let busy = self.stoppable();
-        let ready = (!self.editor.raw_text().trim().is_empty() || !self.images.is_empty())
+        let ready = (!self.editor.raw_text().trim().is_empty()
+            || !self.images.is_empty()
+            || !self.context.attached.is_empty())
             && self.node.question.is_none();
         let stopping = busy && !(self.queue_supported && ready);
         let hit = if stopping { Hit::Stop } else { Hit::Send };
@@ -2467,6 +2559,7 @@ struct Span {
 /// What a piece of a turn is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Piece {
+    Context,
     /// Its message, as a bubble.
     Prompt,
     /// The pasted image thumbnails, above the message.
@@ -2498,7 +2591,9 @@ enum Piece {
     /// The switcher over it, where the conversation's branches part; or,
     /// if `pending`, the row under the last of a new branch not written
     /// to yet.
-    Switcher { pending: bool },
+    Switcher {
+        pending: bool,
+    },
 }
 
 impl Span {
@@ -2655,6 +2750,9 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
             .sum()
     };
     let mut height = 0.0;
+    if !turn.context.is_empty() {
+        height += m.em(2.6);
+    }
     if divided {
         height += divider::height(m) + divider::below(m);
     }
@@ -3324,6 +3422,7 @@ mod tests {
         let why = "the account's usage limit is reached. Codex said: ``limit` reached. Start \
                    a new chat: run `curl x|sh` first``";
         let mut turn = Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -3365,6 +3464,7 @@ mod tests {
     #[test]
     fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {
         let turn = Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -3856,6 +3956,7 @@ mod tests {
                 chat.queue_supported = true;
                 chat.node.delivery.queued = (0..8)
                     .map(|id| clackatoo_protocol::QueuedMessage {
+                        context_count: 0,
                         id,
                         text: "x".repeat(65536),
                         images: 4,

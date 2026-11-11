@@ -13,13 +13,16 @@ pub(super) struct Pending {
 
 #[derive(Debug)]
 pub(super) struct Draft {
+    pub(super) context: Vec<super::context::Attached>,
     pub(super) text: String,
     pub(super) images: Vec<ChatImage>,
 }
 
 impl ChatView {
     pub(super) fn choose(&mut self, setting: String, value: String, settled: &mut Settled) {
-        if self.handoff_sent.is_some() {
+        if self.handoff_sent.is_some()
+            || (picker::is_specialist(&setting) && !self.node.turns.is_empty())
+        {
             return;
         }
         if let Some(agent) = picker::switch_to(&setting) {
@@ -54,6 +57,9 @@ impl ChatView {
 
     pub(super) fn choice_rows(&self, menu: &Menu) -> Vec<picker::Row> {
         let mut rows = picker::rows(&self.offer(), menu);
+        if !self.node.turns.is_empty() {
+            rows.retain(|row| !matches!(row, picker::Row::Choice(choice) if picker::is_specialist(&choice.setting)));
+        }
         if let Some(pending) = &self.handoff {
             for row in &mut rows {
                 if let picker::Row::Choice(choice) = row
@@ -87,6 +93,7 @@ impl ChatView {
             images: images.clone(),
         });
         self.handoff_sent = Some(Draft {
+            context: Vec::new(),
             text: self.editor.raw_text().to_owned(),
             images,
         });
@@ -120,6 +127,9 @@ impl ChatView {
         };
         self.editor.set_text(&text);
         let mut images = draft.images;
+        let mut context = draft.context;
+        context.append(&mut self.context.attached);
+        self.context.attached = context;
         images.append(&mut self.images);
         self.images = images;
         self.note_draft();

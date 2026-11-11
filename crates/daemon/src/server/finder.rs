@@ -97,6 +97,13 @@ impl Daemon {
         let job = match search {
             // The language server finds them, then a thread places them.
             Search::Symbols { query } => return self.find_symbols(token, id, pane, &query),
+            Search::CodeSymbols {
+                query,
+                file,
+                refresh,
+            } => {
+                return self.find_code_symbols(token, id, pane, &query, file, refresh);
+            }
             Search::Files => Job::Files(self.project(pane)),
             Search::Grep { pattern, exact } => Job::Grep {
                 project: self.project(pane),
@@ -161,12 +168,14 @@ impl Daemon {
     /// Stops the search the client at `token` numbered `id`, if it's going
     /// on, or waiting for a language server.
     pub(super) fn stop_finding(&mut self, token: Token, id: u64) {
+        self.stop_code_symbols(token, Some(id));
         (self.finds.running).retain(|finding| (finding.token, finding.id) != (token, id));
         self.stop_symbol_searches(|asker, search| (asker, search) == (token, id));
     }
 
     /// Stops the searches of the client at `token`, which has gone.
     pub(super) fn forget_finds(&mut self, token: Token) {
+        self.stop_code_symbols(token, None);
         (self.finds.running).retain(|finding| finding.token != token);
         self.stop_symbol_searches(|asker, _| asker == token);
     }

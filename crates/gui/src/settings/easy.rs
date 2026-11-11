@@ -67,6 +67,8 @@ struct Sliding {
 enum Shown {
     Entry(&'static Entry),
     Advanced(usize),
+    Skill(usize),
+    Specialist(usize),
 }
 
 /// How many of what only Advanced has a search shows.
@@ -143,6 +145,51 @@ impl Easy {
 }
 
 impl SettingsMenu {
+    pub(super) fn specialist_page(&self) -> bool {
+        self.mode == Mode::Easy
+            && self.easy.page() == Page::Specialists
+            && !self.searching()
+            && !self.typing
+    }
+
+    pub(super) fn specialist_focus(&mut self, row: usize, page: Option<Page>) {
+        if let Some(page) = page {
+            self.easy.page = Page::ALL.iter().position(|p| *p == page).unwrap_or(0);
+        }
+        self.easy.focus = row;
+        self.easy.top = 0;
+        self.easy.on_side = false;
+        self.easy.keyed();
+    }
+
+    /// The daemon refreshed the shared skill catalogue.
+    pub(crate) fn skills_came(&mut self, result: Result<Vec<clackatoo_protocol::Skill>, String>) {
+        match result {
+            Ok(skills) => {
+                self.skills_status = if skills.is_empty() {
+                    "No skills found. Add a skill folder to get started.".into()
+                } else {
+                    format!(
+                        "{} shared skills. Open a file to inspect its instructions.",
+                        skills.len()
+                    )
+                };
+                self.skills = skills;
+            }
+            Err(why) => self.skills_status = why,
+        }
+        self.easy.reveal = true;
+    }
+
+    fn open_skill(&self, at: usize) -> Outcome {
+        self.skills.get(at).map_or(Outcome::Nothing, |skill| {
+            Outcome::OpenSkill(super::Place {
+                file: skill.path.clone().into(),
+                line: 1,
+            })
+        })
+    }
+
     /// Whether a search shows what it found in place of a page.
     fn searching(&self) -> bool {
         !self.picker.query().is_empty()
@@ -155,6 +202,25 @@ impl SettingsMenu {
         let daemon = self.daemon;
         let shown = |entry: &Entry| daemon || !entry.daemons();
         if !self.searching() {
+            if self.easy.page() == Page::Specialists {
+                return vec![(
+                    if self.specialists.draft.is_some() {
+                        "Specialist details"
+                    } else {
+                        "Available specialists"
+                    }
+                    .into(),
+                    (0..self.specialist_rows())
+                        .map(|row| Shown::Specialist(self.specialist_field(row)))
+                        .collect(),
+                )];
+            }
+            if self.easy.page() == Page::Skills {
+                return vec![(
+                    "Available skills".into(),
+                    (0..self.skills.len()).map(Shown::Skill).collect(),
+                )];
+            }
             let mut sections: Vec<(String, Vec<Shown>)> = Vec::new();
             for entry in easy::on(self.easy.page()).filter(|entry| shown(entry)) {
                 match sections.last_mut() {
@@ -196,6 +262,24 @@ impl SettingsMenu {
         }
         if !advanced.is_empty() {
             sections.push(("Only in Advanced".to_owned(), advanced));
+        }
+        let query = self.picker.query().to_lowercase();
+        let skills: Vec<_> = self
+            .skills
+            .iter()
+            .enumerate()
+            .filter(|(_, skill)| {
+                let text = format!(
+                    "skills {} {} {} {}",
+                    skill.name, skill.description, skill.source, skill.path
+                )
+                .to_lowercase();
+                query.split_whitespace().all(|word| text.contains(word))
+            })
+            .map(|(at, _)| Shown::Skill(at))
+            .collect();
+        if !skills.is_empty() {
+            sections.push(("Skills".into(), skills));
         }
         sections
     }
@@ -312,7 +396,7 @@ impl SettingsMenu {
                             ),
                         })
                     }
-                    None => None,
+                    None | Some(Shown::Skill(_) | Shown::Specialist(_)) => None,
                 };
                 self.mode = Mode::Advanced;
                 if let Some(index) = picked
@@ -359,6 +443,8 @@ impl SettingsMenu {
             None => Outcome::Nothing,
             Some(Shown::Advanced(index)) => self.go_to_advanced(index),
             Some(Shown::Entry(entry)) => self.activate(entry, None, facts, history),
+            Some(Shown::Skill(at)) => self.open_skill(at),
+            Some(Shown::Specialist(at)) => self.specialist_act(at),
         }
     }
 
@@ -703,6 +789,15 @@ impl SettingsMenu {
         history: &mut History,
     ) -> Outcome {
         self.said = None;
+        if matches!(
+            hit,
+            SettingsHit::Page(_)
+                | SettingsHit::Mode(_)
+                | SettingsHit::Advanced
+                | SettingsHit::Search
+        ) {
+            self.finish_specialist_field();
+        }
         self.easy.keys = false;
         match hit {
             SettingsHit::Panel => Outcome::Nothing,
@@ -740,6 +835,11 @@ impl SettingsMenu {
                     return Outcome::Changed;
                 };
                 match (shown, hit) {
+                    (Shown::Skill(at), _) => self.open_skill(at),
+                    (Shown::Specialist(18), SettingsHit::Control(_, Part::Segment(at))) => {
+                        self.specialist_scope(at == 1)
+                    }
+                    (Shown::Specialist(at), _) => self.specialist_act(at),
                     (Shown::Advanced(index), SettingsHit::Control(..)) => {
                         self.go_to_advanced(index)
                     }
@@ -840,7 +940,20 @@ impl SettingsMenu {
             };
             ("Search".to_owned(), subtitle)
         } else {
-            (page.title().to_owned(), page.subtitle().to_owned())
+            (
+                page.title().to_owned(),
+                if page == Page::Specialists {
+                    if self.specialists.draft.is_some() {
+                        "Edit the draft, then Save. Esc cancels a field edit.".into()
+                    } else {
+                        self.specialists.status.clone()
+                    }
+                } else if page == Page::Skills {
+                    self.skills_status.clone()
+                } else {
+                    page.subtitle().to_owned()
+                },
+            )
         };
         self.easy.focus = self.easy.focus.min(found.saturating_sub(1));
         // Every key bound, once, if a row shows keys.
@@ -853,8 +966,9 @@ impl SettingsMenu {
             Vec::new()
         };
         // Whether a row shows the daemon's settings.
-        let daemons = (sections.iter().flat_map(|(_, rows)| rows))
-            .any(|shown| matches!(shown, Shown::Entry(entry) if entry.daemons()));
+        let daemons = page == Page::Specialists
+            || (sections.iter().flat_map(|(_, rows)| rows))
+                .any(|shown| matches!(shown, Shown::Entry(entry) if entry.daemons()));
         let mut drawn = Vec::new();
         for (heading, rows) in sections {
             let mut views = Vec::new();
@@ -873,6 +987,9 @@ impl SettingsMenu {
         // What's being typed or recorded says how, unless something more
         // was said.
         let editing = match &self.editing {
+            _ if self.specialist_editing() => Some(
+                "Enter finishes the field · Ctrl+J inserts a line · Esc undoes this field edit",
+            ),
             Some(Editing::Value { .. }) => Some("Enter sets it · Esc goes back"),
             Some(Editing::Keys { .. }) => Some(
                 "Press the keys, then Enter to save · Backspace takes one back · Esc goes back",
@@ -894,6 +1011,22 @@ impl SettingsMenu {
             (None, Some(how), ..) => (how.to_owned(), false),
             (None, None, None, Some(failure)) => (failure, true),
             (None, None, None, None) => (SAVES.into(), false),
+        };
+        let footer = if page == Page::Specialists
+            && !searching
+            && self.said.is_none()
+            && self.said_saved.is_none()
+            && editing.is_none()
+        {
+            if self.specialists.draft.is_some() {
+                "Save or Ctrl+S saves the draft · Cancel discards it".into()
+            } else {
+                "Create a specialist or choose an existing role to customize".into()
+            }
+        } else if page == Page::Skills && !searching {
+            "Skills are read from files on the workspace's machine".into()
+        } else {
+            footer
         };
         EasyView {
             machine: super::daemon_elsewhere(facts).filter(|_| daemons),
@@ -922,6 +1055,39 @@ impl SettingsMenu {
     #[allow(clippy::too_many_lines, reason = "each kind of control")]
     fn row_view(&mut self, shown: Shown, searching: bool, facts: &Facts, all: &[Bound]) -> RowView {
         let entry = match shown {
+            Shown::Specialist(at) => return self.specialist_row(at),
+            Shown::Skill(at) => {
+                let skill = &self.skills[at];
+                let status = match &skill.problem {
+                    Some(problem) => (format!("Unavailable: {problem}"), Ink::Warning),
+                    None if !skill.implicit && !skill.user_invocable => (
+                        "Automatic and slash invocation are both disabled".into(),
+                        Ink::Muted,
+                    ),
+                    None if !skill.implicit => (
+                        "User-only · invoke with its slash command".into(),
+                        Ink::Muted,
+                    ),
+                    None if !skill.user_invocable => {
+                        ("Selected automatically by the agent".into(), Ink::Muted)
+                    }
+                    None => (
+                        "Available automatically and as a slash command".into(),
+                        Ink::Muted,
+                    ),
+                };
+                return RowView {
+                    label: format!("/{}", skill.name),
+                    help: skill.description.clone(),
+                    notes: vec![
+                        (skill.source.clone(), Ink::Muted),
+                        status,
+                        (skill.path.clone(), Ink::Muted),
+                    ],
+                    lock: None,
+                    control: ControlView::Open,
+                };
+            }
             Shown::Entry(entry) => entry,
             Shown::Advanced(at) => {
                 let (label, help) = match &self.entries[at] {

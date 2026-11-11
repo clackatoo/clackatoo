@@ -36,6 +36,8 @@ pub(super) const HEIGHT: usize = 8;
 /// Claude Code's and Codex's own interfaces have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Native {
+    /// Open the current conversation's temporary side sheet.
+    Side,
     /// `/clear`, `/new`: the start page, to start a new chat.
     StartPage,
     /// `/resume`: the start page too, which lists the agent's past
@@ -64,6 +66,11 @@ pub(crate) enum Native {
 /// The commands the window does itself, in the order the menu offers
 /// them, each with what it says it does there.
 const OURS: &[(&str, &str, Native)] = &[
+    (
+        "btw",
+        "Ask a side question without changing this conversation",
+        Native::Side,
+    ),
     (
         "clear",
         "Start a new chat, from the start page",
@@ -147,11 +154,18 @@ pub(crate) fn native<'a>(
     text: &'a str,
     offered: &[AgentCommand],
 ) -> Option<(&'static str, Native, &'a str)> {
-    let (name, rest) = interface_command(text, offered)?;
+    let (name, rest) = if clackatoo_protocol::slash_command(text)
+        .is_some_and(|(n, _)| n.eq_ignore_ascii_case("btw"))
+    {
+        ("btw", clackatoo_protocol::slash_command(text)?.1)
+    } else {
+        interface_command(text, offered)?
+    };
     let native = (OURS.iter())
         .find(|(ours, ..)| *ours == name)
         .map_or_else(|| Native::Say(instead(name)), |&(_, _, native)| native);
-    (rest.is_empty() || native == Native::Model).then_some((name, native, rest))
+    (rest.is_empty() || matches!(native, Native::Model | Native::Side))
+        .then_some((name, native, rest))
 }
 
 /// One of the commands the menu offers.
@@ -219,16 +233,20 @@ impl Slash {
     /// [`interface_command`]).
     fn offer(&mut self, offered: &[AgentCommand]) {
         offered.clone_into(&mut self.from);
-        self.items = (offered.iter())
-            .map(|command| Item {
-                name: command.name.clone(),
-                description: command.description.clone(),
-                hint: command.hint.clone(),
-                ours: false,
-            })
-            .collect();
+        self.items = (offered
+            .iter()
+            .filter(|c| !c.name.eq_ignore_ascii_case("btw")))
+        .map(|command| Item {
+            name: command.name.clone(),
+            description: command.description.clone(),
+            hint: command.hint.clone(),
+            ours: false,
+        })
+        .collect();
         for &(name, description, _) in OURS {
-            if !(offered.iter()).any(|command| command.name.eq_ignore_ascii_case(name)) {
+            if name == "btw"
+                || !(offered.iter()).any(|command| command.name.eq_ignore_ascii_case(name))
+            {
                 self.items.push(Item {
                     name: name.to_owned(),
                     description: description.to_owned(),
@@ -427,6 +445,16 @@ impl super::ChatView {
         let Some((name, native, rest)) = native(&typed, &self.node.commands) else {
             return false;
         };
+        if native == Native::Side {
+            if !self.side_supported {
+                self.say("Side questions need a newer daemon.".into());
+                return true;
+            }
+            self.open_side(rest.to_owned());
+            self.editor.set_text("");
+            self.refresh_slash();
+            return true;
+        }
         if !rest.is_empty() && !self.pick_model(rest, settled) {
             return false;
         }
@@ -443,6 +471,7 @@ impl super::ChatView {
         }
         let agent = self.agent().to_owned();
         match native {
+            Native::Side => unreachable!("handled before clearing the draft"),
             Native::StartPage | Native::Sessions => settled.commands.push(Command::Open {
                 place: Place::Tab,
                 kind: Kind::Agent,
@@ -543,7 +572,7 @@ mod tests {
         slash.typed("/", &offered, true);
         assert!(slash.showing());
         let shown = names(&mut slash);
-        assert_eq!(&shown[..3], ["compact", "clear", "new"]);
+        assert_eq!(&shown[..3], ["compact", "clear", "btw"]);
         // The agent's /clear is the agent's: offered once, not as ours.
         let (rows, count) = slash.in_view(100);
         assert_eq!(

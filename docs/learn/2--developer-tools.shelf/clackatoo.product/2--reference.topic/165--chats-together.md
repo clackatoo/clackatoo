@@ -1,7 +1,7 @@
 ---
 title: Chats Working Together
 type: reference
-description: How agents start subagents and message other chats, a subagent's pane, profiles, and the limits on what subagents can do.
+description: How agents start subagents and message other chats, a subagent's pane, specialists, and the limits on what subagents can do.
 related:
   - clackatoo/reference/agents
 ---
@@ -18,7 +18,7 @@ An agent can work with your other chats through more of clackatoo's tools.
 | `list_chats` | Lists the chats in its workspace and family: each one's number, agent, title, folder and workspace, and whether it's idle, working or waiting for you. Then how many subagents it can start (see [Subagent limits](#subagent-limits)). |
 | `send_to_chat` | Sends a chat a message, of at most 16 KiB. |
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
-| `start_chat` | Starts a subagent: a chat with the agent, profile and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. It answers at once, with the chat's number, without waiting for the agent to start: the message goes once it has, and if it can't, the chat fails, saying why, and a wait for it says so too. |
+| `start_chat` | Starts a subagent: a chat with the agent, specialist and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. It answers at once, with the chat's number, without waiting for the agent to start: the message goes once it has, and if it can't, the chat fails, saying why, and a wait for it says so too. |
 | `start_chats` | Starts several at once, up to 16. |
 | `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you have open in a pane, opened and sent back to the background, or whose changes or comments wait for your review: those are yours to close. |
 | `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives every answer to its messages it hasn't had yet, oldest first, or else the last. If the chat still runs something in the background, it says so: the chat might go on by itself when that ends. |
@@ -44,7 +44,7 @@ message that started its work, so the chat above hears it too.
 Your chat doesn't show you that text, which is for the agent. It shows a card
 in the subagents' teal, headed `↳ 2 subagents finished in 3m 4s`, or
 `· 1 failed`, or `↳ 1 subagent failed`, with a line for each chat: its number,
-its profile, or else its agent, how long it worked on the message it answered,
+its specialist, or else its agent, how long it worked on the message it answered,
 how that went if not well, and what it was asked, such as
 `chat 7 · explore · 1m 20s — Find where turns are drawn`. Under each line is
 the first line of its answer. Select the line, or press <kbd>Enter</kbd> or
@@ -63,7 +63,7 @@ that didn't carry them gets its cards back from the text the agent was told,
 which doesn't say how long each chat worked or what it was asked, so its lines
 leave those out.
 
-Agents are told to use `start_chat` or `start_chats`, with a profile, for all
+Agents are told to use `start_chat` or `start_chats`, with a specialist, for all
 subagent work. Claude Code's own Task tool, whose helpers work inside one
 turn,
 [folded under its card](~clackatoo/reference/chat-view#claude-code-s-own-subagents),
@@ -75,7 +75,7 @@ upgrade, and the chats it starts take it too.
 A chat an agent starts runs in the background. Your chat shows it as one line
 under the turn that started it, such as "3 subagents working · 12s ›", with "·
 1 needs you" when one asks you something. Select it, or press <kbd>Enter</kbd>
-on it in normal mode, to see a line for each: its profile, agent and model,
+on it in normal mode, to see a line for each: its specialist, agent and model,
 what it was asked, and how it's going. Select a line, or press
 <kbd>Enter</kbd> on it, to open that chat as a pane beside yours. A subagent
 is a chat like any other: undo its turns, review its changes (your chat's
@@ -93,7 +93,7 @@ remain in the conversation.
 
 A subagent in a pane, one its agent asked to show or one you opened from its
 card, has a teal band across the top that says what it is:
-`↳ subagent of chat 12 · explore`, the chat that started it and the profile it
+`↳ subagent of chat 12 · explore`, the chat that started it and the specialist it
 was started as. Select the band, or press <kbd>Ctrl</kbd>+<kbd>B</kbd> `u`, to
 go to that chat, whichever tab or workspace it's in.
 
@@ -107,7 +107,7 @@ The daemon decides, so every window and client, and another machine's daemon
 relaying for its windows, all close a subagent's pane the same way. A subagent
 whose chat has closed has no card to go back to: its band says so, and closing
 its pane closes it, as for any chat. A daemon older than protocol 109 closes
-the chat with its pane, and its windows' bands don't name the profile; so does
+the chat with its pane, and its windows' bands don't name the specialist; so does
 a window older than 109, to which closing a pane meant closing its chat, as it
 still does.
 
@@ -134,14 +134,18 @@ staying open if there's none. A finished one in the background lets its
 agent's process go after 2 minutes, and its next message brings it back in
 about half a second.
 
-### Profiles
+### Specialists
 
-Each subagent starts as a profile: a role sent before its first message,
-limits, and a default agent and model.
+A specialist gives a chat instructions, optional model and effort defaults,
+skills and skillsets, invocation controls and limits. Select one for your own
+chat before its first message, or let an agent choose one when delegating.
+See [Specialists](~clackatoo/reference/specialists) for configuration and
+nested bundles.
 
-| Profile | Does |
+| Specialist | Does |
 |---|---|
-| `explore` | Quick research on the cheapest model (Haiku; Codex's 6 Luna, low effort). Read-only; answers briefly. |
+| `explore` | Quick, narrow code lookups on a lightweight model (Haiku; Codex's 6 Luna, low effort). Read-only; answers briefly with file references. |
+| `research` | Deeper codebase and architecture investigations across files and available repositories. Read-only; cites inspected code and identifies uncertainties. Inherits the parent's model and effort with the same provider. |
 | `plan` | Reads and thinks on a strong model (Opus; Codex at high effort). Read-only; returns a plan. |
 | `general` | Your chat's agent and model, with no limits of its own. The default. |
 
@@ -156,29 +160,19 @@ questions about edits and commands.
 A subagent never has fewer limits than the chat that started it. One started
 with another agent, which can't share its parent's mode, starts in that
 agent's safest mode, and a parent in a read-only or planning mode makes it
-read-only. A model named in a profile is matched by its value, its name, or
+read-only. A model named in a specialist is matched by its value, its name, or
 the one choice that has it in; if none matches, or several do, the agent's own
 choice stands, and the chat says so.
 
-Add or change profiles in the
-[daemon's config](~clackatoo/reference/config#the-daemon-s-config),
-`daemon/init.lua`. A profile of a built-in one's name changes only what it
-gives:
-
-```lua
-daemon.profiles.review = {
-  about = "Reviews a change for bugs",
-  agent = "codex",
-  model = "gpt-6-luna",   -- or by agent: { claude = "haiku" }; "inherit" for the parent's
-  effort = "low",
-  limits = "read-only",   -- or "no-commands", or "none"
-  prompt = "You review changes for bugs. Say what's wrong, briefly.",
-}
-daemon.profiles.explore = { model = { claude = "sonnet" } }
-```
+Create and edit specialists in **Settings → Agents → Specialists**, or
+write a `SPECIALIST.md` file in `.agents/specialists/NAME`. Its YAML
+frontmatter holds defaults and limits; the Markdown body holds its
+instructions. Personal roles work across projects, and project definitions
+take precedence. The [Specialists reference](~clackatoo/reference/specialists)
+describes the format, discovery and bundle composition.
 
 A message from another chat shows quoted down the left, under "From chat 3 ·
-explore", in the subagents' teal, with the profile it was started as if your
+explore", in the subagents' teal, with the specialist it was started as if your
 chat's agent started it, or else its agent, never as a message of yours; it
 reaches the agent framed as another agent's request, not yours: it's told to
 ask you before anything destructive or outside its task. If the chat is busy,
@@ -212,7 +206,7 @@ it can never gain, through another chat, what its own chat isn't allowed:
 - A chat outside its family must work inside the sender's project, the git
   repository its folder is in, or else that folder, to be messaged.
 - A message to a chat that can do more is refused: one whose Tools setting is
-  looser than the sender's, whose [limits](#profiles) are fewer, counting what
+  looser than the sender's, whose [limits](#specialists) are fewer, counting what
   each one's mode rules out, or whose mode comes later among those its agent
   offers, the first, such as Manual or Read-only, being the safest. Modes of
   different agents can't be compared, so a chat with another agent is messaged
@@ -225,7 +219,7 @@ it can never gain, through another chat, what its own chat isn't allowed:
 - A chat is started only inside the project of the chat starting it, a folder
   linked from inside it to outside included.
 - A chat an agent starts gets its parent's Tools and Browser settings and
-  limits (see [Profiles](#profiles)). With the same agent, it gets its
+  limits (see [Specialists](#specialists)). With the same agent, it gets its
   parent's mode; with another, that agent's safest. An agent that offers no
   modes as session settings can't be held to its safest, so a chat started
   with one fails to start, and says so, whenever its session opens. Modes an

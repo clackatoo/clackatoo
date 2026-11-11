@@ -71,6 +71,12 @@ options! {
     "machine.priority" ("Run the daemon ahead of other programs") in Machine: Kind::Bool => Value::Bool(true);
     /// Whether agents go on through an upgrade, with all they run.
     "upgrade.keep_agents" ("Keep agents running through upgrades") in Agents live:Kind::Bool => Value::Bool(true);
+    /// Allow Claude Code to load its own plugins and skill catalogue.
+    /// Applied when the daemon starts or upgrades.
+    "plugins.claude" ("Allow Claude Code's native plugins") in Agents: Kind::Bool => Value::Bool(false);
+    /// Allow Codex to load its own plugins and skill catalogue.
+    /// Applied when the daemon starts or upgrades.
+    "plugins.codex" ("Allow Codex's native plugins") in Agents: Kind::Bool => Value::Bool(false);
     /// The most chats agents started that may work at once, in all.
     "subagents.working" ("Chats agents started working at once, in all") in Subagents live:number(1, 64) => Value::Number(16);
     /// The Subagents setting a chat of the user's starts with: at most
@@ -221,6 +227,7 @@ mod tests {
             [
                 "machine",
                 "upgrade",
+                "plugins",
                 "subagents",
                 "web",
                 "history",

@@ -61,6 +61,17 @@ pub enum Search {
         /// likes, most often letters in order.
         query: String,
     },
+    /// Source definitions from the shared index, without a language server.
+    /// `file` selects the pane's current file instead of its whole project.
+    /// Only for protocol 158 or later.
+    CodeSymbols {
+        /// Identifier and path word prefixes; empty lists an initial page.
+        query: String,
+        /// Read the current editor file, including unsaved text.
+        file: bool,
+        /// Automatic refreshes preserve cancellation; explicit requests may retry indexing.
+        refresh: bool,
+    },
 }
 
 /// Some of what the daemon found for a search.
@@ -105,6 +116,19 @@ pub enum Found {
     /// Symbols, for [`Search::Symbols`], in the order the server ranks
     /// them. Only from a daemon of protocol 77 or later.
     Symbols(Vec<FoundSymbol>),
+    /// Coverage of a shared-index symbol search. Protocol 158 or later.
+    IndexStatus {
+        /// The current source traversal has been reconciled.
+        complete: bool,
+        /// Indexing is pending or running; a client may refresh partial results.
+        scanning: bool,
+        /// Number of files indexed so far.
+        files: u64,
+        /// A bounded explanation of incomplete coverage or failure.
+        message: String,
+        /// Zero-based ending lines, parallel to the preceding symbol batch.
+        ends: Vec<u64>,
+    },
 }
 
 /// How a search finished.

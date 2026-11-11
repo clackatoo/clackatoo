@@ -1,0 +1,39 @@
+# Shared skills, their sources and invocation controls, grouped Settings.
+size 1280x800
+file .agents/skillsets/database/skillset.toml <<END
+format = 1
+name = "database"
+description = "Database migration procedures."
+version = "0.1.0"
+END
+file .agents/skillsets/database/skills/migrate-db/SKILL.md <<END
+---
+name: migrate-db
+description: Create a database migration and check that existing data remains readable.
+---
+Read the schema, write the migration and test it against existing fixtures.
+END
+file .agents/skills/deploy-service/SKILL.md <<END
+---
+name: deploy-service
+description: Prepare a release for deployment when explicitly requested.
+disable-model-invocation: true
+---
+Check the release before deploying it.
+END
+file .agents/skills/investigate/SKILL.md <<END
+---
+name: investigate
+description: Investigate a problem in a separate Claude session.
+context: fork
+---
+Research the reported problem.
+END
+keys <C-;>:Settings<CR>
+wait-for Appearance
+shot general
+keys }}}}}}}
+wait-for /migrate-db
+shot skills
+keys /migration
+shot skills-search

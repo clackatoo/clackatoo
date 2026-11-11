@@ -233,6 +233,7 @@ mod tests {
             state: ChatState::Answering,
             turns: vec![
                 Turn {
+                    context: Vec::new(),
                     woke: None,
                     notice: None,
                     previews: Vec::new(),
@@ -255,6 +256,7 @@ mod tests {
                     switch: None,
                 },
                 Turn {
+                    context: Vec::new(),
                     woke: None,
                     notice: None,
                     previews: Vec::new(),

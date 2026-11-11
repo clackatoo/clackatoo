@@ -391,6 +391,22 @@ impl Explorer {
             .is_some_and(|listing| listing.entries.iter().any(|entry| entry.name == name))
     }
 
+    /// Whether an already-listed absolute path is a directory, without disk access.
+    pub(crate) fn directory(&self, path: &str) -> bool {
+        if self.root.as_deref() == Some(path) {
+            return true;
+        }
+        let Some((dir, name)) = path.rsplit_once('/') else {
+            return false;
+        };
+        self.listings.get(dir).is_some_and(|listing| {
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.name == name && entry.kind.expands())
+        })
+    }
+
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.search.set_options(options);

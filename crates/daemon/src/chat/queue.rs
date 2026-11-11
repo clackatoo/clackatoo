@@ -31,6 +31,12 @@ impl Pending {
         self.prompt.text.len()
             + self
                 .prompt
+                .context
+                .iter()
+                .map(|c| c.text.len())
+                .sum::<usize>()
+            + self
+                .prompt
                 .images
                 .iter()
                 .map(|i| i.data.len())
@@ -72,7 +78,32 @@ impl HostedChat {
         images: Vec<ChatImage>,
         target: Option<ChatTarget>,
     ) -> Result<u64, String> {
-        validate(&text, &images)?;
+        self.enqueue_user_context(text, images, target, Vec::new(), false)
+    }
+
+    pub(crate) fn enqueue_user_context(
+        &mut self,
+        text: String,
+        images: Vec<ChatImage>,
+        target: Option<ChatTarget>,
+        context: Vec<clackatoo_protocol::ContextSnapshot>,
+        resolved_context: bool,
+    ) -> Result<u64, String> {
+        if context.len() + images.len() > clackatoo_protocol::ContextSnapshot::MAX_COUNT
+            || context
+                .iter()
+                .any(|c| c.text.len() > clackatoo_protocol::ContextSnapshot::MAX_TEXT)
+            || context.iter().map(|c| c.text.len()).sum::<usize>()
+                > clackatoo_protocol::ContextSnapshot::MAX_TOTAL
+        {
+            return Err("Context exceeds its attachment limits.".into());
+        }
+        if text.trim().is_empty() && !context.is_empty() {
+            // A context-only prompt is valid; preserve the user's empty text.
+            validate("Context attached", &images)?;
+        } else {
+            validate(&text, &images)?;
+        }
         if target
             .as_ref()
             .is_some_and(|t| t.agent.len() > 256 || t.model.as_ref().is_some_and(|m| m.len() > 512))
@@ -86,7 +117,12 @@ impl HostedChat {
             .ok_or("Message IDs exhausted.")?;
         let pending = Pending {
             id,
-            prompt: Prompt { text, images },
+            prompt: Prompt {
+                resolved_context,
+                context,
+                text,
+                images,
+            },
             target,
         };
         let bytes = self
@@ -257,6 +293,7 @@ impl HostedChat {
             .messages
             .iter()
             .map(|p| QueuedMessage {
+                context_count: u8::try_from(p.prompt.context.len()).unwrap_or(u8::MAX),
                 id: p.id,
                 text: p.prompt.text.clone(),
                 images: u8::try_from(p.prompt.images.len()).unwrap_or(u8::MAX),

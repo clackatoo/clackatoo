@@ -175,7 +175,7 @@ browser ends on is taken once, and only for that sign-in, and it never goes
 into a chat's history.
 
 This sign-in is apart from the Antigravity IDE's. Its credentials stay on the
-chat's machine, in the private `antigravity-profile` directory beside the
+chat's machine, in the private `antigravity-specialist` directory beside the
 installed agents, and the runtime's scratch files go there too, not in `/tmp`.
 clackatoo doesn't take a sign-in from the IDE, nor silently use an API key
 from the environment.

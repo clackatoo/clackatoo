@@ -10,6 +10,21 @@ clackatoo offers agents tools of its own: to show you things in the window, to
 browse, to see and work the window when you grant it, and to run long jobs
 that survive an upgrade.
 
+## Code outlines
+
+`file_outline`, `search_symbols` and `repo_map` read a shared project code
+index using installed grammars, including unsaved editor text. They report
+partial coverage while indexing, and keep results bounded. See
+[Project Code Outlines](~clackatoo/reference/code-outlines).
+
+## Attached workspace context
+
+`read_context` takes the identifier of an attachment in its own conversation
+and returns its original captured text and provenance. It never follows the
+current source or reads another conversation's attachments. Users choose and
+inspect these snapshots through [Workspace Context](~clackatoo/reference/workspace-context).
+Reference-only snapshots contain no source body.
+
 ## What the agent can show you
 
 Each chat's agent is given tools of clackatoo's own, so it can show you things
@@ -95,7 +110,7 @@ begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any
 tools. While the agent's mode changes nothing, as Claude Code's Plan or
 Codex's Read-only, the tools that run or type commands refuse, whatever Tools
 says, as they do for a chat with
-[limits](~clackatoo/reference/chats-together#profiles): the mode's promise
+[limits](~clackatoo/reference/chats-together#specialists): the mode's promise
 holds for clackatoo's tools too. Turning Tools off, or picking such a mode,
 takes back the questions about clackatoo's tools still waiting that it now
 rules out, refusing those calls, and an Allow is checked against the chat's
@@ -165,7 +180,7 @@ Before its first page, the chat asks: Allow for this chat, or Reject. The
 browser is clackatoo's own headless Chromium, with a profile of its own, never
 yours, so nothing is signed in, and each chat's page is kept apart from the
 others'. Downloads are turned off. A chat whose
-[limits](~clackatoo/reference/chats-together#profiles) are read-only or no
+[limits](~clackatoo/reference/chats-together#specialists) are read-only or no
 commands, as `explore` and `plan` are, or whose agent's mode is Plan or
 Read-only, reads pages but clicks, types and presses keys in none, and opens
 no `data:` page. That's not a sandbox: any page runs its own scripts, so an
@@ -188,8 +203,8 @@ hears of the first 8 since it last used the browser, and how many more there
 were. A page's address and title are cut to 2 KiB wherever they're kept, shown
 or sent, as a page can make its address megabytes long, many times a second.
 
-A snap of Chromium can only use a profile in its own folder under `~/snap`,
-and anywhere else it would use yours: clackatoo puts its profile there, checks
+A snap of Chromium can only use a specialist in its own folder under `~/snap`,
+and anywhere else it would use yours: clackatoo puts its specialist there, checks
 once the browser has started that it's using it, and stops it at once, and
 never starts it again, if it isn't.
 

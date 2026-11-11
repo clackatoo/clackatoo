@@ -64,7 +64,7 @@ pub(in crate::chat) fn answer_piece(row: usize) -> usize {
 impl ChatView {
     /// What heads `turn`, a message from another chat's agent or a notice
     /// from clackatoo, and in what: "From chat 7 · explore", with the
-    /// profile the chat was started as, if it's one of this chat's own,
+    /// specialist the chat was started as, if it's one of this chat's own,
     /// or else its agent; or what the notice says.
     pub(super) fn sender_line(&self, turn: &Turn, from: &Sender) -> (String, Tone) {
         if let Some(notice) = &turn.notice {
@@ -75,10 +75,10 @@ impl ChatView {
             };
             return (notice.heading(&from.title), tone);
         }
-        let profile = (self.node.subagents.iter())
+        let specialist = (self.node.subagents.iter())
             .find(|entry| entry.chat == from.chat)
-            .and_then(|entry| entry.profile.as_deref());
-        let what = profile.unwrap_or(&from.agent);
+            .and_then(|entry| entry.specialist.as_deref());
+        let what = specialist.unwrap_or(&from.agent);
         (format!("From chat {} · {what}", from.chat), Tone::Subagent)
     }
 
@@ -325,7 +325,7 @@ mod tests {
         FinishedChat {
             chat: TerminalId(chat),
             agent: "Claude Code".into(),
-            profile: (chat == 5).then(|| "explore".into()),
+            specialist: (chat == 5).then(|| "explore".into()),
             asked: format!("Find thing {chat}"),
             started: 10_000,
             ended: 90_000,
@@ -355,7 +355,7 @@ mod tests {
         node.subagents = vec![Subagent {
             chat: TerminalId(5),
             agent: "Claude Code".into(),
-            profile: Some("explore".into()),
+            specialist: Some("explore".into()),
             model: None,
             task: "Find thing 5".into(),
             status: SubagentStatus::Done,

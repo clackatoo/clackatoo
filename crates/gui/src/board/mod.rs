@@ -120,6 +120,13 @@ pub(crate) struct BoardPane {
 }
 
 impl BoardPane {
+    pub(crate) fn context_ref(&self) -> Option<clackatoo_protocol::ContextRef> {
+        let entry = self.entries.get(self.cursor)?;
+        Some(clackatoo_protocol::ContextRef::Board {
+            board: self.summary.as_ref()?.name.clone(),
+            entry: u64::from(entry.id),
+        })
+    }
     pub(crate) fn new(board: BoardId, options: &Options) -> Self {
         Self {
             board,

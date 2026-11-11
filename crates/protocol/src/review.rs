@@ -69,7 +69,7 @@ pub struct ReviewList {
     /// The chat it's of, if any.
     pub chat: Option<TerminalId>,
     /// What the chat's called: its pane's title, or for a subagent, its
-    /// profile and number, as `explore (chat 7)`.
+    /// specialist and number, as `explore (chat 7)`.
     pub chat_name: String,
     /// What it lists, with a turn's index worked out.
     pub scope: Option<ReviewScope>,
@@ -90,7 +90,7 @@ pub struct ReviewList {
 pub struct ReviewChat {
     /// The chat.
     pub chat: TerminalId,
-    /// What it's called: for a subagent, its profile and number, as
+    /// What it's called: for a subagent, its specialist and number, as
     /// `explore (chat 7)`.
     pub name: String,
     /// For a subagent of the review's chat, or one under it: what it was

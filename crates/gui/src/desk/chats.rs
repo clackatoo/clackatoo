@@ -256,8 +256,15 @@ impl Desk {
     /// mode, to say what to do with them. The daemon sends the lines' text
     /// with the message, as they are when it's sent.
     pub(super) fn ask_chat(&mut self, lines: Option<(u64, u64)>) {
+        if let Some((source, label)) = self
+            .shown
+            .and_then(|shown| self.outline_context(shown.pane))
+        {
+            self.attach_to_chat(source, label);
+            return;
+        }
         let Some((editor, copy)) = self.focused_editor() else {
-            self.refuse("this pane has no file to ask a chat about".into());
+            self.ask_workspace_context();
             return;
         };
         let Some(shown) = self.shown else { return };
@@ -279,6 +286,10 @@ impl Desk {
             self.refuse("there's no chat in this tab to ask: Ctrl+B a opens one".into());
             return;
         };
+        if self.pane_machine(pane) != self.pane_machine(shown.pane) {
+            self.refuse("Choose a chat on the source object's machine.".into());
+            return;
+        }
         let Some(terminal) = chat_of(self, pane) else {
             return;
         };
@@ -299,6 +310,79 @@ impl Desk {
         if let Some(chat) = self.chats.get_mut(&terminal) {
             chat.enter_insert_mode();
             self.mode = super::WindowMode::Insert;
+        }
+    }
+
+    /// Attach a selected workspace object to the most recently used chat.
+    pub(super) fn attach_to_chat(
+        &mut self,
+        mut source: clackatoo_protocol::ContextRef,
+        label: String,
+    ) {
+        if !self.daemon_has(clackatoo_protocol::wire::CONTEXT) {
+            self.refuse("Update the daemon to attach workspace context.".into());
+            return;
+        }
+        let Some(shown) = self.shown else { return };
+        let chat_of = |desk: &Self, pane: PaneId| -> Option<TerminalId> {
+            let (_, _, found) = desk.workspaces.find_pane(pane)?;
+            let terminal = found.content.terminal()?;
+            desk.chats.contains_key(&terminal).then_some(terminal)
+        };
+        let Some(pane) = self.recent_in_tab(shown.pane, |desk, pane| chat_of(desk, pane).is_some())
+        else {
+            self.refuse("Open a chat in this tab to attach context.".into());
+            return;
+        };
+        if self.pane_machine(pane) != self.pane_machine(shown.pane) {
+            self.refuse("Choose a chat on the source object's machine.".into());
+            return;
+        }
+        let Some(terminal) = chat_of(self, pane) else {
+            return;
+        };
+        if let clackatoo_protocol::ContextRef::Change { chat, .. } = &mut source
+            && chat.0 == 0
+        {
+            *chat = terminal;
+        }
+        if let Some(chat) = self.chats.get_mut(&terminal) {
+            chat.view_mut().attach_context(source, label);
+            chat.enter_insert_mode();
+        }
+        self.show_pane(pane);
+        self.mode = super::WindowMode::Insert;
+    }
+
+    fn ask_workspace_context(&mut self) {
+        let Some(shown) = self.shown else { return };
+        let source = self
+            .focused_terminal()
+            .and_then(|id| {
+                self.panes
+                    .get(&id)
+                    .and_then(super::super::pane::Pane::context_ref)
+            })
+            .or_else(|| {
+                self.reviews
+                    .panes
+                    .get(&shown.pane)
+                    .and_then(super::super::review::Review::context_ref)
+            })
+            .or_else(|| {
+                self.focused_board()
+                    .and_then(super::super::board::BoardPane::context_ref)
+            })
+            .or_else(|| {
+                self.focused_chat()
+                    .and_then(|chat| chat.view().context_ref(chat.terminal()))
+            });
+        if let Some(source) = source {
+            self.attach_to_chat(source, "Selected workspace context".into());
+        } else {
+            self.refuse(
+                "Select a file, terminal command, review hunk or chat answer to attach.".into(),
+            );
         }
     }
 

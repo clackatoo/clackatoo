@@ -263,6 +263,7 @@ mod tests {
             agent: "Claude Code".into(),
             state: ChatState::Answering,
             turns: vec![Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),

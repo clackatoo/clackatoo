@@ -1,0 +1,27 @@
+# A temporary child sheet opens while the main conversation stays independent.
+size 1480x940
+keys <C-;>:Agent claude<CR>
+keys i
+type Explain the authentication design
+keys <CR>
+wait-for echo: Explain the authentication design
+type /btw Why cookies rather than JWTs?
+keys <CR>
+sleep 450
+shot side-wide
+type And what about CSRF?
+keys <CR>
+sleep 350
+shot side-follow-up
+keys <Esc>
+type A main draft that must stay here
+shot side-hidden
+# Reopen through the slash command without losing the main draft to a send.
+keys <C-a>
+keys <C-k>
+type /btw
+keys <CR>
+sleep 200
+size 480x740
+shot side-narrow
+keys <Esc>

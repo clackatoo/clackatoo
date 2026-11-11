@@ -107,3 +107,18 @@ Press `<Space>th` again to turn them back on.
 ```check
 option inlayhints
 ```
+
+## Editor outline and project symbols
+
+`<Space>bo` or `:Outline` toggles an outline beside a saved source file.
+`<Space>bO` or `:OutlineFocus` focuses it. Use `j`/`k`, arrows and `Enter`,
+or click a definition, to jump there. `Esc` returns to the editor while
+keeping the outline visible; `q` or its cross closes it. `r` refreshes it.
+It follows the current file, cursor and unsaved edits.
+
+`<Space>ps` or `:ProjectSymbols` finds definitions across the shared project
+index by identifier and path word prefixes. It shows partial results while
+indexing and updates them as more source is covered. Both views use installed
+grammars without needing a language server. `<Space>bs` remains the
+language-server file-symbol picker; older daemons keep their language-server
+project search too.

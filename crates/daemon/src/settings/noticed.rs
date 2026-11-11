@@ -1,7 +1,7 @@
 //! What a run of the daemon's config, as its files changed outside
 //! clackatoo, changed that the user should know of: what runs programs,
 //! what lets the web in, and what keeps lines programs mark secret. That's
-//! the agents (every field of every one), the profiles, the limits on
+//! the agents (every field of every one), the limits on
 //! chats agents start, raised, the web app's options, and the `hints`
 //! loosened. Every window says it, and the log; nothing waits on it.
 //!
@@ -13,14 +13,14 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 
-use super::{Settings, agent_literal, options, profile_literal};
+use super::{Settings, agent_literal, options};
 use crate::agents::{Configured, SubagentLimits};
 use crate::schema::Value;
 
 /// What a run of the config says of what's noticed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Noticed {
-    /// The agents, profiles and limits.
+    /// The agents and limits.
     configured: Configured,
     /// Each of the web app's options, `web.mode` and the rest.
     web: BTreeMap<&'static str, Value>,
@@ -90,9 +90,9 @@ fn shown(word: &OsStr) -> String {
 
 /// What `new` changes of `old` that's noticed, each named, as config names
 /// it, with what it was and what it is: an agent's field, `agents.claude
-/// command`, or a whole agent added or taken out, `agents.mine`; a profile,
+/// command`, or a whole agent added or taken out, `agents.mine`; a specialist,
 /// as a whole; each limit raised; each of the web app's options; and each
-/// hint loosened. Agents and profiles go by name, so their order is no
+/// hint loosened. Agents go by name, so their order is no
 /// change.
 #[must_use]
 pub fn changes(old: &Noticed, new: &Noticed) -> Vec<(String, String, String)> {
@@ -124,10 +124,18 @@ pub fn changes(old: &Noticed, new: &Noticed) -> Vec<(String, String, String)> {
     changes
 }
 
-/// What `new` changes of `old`'s agents and profiles, said as [`changes`]
+/// What `new` changes of `old`'s agents, said as [`changes`]
 /// says it.
 fn programs(old: &Configured, new: &Configured) -> Vec<(String, String, String)> {
     let mut changes = Vec::new();
+    for (name, before, after) in [
+        ("plugins.claude", old.claude_plugins, new.claude_plugins),
+        ("plugins.codex", old.codex_plugins, new.codex_plugins),
+    ] {
+        if before != after {
+            changes.push((name.into(), before.to_string(), after.to_string()));
+        }
+    }
     // On one line, as a window shows it.
     let written = |literal: &super::Literal| {
         let written = literal.written(0);
@@ -173,24 +181,6 @@ fn programs(old: &Configured, new: &Configured) -> Vec<(String, String, String)>
         if !(new.agents.iter()).any(|each| each.name == agent.name) {
             let gone = written(&agent_literal(agent));
             changes.push((format!("agents.{}", agent.name), gone, String::new()));
-        }
-    }
-    for profile in &new.profiles {
-        let before = (old.profiles.iter()).find(|each| each.name == profile.name);
-        if before != Some(profile) {
-            let was = before.map(|before| written(&profile_literal(before)));
-            let is = written(&profile_literal(profile));
-            changes.push((
-                format!("profiles.{}", profile.name),
-                was.unwrap_or_default(),
-                is,
-            ));
-        }
-    }
-    for profile in &old.profiles {
-        if !(new.profiles.iter()).any(|each| each.name == profile.name) {
-            let gone = written(&profile_literal(profile));
-            changes.push((format!("profiles.{}", profile.name), gone, String::new()));
         }
     }
     changes

@@ -7,7 +7,7 @@
 //! with the comments it had. A line the config can't run, as a key that
 //! was never a setting or a value out of its range, is written commented
 //! out, with why: what's written always runs. A field an agent or a
-//! profile never had is left out alone, as before, keeping the agent. Any
+//! specialist never had is left out alone, as before, keeping the agent. Any
 //! of the web app's left out keeps the web app off, as a `web.toml` that
 //! went wrong did, until it's put right.
 //!
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::literal::{self, Literal};
-use super::lua::{self, AGENT_FIELDS, Chunk, PROFILE_FIELDS};
+use super::lua::{self, AGENT_FIELDS, Chunk};
 use super::{Dirs, HEADER};
 use crate::schema::Source;
 
@@ -530,7 +530,7 @@ fn statements(
                     left_out,
                 ));
             }
-            (None, "agents" | "profiles" | "subagents" | "upgrade") => {
+            (None, "agents" | "subagents" | "upgrade") => {
                 let Some(inner) = item.as_table_like() else {
                     let code = format!("{key} = {}", item.to_string().trim());
                     let why = format!("{key} is a table");
@@ -540,7 +540,6 @@ fn statements(
                 };
                 let fields = match key {
                     "agents" => Some(("an agent", AGENT_FIELDS)),
-                    "profiles" => Some(("a profile", PROFILE_FIELDS)),
                     _ => None,
                 };
                 tables(&mut statements, comments, key, inner, fields, left_out);
@@ -608,9 +607,10 @@ fn set(
     let mut kept = None;
     if let Some(inner) = item.as_table_like() {
         let mut literal = Vec::new();
-        for (name, field) in inner.iter() {
+        for (original, field) in inner.iter() {
+            let name = original;
             comments.extend(
-                (inner.key(name))
+                (inner.key(original))
                     .map(|key| comments_in(key.leaf_decor()))
                     .unwrap_or_default(),
             );
@@ -763,8 +763,8 @@ mod tests {
              command = [\"claude-agent-acp\"]\n\
              tasks = false\n\
              \n\
-             [profiles.review]\n\
-             about = \"Reviews a change\"\n\
+             [specialists.review]\n\
+             description = \"Reviews a change\"\n\
              agent = \"codex\"\n\
              model = { claude = \"haiku\", codex = \"gpt-6-luna\" }\n\
              limits = \"read-only\"\n\
@@ -794,18 +794,6 @@ mod tests {
         assert_eq!(opencode.command, ["opencode", "acp"]);
         assert_eq!(opencode.starting_mode.as_deref(), Some("build"));
         assert_eq!(configured.agents[1].tasks, Some(false));
-        let review = &configured.profiles[0];
-        assert_eq!(review.agent.as_deref(), Some("codex"));
-        assert_eq!(review.limits, Some(crate::profiles::Limits::ReadOnly));
-        assert_eq!(
-            review.models.as_deref(),
-            Some(
-                &[
-                    ("claude".into(), "haiku".into()),
-                    ("codex".into(), "gpt-6-luna".into())
-                ][..]
-            )
-        );
         assert_eq!(configured.subagents.working, 8);
         assert_eq!(configured.subagents.default, 4);
         assert!(!configured.keep_agents);
@@ -947,7 +935,7 @@ mod tests {
         }
     }
 
-    /// A field an agent or profile never had is left out alone: the agent
+    /// A field an agent or specialist never had is left out alone: the agent
     /// stays, as before the Luau config.
     #[test]
     fn an_unknown_field_leaves_out_only_itself() {
@@ -956,7 +944,7 @@ mod tests {
             &dirs,
             "agents.toml",
             "[agents.mine]\ncommand = [\"mine-acp\"]\ncolour = \"red\"\n\n\
-             [profiles.review]\nabout = \"x\"\nwhen = 3\n",
+             [specialists.review]\ndescription = \"x\"\nwhen = 3\n",
         );
         once(&dirs, &mut Vec::new());
         let text = std::fs::read_to_string(dirs.daemon.join("settings.lua")).unwrap();
@@ -969,7 +957,6 @@ mod tests {
             .settings
             .agents();
         assert_eq!(configured.agents[0].command, ["mine-acp"]);
-        assert_eq!(configured.profiles[0].about.as_deref(), Some("x"));
     }
 
     /// Any of web.toml left out keeps the web app off until it's put

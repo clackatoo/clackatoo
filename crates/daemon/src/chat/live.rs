@@ -89,6 +89,8 @@ impl HostedChat {
         if let Some(queued) = live.queued {
             self.role = queued.role;
             self.queued = Some(Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: queued.text,
                 images: queued.images.into_iter().map(restore_image).collect(),
             });

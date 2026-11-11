@@ -70,6 +70,7 @@ pub(super) fn request_names(request: &Request) -> Asked {
     use Named::{Buffer, Machine, Pane, Picture, Tab, Terminal, Workspace};
     let mut names = Vec::new();
     match *request {
+        Request::Context {chat,..} | Request::Side {chat,..}=>names.push(Terminal(chat)),
         // What only this machine's own clients ask: what it's connected
         // to, what it lends, and its own settings.
         Request::Connect { .. }
@@ -78,6 +79,12 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::WatchConnections { .. }
         | Request::Lent
         | Request::DaemonSettings
+        | Request::Work(_)
+        | Request::Skills { .. }
+        | Request::Specialists {..}
+        | Request::SaveSpecialist {..}
+        | Request::SpecialistFiles {..}
+        | Request::SaveSpecialistFile {..}
         | Request::SetDaemonOption { .. } => return Asked::Own,
         Request::Review(ref action) => return Asked::Review(action.clone()),
         // What's inside names what it names.

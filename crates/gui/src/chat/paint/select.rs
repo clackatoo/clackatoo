@@ -206,6 +206,7 @@ impl ChatView {
             Piece::Item(piece) | Piece::Card(piece) | Piece::Rule(piece) => key.piece == piece,
             Piece::Handoff
             | Piece::Previews
+            | Piece::Context
             | Piece::Note
             | Piece::Footer
             | Piece::Badge
@@ -307,6 +308,7 @@ impl ChatView {
                 }
                 Piece::Handoff
                 | Piece::Previews
+                | Piece::Context
                 | Piece::Note
                 | Piece::Footer
                 | Piece::Badge

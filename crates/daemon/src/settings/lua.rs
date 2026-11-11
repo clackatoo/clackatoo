@@ -24,7 +24,6 @@ use mlua::{Lua, LuaOptions, StdLib, Table, Value as LuaValue, VmState};
 use super::options::{self, ALL};
 use super::{Failure, Settings};
 use crate::agents::CustomAgent;
-use crate::profiles::{Change, Limits};
 use crate::schema::{Info, Kind, Place, SetBy, Source, Value};
 
 /// The longest a run of the config may take as the daemon starts.
@@ -36,10 +35,6 @@ pub(crate) const UPGRADE_TIME: Duration = Duration::from_millis(200);
 
 /// What an agent's table, `daemon.agents.NAME`, may have.
 pub(crate) const AGENT_FIELDS: &[&str] = &["name", "command", "mode", "tasks"];
-
-/// What a profile's table, `daemon.profiles.NAME`, may have.
-pub(crate) const PROFILE_FIELDS: &[&str] =
-    &["about", "prompt", "limits", "agent", "model", "effort"];
 
 /// The most times a run may call a function or loop back, as Luau's
 /// interrupt counts them: far beyond any config's, and short of [`TIME`]
@@ -106,10 +101,9 @@ pub(crate) struct Chunk {
 /// What a run keeps, as the config sets it.
 struct State {
     options: RefCell<BTreeMap<&'static str, (Value, SetBy)>>,
-    /// The agents and profiles set, in the order first set, with what set
+    /// The agents set, in the order first set, with what set
     /// each last. Their tables are in the Lua's own store.
     agents: RefCell<Vec<(String, SetBy)>>,
-    profiles: RefCell<Vec<(String, SetBy)>>,
     /// Whose file is running.
     source: Cell<Source>,
     files: RefCell<Vec<Arc<str>>>,
@@ -191,7 +185,6 @@ pub(crate) fn run(
     let state = Rc::new(State {
         options: RefCell::default(),
         agents: RefCell::default(),
-        profiles: RefCell::default(),
         source: Cell::new(Source::Settings),
         files: RefCell::default(),
         modules: RefCell::default(),
@@ -250,7 +243,7 @@ fn failure(err: &mlua::Error) -> Failure {
 }
 
 /// A Luau in its sandbox, with the config's API, and the store the agents
-/// and profiles it sets are kept in.
+/// it sets are kept in.
 fn sandbox(state: &Rc<State>, dirs: &[PathBuf], limit: Duration) -> mlua::Result<(Lua, Table)> {
     let libs = StdLib::COROUTINE
         | StdLib::TABLE
@@ -308,7 +301,7 @@ fn sandbox(state: &Rc<State>, dirs: &[PathBuf], limit: Duration) -> mlua::Result
 }
 
 /// `daemon`: a table for each group of options, and `agents` and
-/// `profiles`, whose tables are kept in `store`.
+/// whose named tables are kept in `store`.
 fn api(lua: &Lua, state: &Rc<State>, store: &Table) -> mlua::Result<Table> {
     // Kept apart from `daemon` itself, so setting any of them is refused
     // in the same words, not as a read-only table.
@@ -316,14 +309,12 @@ fn api(lua: &Lua, state: &Rc<State>, store: &Table) -> mlua::Result<Table> {
     for group in options::groups() {
         fields.raw_set(group, options_group(lua, state, group)?)?;
     }
-    for (name, list) in [("agents", Named::Agents), ("profiles", Named::Profiles)] {
-        let kept = lua.create_table()?;
-        store.raw_set(name, &kept)?;
-        fields.raw_set(name, named(lua, state, list, kept)?)?;
-    }
+    let kept = lua.create_table()?;
+    store.raw_set("agents", &kept)?;
+    fields.raw_set("agents", named(lua, state, Named::Agents, kept)?)?;
     let daemon = lua.create_table()?;
     let meta = lua.create_table()?;
-    let names: Vec<&str> = options::groups().chain(["agents", "profiles"]).collect();
+    let names: Vec<&str> = options::groups().chain(["agents"]).collect();
     let listed = names.join(", ");
     let reading = state.clone();
     meta.raw_set(
@@ -409,26 +400,23 @@ fn options_group(lua: &Lua, state: &Rc<State>, group: &'static str) -> mlua::Res
 #[derive(Clone, Copy)]
 enum Named {
     Agents,
-    Profiles,
 }
 
 impl Named {
     fn name(self) -> &'static str {
         match self {
             Self::Agents => "agents",
-            Self::Profiles => "profiles",
         }
     }
 
     fn list(self, state: &State) -> &RefCell<Vec<(String, SetBy)>> {
         match self {
             Self::Agents => &state.agents,
-            Self::Profiles => &state.profiles,
         }
     }
 }
 
-/// `daemon.agents` or `daemon.profiles`: tables by name, kept in `kept`,
+/// `daemon.agents`: tables by name, kept in `kept`,
 /// which config may change after setting them, and which are read once
 /// it's run. Setting one to nil takes it out.
 fn named(lua: &Lua, state: &Rc<State>, list: Named, kept: Table) -> mlua::Result<Table> {
@@ -643,7 +631,7 @@ fn from_lua(info: &Info, value: &LuaValue) -> Result<Value, String> {
     Ok(value)
 }
 
-/// What the run set: its options, and its agents' and profiles' tables,
+/// What the run set: its options, and its agents' tables,
 /// read now they're set, each wrong one failing at the line that set it.
 fn gather(state: &State, store: &Table) -> Result<Settings, Failure> {
     let options = state.options.take();
@@ -660,15 +648,9 @@ fn gather(state: &State, store: &Table) -> Result<Settings, Failure> {
         let agent = agent_from(&name, &table).map_err(|said| wrong(&by, said))?;
         agents.push((agent, by));
     }
-    let mut profiles = Vec::new();
-    for (name, table, by) in read(Named::Profiles)? {
-        let profile = profile_from(&name, &table).map_err(|said| wrong(&by, said))?;
-        profiles.push((profile, by));
-    }
     Ok(Settings {
         options,
         agents,
-        profiles,
         modules: state.modules.take(),
     })
 }
@@ -762,62 +744,5 @@ fn agent_from(name: &str, table: &Table) -> Result<CustomAgent, String> {
         command,
         starting_mode: text("mode")?,
         tasks,
-    })
-}
-
-/// The profile `table`, `daemon.profiles.NAME`, adds, or changes of the
-/// built-in one of its name.
-fn profile_from(name: &str, table: &Table) -> Result<Change, String> {
-    let fields = fields("profiles", name, table, PROFILE_FIELDS)?;
-    let text = |key: &str| {
-        string(fields.get(key), || {
-            format!("daemon.profiles.{name}.{key} is a string")
-        })
-    };
-    // A string for any agent, or a table of them by agent.
-    let by_agent = |key: &str| -> Result<Option<Vec<(String, String)>>, String> {
-        let wrong =
-            || format!("daemon.profiles.{name}.{key} is a string, or a table of them by agent");
-        match fields.get(key) {
-            None | Some(LuaValue::Nil) => Ok(None),
-            Some(LuaValue::String(value)) => Ok(Some(vec![(
-                "*".to_owned(),
-                value.to_str().map_err(|_| wrong())?.to_owned(),
-            )])),
-            Some(LuaValue::Table(values)) => {
-                let mut pairs = Vec::new();
-                for pair in values.pairs::<LuaValue, LuaValue>() {
-                    match pair.map_err(|_| wrong())? {
-                        (LuaValue::String(agent), LuaValue::String(value)) => pairs.push((
-                            agent.to_str().map_err(|_| wrong())?.to_owned(),
-                            value.to_str().map_err(|_| wrong())?.to_owned(),
-                        )),
-                        _ => return Err(wrong()),
-                    }
-                }
-                // As written, whatever order Luau keeps them in.
-                pairs.sort();
-                Ok(Some(pairs))
-            }
-            Some(_) => Err(wrong()),
-        }
-    };
-    let limits = (text("limits")?)
-        .map(|limits| {
-            Limits::named(&limits).ok_or_else(|| {
-                format!(
-                    "daemon.profiles.{name}.limits is \"read-only\", \"no-commands\" or \"none\""
-                )
-            })
-        })
-        .transpose()?;
-    Ok(Change {
-        name: name.to_owned(),
-        about: text("about")?,
-        prompt: text("prompt")?,
-        limits,
-        agent: text("agent")?,
-        models: by_agent("model")?,
-        efforts: by_agent("effort")?,
     })
 }

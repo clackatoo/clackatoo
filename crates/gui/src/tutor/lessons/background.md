@@ -81,3 +81,17 @@ A workspace on another machine you've `:connect`ed to shows that machine's backg
 The web app on your phone lists each workspace's background tabs under **Terminals**, after its terminals; a workspace's heading says `⚙ 1` as the icon here does. **Bring back** puts one back in its tab bar and shows it, and **✕** dismisses it, with a second tap for one still running. A phone can't `:keep` a terminal.
 
 `:bg CMD` beside a pane borrowed from another machine, as `:Terminal@desk` makes, runs the command on that machine, in that pane's folder, in a background tab of this workspace: the icon and the list say how it's getting on, as that machine says.
+
+
+## Daemon work
+
+The bottom bar shows **Working · N** while the daemon is doing background work,
+such as reading skills and specialists. Click the indicator, or run `:Work`,
+to inspect its live list. Type to filter it. Jobs show their project, state
+and progress; the preview shows more detail where there is room.
+
+Press Ctrl+D on an active job to request cancellation, or on an outcome to
+dismiss it. Work can be shared by several chats, so cancelling affects all
+its consumers. Cancelling stays visible until the worker returns. Failures
+keep an error indicator and are preserved ahead of successes in the bounded
+recent history. Esc closes the list.

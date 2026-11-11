@@ -419,7 +419,7 @@ impl ChatView {
         );
     }
 
-    fn usage_text(
+    pub(super) fn usage_text(
         &mut self,
         canvas: &mut Canvas<'_>,
         m: Measures,

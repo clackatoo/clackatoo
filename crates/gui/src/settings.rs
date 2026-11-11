@@ -48,6 +48,7 @@
 //! | `m` | Switches to Easy, or back |
 
 mod easy;
+mod specialists;
 pub(crate) mod view;
 
 use crate::options::Window as _;
@@ -369,9 +370,17 @@ pub(crate) enum Outcome {
     Open(Place),
     /// The same, for a line of the daemon's config, on its machine.
     OpenDaemons(Place),
+    /// A skill file on the machine that owns the current workspace.
+    OpenSkill(Place),
     /// The fonts installed are wanted, for the font picker: see
     /// [`SettingsMenu::fonts`].
     Fonts,
+    /// Save a complete specialist draft.
+    SaveSpecialist {
+        specialist: clackatoo_protocol::SpecialistDefinition,
+        scope: clackatoo_protocol::SpecialistScope,
+        path: Option<String>,
+    },
 }
 
 impl picker::Outcome for Outcome {
@@ -596,6 +605,10 @@ pub(crate) struct SettingsMenu {
     /// The agents the daemon knows, for Easy's cards: each one's name,
     /// what to show, and whether it's installed.
     agents: Vec<(String, String, bool)>,
+    /// The shared skills in the working directory Settings opened in.
+    skills: Vec<clackatoo_protocol::Skill>,
+    skills_status: String,
+    specialists: specialists::Specialists,
     /// The daemon's settings are listed, as it's said them.
     daemon: bool,
 }
@@ -629,6 +642,9 @@ impl SettingsMenu {
             easy: easy::Easy::new(case),
             said_saved: None,
             agents: Vec::new(),
+            skills: Vec::new(),
+            specialists: specialists::Specialists::new(),
+            skills_status: "Loading skills…".into(),
             daemon: false,
         };
         menu.fill(facts);
@@ -728,6 +744,23 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
+        if self.specialist_page() && self.specialists.draft.is_some() {
+            let mut handled = false;
+            let outcome = picker::press(press, |stroke| {
+                if stroke == Stroke::ctrl('s') {
+                    handled = true;
+                    self.specialist_act(16)
+                } else if self.specialist_editing() {
+                    handled = true;
+                    self.specialist_key(stroke)
+                } else {
+                    Outcome::Nothing
+                }
+            });
+            if handled {
+                return outcome;
+            }
+        }
         self.said = None;
         // Keys being recorded are keys, whatever they'd do.
         if let Some(Editing::Keys { .. }) = &self.editing {
@@ -889,6 +922,9 @@ impl SettingsMenu {
 
     /// Types `text`, into the search, or the value being typed.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
+        if self.specialist_editing() {
+            return self.specialist_paste(text);
+        }
         match &mut self.editing {
             Some(Editing::Value { text: typed, .. }) => {
                 crate::vim::list::paste_into(typed, text);

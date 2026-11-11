@@ -186,6 +186,8 @@ pub(crate) enum Command {
     /// `:markdown`: show the focused editor's Markdown rendered, as prose,
     /// or its text again.
     Markdown,
+    /// Toggle the current editor's outline, or focus it without closing.
+    Outline { focus: bool },
     /// Run the config again, from the start.
     Reload,
     /// `:set`: change options, or say what they are, as these words say;
@@ -237,6 +239,8 @@ pub(crate) enum Command {
     Tutor(Option<String>),
     /// `:Settings`: the settings menu, with what to search for typed.
     Settings(String),
+    /// Open Settings at the specialist editor.
+    SpecialistSettings,
     /// `:mappersist MODES KEYS TO`: binds keys in these modes to keys to
     /// type, as `client.keys.map` with a string does, and saves the
     /// binding in settings.lua.
@@ -308,6 +312,8 @@ pub(crate) enum Command {
     PortForward(Forwarding),
     /// Something to do with background tabs.
     Background(BackgroundCommand),
+    /// Browse daemon background work.
+    Work,
     /// `:bg CMD`: the command started in a new background tab of the
     /// workspace shown, in the focused pane's folder.
     BackgroundStart(String),
@@ -492,6 +498,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
                 ),
             };
         }
+        "Outline" | "OutlineFocus" if argument.is_none() => return Ok(Command::Outline { focus: word == "OutlineFocus" }),
         "Registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "nohlsearch" | "noh" => return Ok(Command::NoHighlight),
         "Marks" => return Ok(Command::Marks),
@@ -517,6 +524,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control lets the agent act as you in this window, files and config included.".into()),
         },
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
+        "Work" if argument.is_none() => return Ok(Command::Work),
         "Settings" => return Ok(Command::Settings(argument.unwrap_or_default().to_owned())),
         "mappersist" | "mapp" => return map_persist(argument).map(Command::MapPersist),
         "devices" => return devices_command(argument).map(Command::Devices),
@@ -1117,6 +1125,7 @@ command_names! {
     "normal" => "Run Normal-mode keys on editor lines",
     "Explore" => "Open the file explorer",
     "Tutor" => "Open an interactive lesson",
+    "Work" => "Inspect ongoing background work and recent outcomes",
     "Settings" => "Browse and change settings and keys",
     "mappersist" => "Bind keys to keys to type, and save it",
     "Capabilities" => "Inspect this chat's tools, permissions and discovery status",
@@ -1146,6 +1155,8 @@ command_names! {
     "Buffers" => "Switch to an open buffer",
     "Diagnostics" => "Browse language-server errors and warnings",
     "Boards" => "Find and open a board",
+    "Outline" => "Toggle the editor outline panel",
+    "OutlineFocus" => "Focus the editor outline panel",
     "Symbols" => "Find a symbol in the current file",
     "ProjectSymbols" => "Find a symbol across the project",
     "Prompts" => "Search the messages sent in the chat, to send one again",
@@ -1343,6 +1354,7 @@ mod tests {
         ("disconnect", ""),
         ("Tutor", ""),
         ("Settings", ""),
+        ("Work", ""),
         ("mappersist", ""),
         ("mapp", "mappersist"),
         ("Capabilities", ""),
@@ -1389,6 +1401,8 @@ mod tests {
         ("Buffers", ""),
         ("Diagnostics", ""),
         ("Boards", ""),
+        ("Outline", ""),
+        ("OutlineFocus", ""),
         ("Symbols", ""),
         ("ProjectSymbols", ""),
         ("Prompts", ""),

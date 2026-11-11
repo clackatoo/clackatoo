@@ -20,6 +20,9 @@ use super::HostedChat;
 use crate::handover;
 
 impl HostedChat {
+    pub(crate) fn set_draft_context(&mut self, context: Vec<clackatoo_protocol::ContextSelection>) {
+        self.node.draft_context = context;
+    }
     /// What's typed in the box, as the chat keeps it.
     pub(crate) fn draft(&self) -> &str {
         self.node.draft.as_deref().unwrap_or("")
@@ -37,6 +40,7 @@ impl HostedChat {
     /// A client sent `sent` from the box: the draft is empty, and viewers
     /// are told what was sent, for boxes holding just that to empty.
     pub(crate) fn draft_sent(&mut self, sent: String) {
+        self.node.draft_context.clear();
         self.node.draft = Some(String::new());
         self.journal.push(ChatPatch::DraftCleared { sent });
     }
@@ -57,7 +61,27 @@ impl HostedChat {
         if message.target.is_some() {
             return Err("That message moves the chat to another agent.".into());
         }
+        let mut context = message
+            .prompt
+            .context
+            .iter()
+            .map(|s| clackatoo_protocol::ContextSelection {
+                source: clackatoo_protocol::ContextRef::Retained {
+                    id: s.id.clone(),
+                    grant: s.grant.clone(),
+                },
+                mode: s.mode,
+                expected: None,
+            })
+            .collect::<Vec<_>>();
+        context.extend(self.node.draft_context.clone());
+        if context.len() > clackatoo_protocol::ContextSnapshot::MAX_COUNT {
+            return Err(
+                "The combined draft would exceed 32 attachments. Remove some first.".into(),
+            );
+        }
         let message = self.take_queued_user(id)?;
+        self.node.draft_context = context;
         let text = message.prompt.text;
         let draft = match self.draft() {
             "" => text.clone(),

@@ -7,7 +7,7 @@
 //!
 //! The file holds what clackatoo writes there: a line for each option,
 //! `daemon.GROUP.NAME = VALUE`, perhaps with a comment after it, and the
-//! agents and profiles moved from the old TOML files,
+//! agents moved from the old TOML files,
 //! `daemon.agents.NAME = { … }`, whose tables may go over several lines,
 //! kept whole. Blank lines, comments and block comments are kept. A line
 //! that's none of these isn't clackatoo's, so the file isn't written, and
@@ -34,7 +34,7 @@ pub(crate) struct Model {
 enum Line {
     /// One kept as it is: blank, a comment, or in a block comment.
     Kept(String),
-    /// One of a statement that sets agents or profiles, kept as it is;
+    /// One of a statement that sets agents, kept as it is;
     /// whether the statement starts on it; and whether another statement
     /// goes on on it, after the one that started, which clackatoo never
     /// writes, so the options it might set are never saved.
@@ -309,7 +309,7 @@ impl Model {
         };
         // Among the options, in the order they're declared, those this
         // build doesn't know counting as after them all; with none, before
-        // the agents and profiles and the comments that lead into them, or
+        // the agents and the comments that lead into them, or
         // else at the end.
         let index = |name: &str| options::ALL.iter().position(|each| each.name == name);
         let own = index(info.name);
@@ -387,9 +387,9 @@ fn statements_in(code: &str) -> usize {
 }
 
 /// Whether `trimmed`, a line of code, starts a statement that sets agents
-/// or profiles, as `daemon.agents.NAME = …` or `daemon.profiles["NAME"]`.
+/// as `daemon.agents.NAME = …` or `daemon.agents["NAME"]`.
 fn code(trimmed: &str) -> bool {
-    ["daemon.agents", "daemon.profiles"]
+    ["daemon.agents"]
         .iter()
         .any(|table| (trimmed.strip_prefix(table)).is_some_and(|rest| rest.starts_with(['.', '['])))
 }
@@ -478,7 +478,6 @@ daemon.agents.opencode = {
 daemon.agents[\"my-agent\"] = { command = { \"mine\" } }
 -- Left out: daemon.agents.x.colour isn't something an agent has
 -- colour = \"red\"
-daemon.profiles.review = { about = \"Reviews [[ a change\", model = { claude = \"haiku\" } }
 ";
         let mut model = Model::parse(text).unwrap();
         assert_eq!(model.render(), text);
@@ -539,14 +538,15 @@ daemon.history.lines = 4000
             ("daemon.agents.x = {\n  name = \"x\",\n", "line 1"),
             ("--[[ never ends\n", "line 1"),
             ("daemon.agents.x = { name = \"a\n", "line 1"),
-            ("daemon.profiles.x = { about = [[\n", "line 1"),
+            ("daemon.agents.x = { description = [[\n", "line 1"),
             ("--[[ ends ]] daemon.web.mode = \"public\"\n", "line 1"),
         ] {
             let why = Model::parse(text).unwrap_err();
             assert!(why.contains(line), "{text:?}: {why}");
         }
         // A long string over lines, inside an agent's table, is followed.
-        let text = "daemon.profiles.x = { prompt = [[\n}}}\ndaemon.web.mode = \"public\"\n]] }\n";
+        let text =
+            "daemon.agents.x = { instructions = [[\n}}}\ndaemon.web.mode = \"public\"\n]] }\n";
         let mut model = Model::parse(text).unwrap();
         model
             .set(info("web.mode"), Some(Value::Choice("tailscale")))

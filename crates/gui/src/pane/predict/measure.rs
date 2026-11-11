@@ -236,7 +236,7 @@ fn session(choice: PredictEcho, mut link: Link, presses: &[Press]) -> Measured {
             size: Size::new(80, 24).unwrap(),
             command: Some(vec![
                 "/bin/bash".into(),
-                "--noprofile".into(),
+                "--nospecialist".into(),
                 "--rcfile".into(),
                 rc.to_str().unwrap().into(),
                 "-i".into(),

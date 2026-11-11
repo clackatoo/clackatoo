@@ -69,7 +69,13 @@ pub(crate) fn replace_panel(document: &Document, old: &DomElement, element: &Ele
     let selection = active
         .as_ref()
         .and_then(|e| e.dyn_ref::<web_sys::HtmlInputElement>())
-        .and_then(|e| Some((e.selection_start().ok()??, e.selection_end().ok()??)));
+        .and_then(|e| Some((e.selection_start().ok()??, e.selection_end().ok()??)))
+        .or_else(|| {
+            active
+                .as_ref()?
+                .dyn_ref::<web_sys::HtmlTextAreaElement>()
+                .and_then(|e| Some((e.selection_start().ok()??, e.selection_end().ok()??)))
+        });
     let focus = active.as_ref().and_then(|e| {
         [
             "id",
@@ -85,15 +91,20 @@ pub(crate) fn replace_panel(document: &Document, old: &DomElement, element: &Ele
                 .map(|value| (name, value))
         })
     });
-    let scrolls: Vec<_> = [".sheet-body", ".model-list", ".provider-tabs"]
-        .into_iter()
-        .filter_map(|selector| {
-            old.query_selector(selector)
-                .ok()
-                .flatten()
-                .map(|e| (selector, e.scroll_top(), e.scroll_left()))
-        })
-        .collect();
+    let scrolls: Vec<_> = [
+        ".sheet-body",
+        ".model-list",
+        ".provider-tabs",
+        ".side-turns",
+    ]
+    .into_iter()
+    .filter_map(|selector| {
+        old.query_selector(selector)
+            .ok()
+            .flatten()
+            .map(|e| (selector, e.scroll_top(), e.scroll_left()))
+    })
+    .collect();
     replace_children(document, old, element);
     if let Some((attr, value)) = focus
         && let Ok(items) = old.query_selector_all(&format!("[{attr}]"))
@@ -109,6 +120,11 @@ pub(crate) fn replace_panel(document: &Document, old: &DomElement, element: &Ele
                     && let Some(input) = e.dyn_ref::<web_sys::HtmlInputElement>()
                 {
                     let _ = input.set_selection_range(start, end);
+                }
+                if let Some((start, end)) = selection
+                    && let Some(area) = e.dyn_ref::<web_sys::HtmlTextAreaElement>()
+                {
+                    let _ = area.set_selection_range(start, end);
                 }
                 break;
             }

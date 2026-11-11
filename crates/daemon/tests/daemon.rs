@@ -6909,7 +6909,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             .unwrap_or_else(starved("a buffer update"))
         {
             Event::Buffer { update, .. } => return update,
-            Event::Workspaces(_) => {}
+            Event::Workspaces(_) | Event::Work(_) => {}
             other @ (Event::View { .. }
             | Event::HintedView { .. }
             | Event::Installed { .. }
@@ -15892,7 +15892,7 @@ fn a_chat_an_agent_starts_works_in_the_background_as_a_card_that_opens_as_a_pane
     assert_eq!(card.len(), 1);
     assert_eq!((card[0].chat, card[0].turn, card[0].shown), (kid, 0, false));
     assert_eq!(card[0].status, SubagentStatus::Done);
-    assert_eq!(card[0].profile.as_deref(), Some("general"));
+    assert_eq!(card[0].specialist.as_deref(), Some("general"));
     assert_eq!(card[0].model.as_deref(), Some("Haiku"));
     assert_eq!(card[0].task, "mcp list_panes");
     assert!(card[0].ended.is_some_and(|ended| ended >= card[0].started));
@@ -15961,14 +15961,14 @@ fn closing_a_subagents_pane_sends_it_back_to_its_card_until_its_chat_is_closed()
     let card = card_of(&mut client, a);
     assert_eq!((card[0].chat, card[0].shown), (kid, false));
     assert_eq!(card[0].status, SubagentStatus::Done);
-    // Listed as started by that chat, as the profile it was started as,
+    // Listed as started by that chat, as the specialist it was started as,
     // for windows to mark its pane by.
     let Response::Chats(chats) = client.request(&Request::WatchChats).unwrap() else {
         panic!("not the chats");
     };
     let listed = chats.iter().find(|chat| chat.chat == kid).unwrap();
     assert_eq!(
-        (listed.parent, listed.profile.as_deref()),
+        (listed.parent, listed.specialist.as_deref()),
         (Some(a), Some("general"))
     );
     client
@@ -16011,7 +16011,7 @@ fn closing_a_subagents_pane_sends_it_back_to_its_card_until_its_chat_is_closed()
     ask_for(&mut client, a, show, Duration::from_secs(10));
     wait_for_chat(&mut client, old, |node| last_outcome(node).is_some());
     let panes = first_tab_panes(&client.watch_workspaces().unwrap());
-    let wire = wire::SUBAGENT_PROFILE - 1;
+    let wire = wire::SUBAGENT_SPECIALIST - 1;
     let mut raw = Raw::open(&daemon, wire);
     raw.hello(wire);
     raw.request(Request::ClosePane { pane: panes[1] });
@@ -16072,7 +16072,8 @@ fn a_subagent_in_a_pane_comes_back_a_subagent_after_a_cold_restart() {
         let mut client = daemon.client();
         let a = start_tooled_chat(&mut client, AgentTools::Allow);
         let kid = TerminalId(a.0 + 1);
-        let show = "mcp start_chat {\"prompt\":\"hi kid\",\"show\":true,\"profile\":\"explore\"}";
+        let show =
+            "mcp start_chat {\"prompt\":\"hi kid\",\"show\":true,\"specialist\":\"explore\"}";
         ask_for(&mut client, a, show, Duration::from_secs(10));
         wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
         // Sent back and opened again from its card, it's the user's.
@@ -16083,7 +16084,7 @@ fn a_subagent_in_a_pane_comes_back_a_subagent_after_a_cold_restart() {
         let card = card_of(&mut client, a);
         wait_for_kept(&file, |kept| {
             kept.contains(&format!("\"parent\": {}", a.0))
-                && kept.contains("\"profile\": \"explore\"")
+                && kept.contains("\"specialist\": \"explore\"")
                 && kept.contains("\"limits\": \"read-only\"")
                 && kept.contains("\"kept\": true")
                 && kept.contains(&format!("\"turn\": {}", card[0].turn))
@@ -16094,19 +16095,19 @@ fn a_subagent_in_a_pane_comes_back_a_subagent_after_a_cold_restart() {
     let [Content::Terminal(a), Content::Terminal(kid)] = tab_contents(&mut client)[..] else {
         panic!("not the two chats: {:?}", tab_contents(&mut client));
     };
-    // Its band: started by the chat made again with it, as its profile.
+    // Its band: started by the chat made again with it, as its specialist.
     let listed = chats_listed(&mut client);
     let of = |chat| listed.iter().find(|listed| listed.chat == chat).unwrap();
     assert_eq!(
-        (of(kid).parent, of(kid).profile.as_deref()),
+        (of(kid).parent, of(kid).specialist.as_deref()),
         (Some(a), Some("explore"))
     );
-    assert_eq!((of(a).parent, of(a).profile.as_deref()), (None, None));
+    assert_eq!((of(a).parent, of(a).specialist.as_deref()), (None, None));
     // On its parent's card, in a pane, as it was.
     let card = card_of(&mut client, a);
     assert_eq!(card.len(), 1, "{card:#?}");
     assert_eq!((card[0].chat, card[0].shown), (kid, true));
-    assert_eq!(card[0].profile.as_deref(), Some("explore"));
+    assert_eq!(card[0].specialist.as_deref(), Some("explore"));
 
     // Its parent messages it, and waits for it, as a child of its own.
     let prompt = format!(
@@ -16124,7 +16125,7 @@ fn a_subagent_in_a_pane_comes_back_a_subagent_after_a_cold_restart() {
         )),
         "{words}"
     );
-    // Still read-only, as its profile is: it can't message the chat that
+    // Still read-only, as its specialist is: it can't message the chat that
     // started it, whose agent may do more.
     let back = format!("mcp send_to_chat {{\"chat\":{a},\"message\":\"hi\"}}");
     let words = last_words(&ask_for(&mut client, kid, &back, Duration::from_secs(10)));
@@ -16168,7 +16169,7 @@ fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_it
     // build; chats 5 and 6 each name the other as parent; chat 8 was kept
     // by a build from before subagents were.
     let orphan = serde_json::json!({
-        "parent": 3, "depth": 1, "profile": "explore", "limits": "sandboxed",
+        "parent": 3, "depth": 1, "specialist": "explore", "limits": "sandboxed",
         "mode": { "setting": "mode", "value": "auto" },
     });
     let parts = [
@@ -16205,11 +16206,11 @@ fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_it
     let listed = chats_listed(&mut client);
     let of = |chat| listed.iter().find(|listed| listed.chat == chat).unwrap();
     assert_eq!(
-        (of(orphan).parent, of(orphan).profile.as_deref()),
+        (of(orphan).parent, of(orphan).specialist.as_deref()),
         (None, Some("explore"))
     );
     assert_eq!(
-        (of(older).parent, of(older).profile.as_deref()),
+        (of(older).parent, of(older).specialist.as_deref()),
         (None, None)
     );
     // The loop is cut once: one of the two is under the other.
@@ -16252,7 +16253,7 @@ fn a_subagent_that_finished_before_a_cold_restart_tells_its_parent_nothing_again
         serde_json::json!({ "pane": { "chat": chat } })
     };
     let started = serde_json::json!({
-        "parent": 10, "depth": 1, "turn": 0, "profile": "general", "limits": "none",
+        "parent": 10, "depth": 1, "turn": 0, "specialist": "general", "limits": "none",
         "mode": { "setting": "mode", "value": "auto" },
     });
     let json = serde_json::json!({
@@ -16502,9 +16503,9 @@ fn a_chat_is_told_when_one_it_started_finishes_and_closes_it_when_done() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one profile after another, each its own"
+    reason = "one specialist after another, each its own"
 )]
-fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles() {
+fn a_specialist_file_gives_a_chat_its_role_model_and_limits() {
     let daemon = TestDaemon::start_with(|dir, config| {
         let log = dir.join("claude.log");
         config.agents.custom = vec![
@@ -16515,17 +16516,16 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
             custom_agent("codex", vec![fake_agent().into(), "--codex".into()]),
         ];
         config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
-        config.agents.configured = configured(
-            "daemon.profiles.deep = { about = \"thinks hard\", model = \"sonnet\", \
-             limits = \"no-commands\", prompt = \"You think deeply.\" }",
-        );
+        let folder = dir.join(".agents/specialists/deep");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("SPECIALIST.md"),"---\nname: deep\ndescription: thinks hard\nmodel: sonnet\nlimits: no-commands\n---\nYou think deeply.\n").unwrap();
     });
     let mut client = daemon.client();
     let a = start_tooled_chat(&mut client, AgentTools::Allow);
-    // The user's own profile: its model, and its role before the first
+    // The user's own specialist: its model, and its role before the first
     // message, with what it may not do.
     let deep = TerminalId(a.0 + 1);
-    let start = serde_json::json!({ "profile": "deep", "prompt": "settings" });
+    let start = serde_json::json!({ "specialist": "deep", "prompt": "settings" });
     let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{deep}}}");
     let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
     assert!(
@@ -16539,7 +16539,7 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
     assert!(
         roles
             .iter()
-            .any(|role| role.contains("as its \"deep\" profile")
+            .any(|role| role.contains("uses clackatoo's \"deep\" specialist")
                 && role.contains("You think deeply.")
                 && role.contains("Don't run commands")),
         "{roles:#?}"
@@ -16558,7 +16558,7 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
     // explore: read-only, so Claude Code loses its tools that change
     // files or run commands, and clackatoo refuses its writes.
     let explore = TerminalId(a.0 + 2);
-    let start = serde_json::json!({ "profile": "explore", "prompt": "meta" });
+    let start = serde_json::json!({ "specialist": "explore", "prompt": "meta" });
     let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{explore}}}");
     let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
     assert!(
@@ -16605,7 +16605,7 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
         "{:?}",
         node.notice
     );
-    // A chat it starts is read-only too, whatever its profile.
+    // A chat it starts is read-only too, whatever its specialist.
     let grandchild = TerminalId(a.0 + 3);
     let start = serde_json::json!({ "chat": explore.0, "message":
         format!("mcp start_chat {{\"prompt\":\"meta\"}}\nmcp wait_for_chat {{\"chat\":{grandchild}}}") });
@@ -16621,7 +16621,8 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
     // With Codex, explore takes its cheapest model, and its Read-only
     // mode, whose sandbox holds.
     let codex = TerminalId(a.0 + 4);
-    let start = serde_json::json!({ "profile": "explore", "agent": "codex", "prompt": "settings" });
+    let start =
+        serde_json::json!({ "specialist": "explore", "agent": "codex", "prompt": "settings" });
     let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{codex}}}");
     let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
     assert!(words.contains("read-only gpt-6-luna"), "{words}");
@@ -16631,8 +16632,51 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
         (entry.agent.as_str(), entry.model.as_deref()),
         ("Codex", Some("6 Luna"))
     );
-    // A profile there isn't is refused, saying which there are.
-    let start = serde_json::json!({ "profile": "nope", "prompt": "x" });
+    // Research inherits the caller's chosen model instead of using Explore's
+    // lightweight default, while retaining the same read-only enforcement.
+    client
+        .chat(
+            a,
+            ChatAction::Set {
+                setting: "model".into(),
+                value: "sonnet".into(),
+            },
+        )
+        .unwrap();
+    wait_for_chat(&mut client, a, |node| {
+        node.settings
+            .iter()
+            .any(|s| s.id == "model" && s.value == "sonnet")
+    });
+    let research = TerminalId(a.0 + 5);
+    let start = serde_json::json!({ "specialist": "research", "prompt": "settings" });
+    let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{research}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "Started chat {research} (claude, as research, read-only)"
+        )),
+        "{words}"
+    );
+    assert!(words.contains(" sonnet\n"), "{words}");
+    let send = serde_json::json!({ "chat": research.0, "message": "meta" });
+    let prompt = format!("mcp send_to_chat {send}\nmcp wait_for_chat {{\"chat\":{research}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains(r#""tools":["Read","Glob","Grep","WebFetch","WebSearch","TodoWrite"]"#),
+        "{words}"
+    );
+    let roles = carried(&daemon, "claude.log", "s5");
+    assert!(
+        roles.iter().any(|role| {
+            role.contains("uses clackatoo's \"research\" specialist")
+                && role.contains("Cite inspected")
+                && role.contains("Distinguish confirmed")
+        }),
+        "{roles:#?}"
+    );
+    // A specialist there isn't is refused, saying which there are.
+    let start = serde_json::json!({ "specialist": "nope", "prompt": "x" });
     let words = last_words(&ask_for(
         &mut client,
         a,
@@ -16641,7 +16685,7 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_the_config_adds_profiles
     ));
     assert!(
         words.contains(
-            "there's no profile called nope: the profiles are explore, plan, general, deep"
+            "there's no specialist called nope: the specialists are explore, research, plan, general, deep"
         ),
         "{words}"
     );
@@ -16716,7 +16760,7 @@ fn a_real_haiku_chat_fans_out_to_two_explorers_and_gets_one_summary() {
             resume: None,
         },
     );
-    let prompt = "Call clackatoo's start_chats tool once, starting two chats with profile \
+    let prompt = "Call clackatoo's start_chats tool once, starting two chats with specialist \
                   explore: one asked for the first line of a.txt, the other for the first line \
                   of b.txt, both in this directory. Then call wait_for_chats once with both \
                   chats' numbers. Then reply with the two first lines, one a line, and nothing \
@@ -16744,7 +16788,7 @@ fn a_real_haiku_chat_fans_out_to_two_explorers_and_gets_one_summary() {
     let card = node.subagents;
     assert_eq!(card.len(), 2, "{card:#?}");
     for entry in &card {
-        assert_eq!(entry.profile.as_deref(), Some("explore"));
+        assert_eq!(entry.specialist.as_deref(), Some("explore"));
         assert_eq!(entry.status, SubagentStatus::Done, "{entry:#?}");
         assert!(!entry.shown);
         let model = entry.model.as_deref().unwrap_or_default();
@@ -16780,6 +16824,431 @@ fn board_calls(client: &mut Client, chat: TerminalId, calls: &[&str]) -> String 
         .collect::<Vec<_>>()
         .join("\n");
     last_words(&ask_for(client, chat, &prompt, Duration::from_secs(10)))
+}
+
+#[test]
+fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.languages = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
+        );
+    });
+    let disk = "fn authenticate(user) { user; }\n";
+    std::fs::write(daemon.dir.path().join("auth.curly"), disk).unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let outline = board_calls(
+        &mut client,
+        chat,
+        &[r#"file_outline {"path":"auth.curly"}"#],
+    );
+    assert!(
+        outline.contains("authenticate") && outline.contains("signature"),
+        "{outline}"
+    );
+    let found = board_calls(
+        &mut client,
+        chat,
+        &[r#"search_symbols {"query":"authenticate"}"#],
+    );
+    assert!(found.contains("authenticate"), "{found}");
+    let map = board_calls(
+        &mut client,
+        chat,
+        &[r#"repo_map {"focus":["auth.curly"],"max_bytes":1024}"#],
+    );
+    assert!(
+        map.contains("auth.curly:1") && map.contains("fn authenticate(user)"),
+        "{map}"
+    );
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, daemon.dir.path(), "auth.curly");
+    let snapshot = attach_buffer(&mut editor, buffer);
+    send_change(
+        &mut editor,
+        buffer,
+        1,
+        Change::Edit {
+            edit: Edit::replace(disk.len(), 0, disk, "fn unsaved(user) { user; }\n"),
+            base: snapshot.version,
+            step: true,
+        },
+    );
+    editor.request(&Request::ListTerminals).unwrap(); // The edit is processed before querying.
+    let live = board_calls(
+        &mut client,
+        chat,
+        &[r#"file_outline {"path":"auth.curly"}"#],
+    );
+    assert!(
+        live.contains("unsaved") && !live.contains("authenticate"),
+        "{live}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daemon.dir.path().join("auth.curly")).unwrap(),
+        disk
+    );
+    let refused = board_calls(
+        &mut client,
+        chat,
+        &[r#"file_outline {"path":"../outside.curly"}"#],
+    );
+    assert!(
+        refused.contains("relative") || refused.contains("without .."),
+        "{refused}"
+    );
+    let work = editor
+        .request(&Request::Work(clackatoo_protocol::WorkAction::List))
+        .unwrap();
+    assert!(
+        matches!(work, Response::Work(ref items) if items.iter().any(|item| item.title.contains("outline"))),
+        "{work:?}"
+    );
+}
+
+#[test]
+fn background_work_reports_real_skill_reads_reconnects_and_dismisses_outcomes() {
+    use clackatoo_protocol::{WorkAction, WorkState};
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    assert_eq!(
+        client.request(&Request::Work(WorkAction::List)).unwrap(),
+        Response::Work(Vec::new())
+    );
+    client.request(&Request::WatchWorkspaces).unwrap();
+    assert!(matches!(
+        client.request(&Request::Skills { pane: None }).unwrap(),
+        Response::Skills(_)
+    ));
+    let until = Instant::now() + Duration::from_secs(5);
+    let id = loop {
+        let Response::Work(items) = client.request(&Request::Work(WorkAction::List)).unwrap()
+        else {
+            panic!("work snapshot expected")
+        };
+        if let Some(item) = items
+            .iter()
+            .find(|item| item.title == "Reading skills" && item.state == WorkState::Completed)
+        {
+            break item.id;
+        }
+        assert!(Instant::now() < until, "skill job did not complete");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    // The push API reports the job without requiring repeated list requests.
+    loop {
+        if let Event::Work(items) = client.next_event().unwrap() {
+            assert!(items.iter().any(|item| item.id == id));
+            break;
+        }
+    }
+    let mut reopened = daemon.client();
+    let Response::Work(items) = reopened.request(&Request::Work(WorkAction::List)).unwrap() else {
+        panic!("snapshot expected")
+    };
+    assert!(items.iter().any(|item| item.id == id));
+    assert_eq!(
+        reopened
+            .request(&Request::Work(WorkAction::Dismiss(id)))
+            .unwrap(),
+        Response::Work(Vec::new())
+    );
+    let mut lender = daemon.client();
+    lender.request(&Request::Relay).unwrap();
+    assert!(matches!(
+        lender.request(&Request::Work(WorkAction::List)).unwrap(),
+        Response::Error(_)
+    ));
+}
+
+#[test]
+fn shared_skills_use_one_catalogue_for_mcp_slash_commands_and_settings() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent(
+            "claude",
+            vec![
+                fake_agent().into(),
+                "--log".into(),
+                dir.join("agent.log").into(),
+            ],
+        )];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+    });
+    let bundle = daemon.dir.path().join(".agents/skillsets/release");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(
+        bundle.join("skillset.toml"),
+        "format = 1\nname = \"release\"\ndescription = \"Release procedures\"\n",
+    )
+    .unwrap();
+    let folder = bundle.join("skills/release-check");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("SKILL.md");
+    std::fs::write(&path, "---\nname: release-check\ndescription: Check a release before publishing.\n---\nRELEASE_CHECK $ARGUMENTS\n").unwrap();
+    let manual = daemon.dir.path().join(".agents/skills/manual-check");
+    std::fs::create_dir_all(&manual).unwrap();
+    std::fs::write(manual.join("SKILL.md"), "---\nname: manual-check\ndescription: Only run this when requested.\ndisable-model-invocation: true\n---\nMANUAL_CHECK\n").unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let node = chat_now(&mut client, chat);
+    for name in ["release-check", "manual-check"] {
+        assert!(node.commands.iter().any(|command| command.name == name));
+    }
+
+    let response = client.request(&Request::Skills { pane: None }).unwrap();
+    let Response::Skills(skills) = response else {
+        panic!("{response:?}")
+    };
+    assert!(skills.iter().any(|skill| skill.name == "release-check"
+        && skill.path == path.to_string_lossy()
+        && skill.source.contains("skillset release")));
+
+    let loaded = board_calls(
+        &mut client,
+        chat,
+        &[r#"load_skill {"name":"release-check","arguments":"v2"}"#],
+    );
+    assert!(loaded.contains("RELEASE_CHECK v2"), "{loaded}");
+    let refused = board_calls(
+        &mut client,
+        chat,
+        &[r#"load_skill {"name":"manual-check"}"#],
+    );
+    assert!(refused.contains("user-only"), "{refused}");
+
+    let _ = ask_for(&mut client, chat, "compact", Duration::from_secs(5));
+
+    let node = ask_for(&mut client, chat, "/manual-check", Duration::from_secs(5));
+    assert_eq!(node.turns.last().unwrap().prompt, "/manual-check");
+    assert!(last_words(&node).contains("MANUAL_CHECK"), "{node:?}");
+    let log = std::fs::read_to_string(daemon.dir.path().join("agent.log")).unwrap();
+    assert_eq!(
+        log.matches("Skills are supplied by clackatoo").count(),
+        2,
+        "catalogue returns after compaction: {log}"
+    );
+    let node = ask_for(
+        &mut client,
+        chat,
+        "/release-check v3",
+        Duration::from_secs(5),
+    );
+    assert!(last_words(&node).contains("RELEASE_CHECK v3"), "{node:?}");
+
+    std::fs::write(
+        &path,
+        "---\nname: release-check\ndescription: Updated release check.\n---\nUPDATED_CHECK\n",
+    )
+    .unwrap();
+    let node = ask_for(
+        &mut client,
+        chat,
+        "/release-check fresh",
+        Duration::from_secs(5),
+    );
+    assert!(
+        last_words(&node).contains("UPDATED_CHECK"),
+        "slash invocation reads the changed file: {node:?}"
+    );
+    let loaded = board_calls(
+        &mut client,
+        chat,
+        &[r#"load_skill {"name":"release-check"}"#],
+    );
+    assert!(loaded.contains("UPDATED_CHECK"), "{loaded}");
+    std::fs::remove_file(&path).unwrap();
+    let node = ask_for(&mut client, chat, "/release-check", Duration::from_secs(5));
+    assert!(
+        !last_words(&node).contains("UPDATED_CHECK"),
+        "a removed skill cannot run from cache"
+    );
+    assert!(!matches!(last_outcome(&node), Some(Outcome::Done)));
+}
+
+fn specialist_bundle_fixture(dir: &Path) {
+    let team = dir.join(".agents/skillsets/lead");
+    let write = |relative: &str, text: &str| {
+        let path = team.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "skillset.toml",
+        r#"
+format=1
+name="lead"
+description="Coordinate a review"
+includes=["./shared", "./reviewer"]
+[specialist]
+instructions="LEAD INSTRUCTIONS"
+when_to_use="Route code reviews here"
+skills=[]
+delegates_to=["reviewer"]
+model="sonnet"
+effort="low"
+limits={ turns=4, cost_usd=0.5, seconds=30 }
+"#,
+    );
+    write(
+        "shared/skillset.toml",
+        "format=1\nname=\"shared\"\ndescription=\"Shared procedures\"\n",
+    );
+    write(
+        "shared/skills/common-check/SKILL.md",
+        "---\nname: common-check\ndescription: Common procedure\n---\nCOMMON PROCEDURE\n",
+    );
+    write(
+        "reviewer/skillset.toml",
+        r#"
+format=1
+name="reviewer"
+description="Review changes"
+[specialist]
+instructions="REVIEWER INSTRUCTIONS"
+user_invocable=false
+skills=[]
+"#,
+    );
+    write(
+        "reviewer/skills/code-check/SKILL.md",
+        "---\nname: code-check\ndescription: Reviewer procedure\n---\nREVIEWER PROCEDURE\n",
+    );
+}
+
+#[test]
+fn a_specialist_time_budget_cancels_even_without_mcp_tools() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        let folder = dir.join(".agents/specialists/timed");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SPECIALIST.md"),
+            "---\nname: timed\nlimits:\n  seconds: 1\n---\nUse the time budget\n",
+        )
+        .unwrap();
+    });
+    let mut client = daemon.client();
+    let timed = start_tooled_chat(&mut client, AgentTools::Off);
+    client
+        .chat(
+            timed,
+            ChatAction::Set {
+                setting: "clackatoo.specialist".into(),
+                value: "timed".into(),
+            },
+        )
+        .unwrap();
+    wait_for_chat(&mut client, timed, |node| node.state == ChatState::Ready);
+    let node = ask_for(&mut client, timed, "wait", Duration::from_secs(5));
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    assert!(
+        node.notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("output is partial"),
+        "{node:?}"
+    );
+}
+
+#[test]
+fn specialist_selection_scopes_skills_and_enforces_invocation_and_budget_controls() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent(
+            "claude",
+            vec![
+                fake_agent().into(),
+                "--log".into(),
+                dir.join("agent.log").into(),
+            ],
+        )];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        let folder = dir.join(".agents/specialists/timed");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SPECIALIST.md"),
+            "---\nname: timed\nlimits:\n  seconds: 1\n---\nUse the time budget\n",
+        )
+        .unwrap();
+    });
+    specialist_bundle_fixture(daemon.dir.path());
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let node = chat_now(&mut client, chat);
+    let picker = node
+        .settings
+        .iter()
+        .find(|s| s.id == "clackatoo.specialist")
+        .unwrap();
+    assert!(picker.choices.iter().any(|c| c.value == "lead"));
+    assert!(!picker.choices.iter().any(|c| c.value == "reviewer"));
+    client
+        .chat(
+            chat,
+            ChatAction::Set {
+                setting: "clackatoo.specialist".into(),
+                value: "lead".into(),
+            },
+        )
+        .unwrap();
+    wait_for_chat(&mut client, chat, |node| {
+        node.state == ChatState::Ready
+            && node
+                .settings
+                .iter()
+                .any(|s| s.id == "clackatoo.specialist" && s.value == "lead")
+    });
+    let node = ask_for(&mut client, chat, "meta", Duration::from_secs(5));
+    let meta = last_words(&node);
+    assert!(meta.contains(r#""maxTurns":4"#), "{meta}");
+    assert!(meta.contains(r#""maxBudgetUsd":0.5"#), "{meta}");
+    assert!(
+        carried(&daemon, "agent.log", "s2")
+            .iter()
+            .any(|s| s.contains("LEAD INSTRUCTIONS") && !s.contains("REVIEWER INSTRUCTIONS"))
+    );
+    let words = board_calls(
+        &mut client,
+        chat,
+        &[r#"start_chat {"specialist":"general","prompt":"hello"}"#],
+    );
+    assert!(words.contains("cannot delegate to general"), "{words}");
+    let words = board_calls(
+        &mut client,
+        chat,
+        &[r#"start_chat {"profile":"explore","prompt":"hello"}"#],
+    );
+    assert!(words.contains("unknown field"), "{words}");
+    let words = board_calls(&mut client, chat, &[r#"load_skill {"name":"code-check"}"#]);
+    assert!(words.contains("No skill named code-check"), "{words}");
+    let child = TerminalId(chat.0 + 1);
+    let start = serde_json::json!({ "specialist":"reviewer", "prompt":"mcp load_skill {\"name\":\"code-check\"}" });
+    let words = last_words(&ask_for(
+        &mut client,
+        chat,
+        &format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{child}}}"),
+        Duration::from_secs(10),
+    ));
+    assert!(words.contains("REVIEWER PROCEDURE"), "{words}");
+    assert!(
+        client
+            .chat(
+                chat,
+                ChatAction::Set {
+                    setting: "clackatoo.specialist".into(),
+                    value: "general".into()
+                }
+            )
+            .is_err()
+    );
+    let _ = ask_for(&mut client, chat, "compact", Duration::from_secs(5));
+    let _ = ask_for(&mut client, chat, "/common-check", Duration::from_secs(5));
+    let log = std::fs::read_to_string(daemon.dir.path().join("agent.log")).unwrap();
+    assert!(
+        log.matches("LEAD INSTRUCTIONS").count() >= 2,
+        "role is restored after compaction: {log}"
+    );
 }
 
 /// The next update about a board, skipping the rest.
@@ -17199,16 +17668,17 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
     assert!(
         told.contains(
             "For all subagent work, use start_chat, or start_chats for several at once, with a \
-             profile, rather than a subagent tool of your own, such as Claude Code's Task tool"
+             specialist, rather than a subagent tool of your own, such as Claude Code's Task tool"
         ),
         "{told}"
     );
-    for profile in [
-        "explore: fast, cheap research",
+    for specialist in [
+        "explore: Find a definition, locate relevant files, or answer a focused code question quickly",
+        "research: Explain how a system works, trace behaviour across components",
         "plan: a strong model",
         "general: ",
     ] {
-        assert!(told.contains(profile), "{profile}: {told}");
+        assert!(told.contains(specialist), "{specialist}: {told}");
     }
     // Never how many may work at once, which the user changes: where to
     // look for it (CLACKA-228).
@@ -19444,7 +19914,7 @@ fn a_read_only_chat_reads_pages_but_clicks_and_types_in_none() {
     // Its subagent gets its browser, with explore's limits.
     let child = TerminalId(parent.0 + 1);
     let start = serde_json::json!({
-        "profile": "explore",
+        "specialist": "explore",
         "prompt": "mcp browser_click {\"ref\":1}\nmcp browser_type {\"ref\":1,\"text\":\"x\"}\n\
                    mcp browser_navigate {\"url\":\"DATA:text/html,<script>fetch('http://localhost/x',{method:'POST'})</script>\"}",
     });
@@ -25744,7 +26214,7 @@ fn antigravity_sign_in_stops_the_browser_flow_and_keeps_secrets_out_of_chat() {
     }
 }
 
-/// Run with `CLACKATOO_REAL_AGENT` naming `clackatoo agent-runtime PROGRAM PROFILE`
+/// Run with `CLACKATOO_REAL_AGENT` naming `clackatoo agent-runtime PROGRAM SPECIALIST`
 /// after signing in. Exercises native tools through the real daemon and MCP.
 #[test]
 #[ignore = "talks to a real Antigravity account: set CLACKATOO_REAL_AGENT"]
@@ -27031,4 +27501,718 @@ fn the_daemons_config_runs_again_as_it_changes_and_windows_change_it() {
     let (settings, _) = next_daemon_settings(&mut client);
     assert_eq!(settings.failure, None);
     assert_eq!(daemon_option(&settings, "subagents.working").value, "9");
+}
+
+#[test]
+fn settings_specialist_saves_are_ordered_and_refresh_chat_choices() {
+    use clackatoo_daemon::settings;
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        let dirs = settings::Dirs {
+            daemon: dir.join("config/daemon"),
+            shared: dir.join("config/lua"),
+            state: Some(dir.join("config/state")),
+        };
+        std::fs::create_dir_all(&dirs.daemon).unwrap();
+        config.own_config = Some(settings::Own {
+            dirs,
+            settings: settings::Settings::default(),
+            failure: None,
+        });
+    });
+    let mut client = daemon.client();
+    client
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let chat = start_chat(&mut client);
+    let edit=clackatoo_protocol::SpecialistDefinition {name:"reviewer".into(),settings:r#"{"description":"Review changes","instructions":"REVIEW FROM SETTINGS","limits":{"access":"read-only"},"model":"inherit"}"#.into(),saved:None,locked:None};
+    assert!(matches!(
+        client
+            .request(&Request::SaveSpecialistFile {
+                pane: None,
+                scope: clackatoo_protocol::SpecialistScope::Personal,
+                path: None,
+                specialist: edit.clone()
+            })
+            .unwrap(),
+        Response::SpecialistSaved
+    ));
+    let response = client
+        .request(&Request::SpecialistFiles { pane: None })
+        .unwrap();
+    let Response::SpecialistFiles(all) = response else {
+        panic!("{response:?}")
+    };
+    let mut revised = all
+        .into_iter()
+        .find(|s| s.definition.name == "reviewer")
+        .unwrap()
+        .definition;
+    assert!(revised.saved.is_some());
+    let node = chat_now(&mut client, chat);
+    assert!(
+        node.settings
+            .iter()
+            .any(|s| s.id == "clackatoo.specialist"
+                && s.choices.iter().any(|c| c.value == "reviewer"))
+    );
+    let stale = client
+        .request(&Request::SaveSpecialistFile {
+            pane: None,
+            scope: clackatoo_protocol::SpecialistScope::Personal,
+            path: None,
+            specialist: edit,
+        })
+        .unwrap();
+    assert!(
+        matches!(stale,Response::Error(Error::Other(ref why)) if why.contains("changed since"))
+    );
+    let mut v: serde_json::Value = serde_json::from_str(&revised.settings).unwrap();
+    v["instructions"] = serde_json::json!("REVISED ROLE");
+    revised.settings = v.to_string();
+    assert!(matches!(
+        client
+            .request(&Request::SaveSpecialistFile {
+                pane: None,
+                scope: clackatoo_protocol::SpecialistScope::Personal,
+                path: None,
+                specialist: revised
+            })
+            .unwrap(),
+        Response::SpecialistSaved
+    ));
+    let written = std::fs::read_to_string(
+        daemon
+            .dir
+            .path()
+            .join("config/specialists/reviewer/SPECIALIST.md"),
+    )
+    .unwrap();
+    assert!(written.contains("REVISED ROLE"));
+    assert!(
+        !daemon
+            .dir
+            .path()
+            .join("config/daemon/settings.lua")
+            .exists()
+    );
+}
+
+fn indexed_symbols(
+    client: &mut Client,
+    id: u64,
+    pane: PaneId,
+    query: &str,
+    file: bool,
+) -> (Vec<Found>, Done) {
+    client
+        .find(
+            id,
+            Some(pane),
+            Search::CodeSymbols {
+                query: query.into(),
+                file,
+                refresh: false,
+            },
+        )
+        .unwrap();
+    found(client, id)
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end preview, queued edit and immutable delivery scenario"
+)]
+fn captured_context_previews_validate_revisions_and_survive_queued_source_changes() {
+    use clackatoo_protocol::{
+        ContextAction, ContextMode, ContextRef, ContextReply, ContextSelection,
+    };
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let path = daemon.dir.path().join("context.txt");
+    std::fs::write(&path, "original context\n").unwrap();
+    let selection = ContextSelection {
+        source: ContextRef::File {
+            path: path.display().to_string(),
+            lines: None,
+        },
+        mode: ContextMode::Contents,
+        expected: None,
+    };
+    let response = client
+        .request(&Request::Context {
+            chat,
+            action: ContextAction::Preview(selection.clone()),
+        })
+        .unwrap();
+    let Response::Context(ContextReply::Snapshot(preview)) = response else {
+        panic!("{response:?}")
+    };
+    assert_eq!(preview.text, "original context\n");
+    std::fs::write(&path, "changed before send\n").unwrap();
+    let refused = client.chat(
+        chat,
+        ChatAction::SubmitContext {
+            text: "explain".into(),
+            images: Vec::new(),
+            context: vec![ContextSelection {
+                expected: Some(preview.revision),
+                ..selection.clone()
+            }],
+            target: None,
+            steer: false,
+        },
+    );
+    assert!(refused.is_err(), "changed previews must be refused");
+    assert!(chat_now(&mut client, chat).turns.is_empty());
+    client.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Answering);
+    client
+        .chat(
+            chat,
+            ChatAction::SubmitContext {
+                text: "explain this source".into(),
+                images: Vec::new(),
+                context: vec![selection],
+                target: None,
+                steer: false,
+            },
+        )
+        .unwrap();
+    let node = chat_now(&mut client, chat);
+    let queued = node.delivery.queued.last().unwrap().id;
+    assert_eq!(node.delivery.queued.last().unwrap().context_count, 1);
+    std::fs::write(&path, "changed after acceptance\n").unwrap();
+    let recalled = client
+        .request(&Request::Chat {
+            terminal: chat,
+            action: ChatAction::TakeBack { queued },
+        })
+        .unwrap();
+    let Response::Context(ContextReply::Draft { text, context }) = recalled else {
+        panic!("{recalled:?}")
+    };
+    assert_eq!(text, "explain this source");
+    assert_eq!(context.len(), 1);
+    assert!(matches!(context[0].source, ContextRef::Retained { .. }));
+    let retained = client
+        .request(&Request::Context {
+            chat,
+            action: ContextAction::Preview(context[0].clone()),
+        })
+        .unwrap();
+    assert!(
+        matches!(retained,Response::Context(ContextReply::Snapshot(ref s)) if s.text=="changed before send\n")
+    );
+    let mut forged = context[0].clone();
+    if let ContextRef::Retained { grant, .. } = &mut forged.source {
+        *grant = "0".repeat(64);
+    }
+    assert!(matches!(
+        client
+            .request(&Request::Context {
+                chat,
+                action: ContextAction::Preview(forged)
+            })
+            .unwrap(),
+        Response::Error(_)
+    ));
+    client
+        .chat(
+            chat,
+            ChatAction::SubmitContext {
+                text,
+                images: vec![],
+                context,
+                target: None,
+                steer: false,
+            },
+        )
+        .unwrap();
+    let queued = chat_now(&mut client, chat)
+        .delivery
+        .queued
+        .last()
+        .unwrap()
+        .id;
+    client.chat(chat, ChatAction::Stop).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    client
+        .chat(
+            chat,
+            ChatAction::SendQueued {
+                id: queued,
+                steer: false,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(node.turns[1].context.len(), 1);
+    assert_eq!(node.turns[1].context[0].text, "changed before send\n");
+    assert!(last_words(&node).contains("changed before send"));
+    assert!(!last_words(&node).contains("changed after acceptance"));
+    let id = node.turns[1].context[0].id.clone();
+    let response = client
+        .request(&Request::Context {
+            chat,
+            action: ContextAction::Read { turn: 1, id },
+        })
+        .unwrap();
+    assert!(
+        matches!(response,Response::Context(ContextReply::Snapshot(ref c)) if c.text=="changed before send\n")
+    );
+    let id = node.turns[1].context[0].id.clone();
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        &format!("mcp read_context {{\"id\":\"{id}\"}}"),
+    ));
+    assert!(words.contains("changed before send"), "{words}");
+    let other = start_tooled_chat(&mut client, AgentTools::Allow);
+    let words = last_words(&ask(
+        &mut client,
+        other,
+        &format!("mcp read_context {{\"id\":\"{id}\"}}"),
+    ));
+    assert!(
+        words.contains("not attached to this conversation"),
+        "{words}"
+    );
+}
+
+#[test]
+fn native_code_outline_and_project_search_share_unsaved_source_without_a_language_server() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.languages = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
+        );
+    });
+    let dir = daemon.dir.path();
+    let disk = "fn outer() {\n fn inner() {}\n}\n";
+    std::fs::write(dir.join("main.curly"), disk).unwrap();
+    std::fs::write(dir.join("other.curly"), "fn project_only() {}\n").unwrap();
+    let mut client = daemon.client();
+    client
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    client.watch_workspaces().unwrap();
+    let pane = client
+        .new_workspace(None, open_file(dir, "main.curly"))
+        .unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    let snapshot = attach_buffer(&mut client, buffer);
+    let (rows, done) = indexed_symbols(&mut client, 201, pane, "", true);
+    assert_eq!(done, Done::All);
+    let symbols: Vec<_> = rows
+        .iter()
+        .filter_map(|row| match row {
+            Found::Symbols(symbols) => Some(symbols),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        symbols
+            .iter()
+            .map(|symbol| symbol.symbol.name.as_str())
+            .collect::<Vec<_>>(),
+        ["outer", "inner"]
+    );
+    assert_eq!(symbols[1].symbol.depth, 1);
+    assert_eq!(symbols[1].symbol.line, 1);
+    assert!(
+        rows.iter()
+            .any(|row| matches!(row, Found::IndexStatus { ends, .. } if ends == &[2, 1]))
+    );
+    send_change(
+        &mut client,
+        buffer,
+        1,
+        Change::Edit {
+            edit: Edit::replace(disk.len(), 0, disk, "fn live_only() {}\n"),
+            base: snapshot.version,
+            step: true,
+        },
+    );
+    client.request(&Request::ListTerminals).unwrap();
+    let (rows, _) = indexed_symbols(&mut client, 202, pane, "", true);
+    assert!(rows.iter().any(|row| matches!(row, Found::Symbols(symbols) if symbols.iter().any(|symbol| symbol.symbol.name == "live_only"))));
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (rows, done) = indexed_symbols(&mut client, 203, pane, "project_only", false);
+        assert!(!matches!(done, Done::Failed(_)), "{done:?}");
+        if rows.iter().any(|row| matches!(row, Found::Symbols(symbols) if symbols.iter().any(|symbol| symbol.symbol.name == "project_only"))) { break; }
+        assert!(
+            Instant::now() < until,
+            "index did not cover the project: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("main.curly")).unwrap(),
+        disk
+    );
+    client
+        .find(
+            204,
+            Some(pane),
+            Search::CodeSymbols {
+                query: "project".into(),
+                file: false,
+                refresh: false,
+            },
+        )
+        .unwrap();
+    client.stop_finding(204).unwrap();
+    let (rows, done) = indexed_symbols(&mut client, 204, pane, "live_only", false);
+    assert!(!matches!(done, Done::Failed(_)), "{done:?}");
+    assert!(rows.iter().any(|row| matches!(row, Found::Symbols(symbols) if symbols.iter().any(|symbol| symbol.symbol.name == "live_only"))));
+}
+
+fn code_index_jobs(client: &mut Client) -> Vec<clackatoo_protocol::WorkItem> {
+    let Response::Work(items) = client
+        .request(&Request::Work(clackatoo_protocol::WorkAction::List))
+        .unwrap()
+    else {
+        panic!("work snapshot");
+    };
+    items
+        .into_iter()
+        .filter(|item| item.title == "Indexing outline")
+        .collect()
+}
+
+#[test]
+fn native_code_outline_refresh_preserves_cancellation_and_explicit_search_retries() {
+    use clackatoo_protocol::{WorkAction, WorkState};
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.languages = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
+        );
+    });
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("main.curly"), "fn entry() {}\n").unwrap();
+    for file in 0..1000 {
+        std::fs::write(
+            dir.join(format!("source-{file}.curly")),
+            "fn indexed_later() {}\n",
+        )
+        .unwrap();
+    }
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client
+        .new_workspace(None, open_file(dir, "main.curly"))
+        .unwrap();
+    let _ = indexed_symbols(&mut client, 301, pane, "", true);
+    let job = code_index_jobs(&mut client)
+        .into_iter()
+        .find(|job| job.state.active())
+        .expect("indexing still runs");
+    client
+        .request(&Request::Work(WorkAction::Cancel(job.id)))
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(15);
+    while code_index_jobs(&mut client)
+        .iter()
+        .any(|item| item.id == job.id && item.state != WorkState::Cancelled)
+    {
+        assert!(Instant::now() < until, "index did not cancel");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client
+        .find(
+            302,
+            Some(pane),
+            Search::CodeSymbols {
+                query: "entry".into(),
+                file: false,
+                refresh: true,
+            },
+        )
+        .unwrap();
+    let (rows, done) = found(&mut client, 302);
+    assert!(!matches!(done, Done::Failed(_)), "{done:?}");
+    assert!(rows.iter().any(|row| matches!(
+        row,
+        Found::IndexStatus {
+            scanning: false,
+            ..
+        }
+    )));
+    assert!(
+        !code_index_jobs(&mut client)
+            .iter()
+            .any(|item| item.id > job.id)
+    );
+    let _ = indexed_symbols(&mut client, 303, pane, "entry", false);
+    assert!(
+        code_index_jobs(&mut client)
+            .iter()
+            .any(|item| item.id > job.id)
+    );
+}
+
+#[test]
+fn context_capture_rejects_foreign_owners_outside_paths_and_invalid_ranges() {
+    use clackatoo_protocol::{
+        ContextAction as A, ContextMode as M, ContextRef as R, ContextReply as P,
+        ContextSelection as S, MachineId,
+    };
+    let daemon = TestDaemon::with_tools();
+    let root = daemon.dir.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(daemon.dir.path().join("outside.txt"), "secret").unwrap();
+    std::os::unix::fs::symlink(daemon.dir.path().join("outside.txt"), root.join("escape")).unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat_in(&mut client, AgentTools::Allow, &root);
+    for source in [
+        R::File {
+            path: "../outside.txt".into(),
+            lines: None,
+        },
+        R::File {
+            path: "escape".into(),
+            lines: None,
+        },
+        R::File {
+            path: "file.txt".into(),
+            lines: Some((1, 99)),
+        },
+        R::Owned {
+            machine: MachineId([99; 16]),
+            source: Box::new(R::File {
+                path: "file.txt".into(),
+                lines: None,
+            }),
+        },
+        R::Terminal {
+            terminal: chat,
+            first: 0,
+            last: u64::MAX,
+        },
+    ] {
+        let reply = client
+            .request(&Request::Context {
+                chat,
+                action: A::Preview(S {
+                    source,
+                    mode: M::Contents,
+                    expected: None,
+                }),
+            })
+            .unwrap();
+        assert!(matches!(reply, Response::Error(_)), "{reply:?}");
+    }
+    std::fs::write(root.join("large.txt"), "x".repeat(70 * 1024)).unwrap();
+    let reply = client
+        .request(&Request::Context {
+            chat,
+            action: A::Preview(S {
+                source: R::File {
+                    path: "large.txt".into(),
+                    lines: None,
+                },
+                mode: M::Reference,
+                expected: None,
+            }),
+        })
+        .unwrap();
+    assert!(
+        matches!(reply,Response::Context(P::Snapshot(ref s)) if s.text.is_empty()&&s.mode==M::Reference)
+    );
+}
+
+/// Side reads never subscribe a hidden terminal or consume parent updates.
+fn side_reply(
+    client: &mut Client,
+    chat: TerminalId,
+    action: clackatoo_protocol::SideAction,
+) -> clackatoo_protocol::SideReply {
+    let response = client.request(&Request::Side { chat, action }).unwrap();
+    match response {
+        Response::Side(reply) => reply,
+        other => panic!("{other:?}"),
+    }
+}
+fn side_finished(client: &mut Client, parent: TerminalId, count: usize) -> ChatNode {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let reply = side_reply(client, parent, clackatoo_protocol::SideAction::Read);
+        if let Some(node) = reply.node
+            && node.turns.len() == count
+            && node.turns.last().is_some_and(|t| t.end.is_some())
+        {
+            return *node;
+        }
+        assert!(Instant::now() < until, "side answer did not finish");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+#[test]
+fn side_questions_capture_once_without_interrupting_the_parent_and_attach_immutable_answers() {
+    use clackatoo_protocol::{
+        ContextAction, ContextMode, ContextRef, ContextReply, ContextSelection, SideAction as S,
+    };
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let parent = start_chat(&mut client);
+    ask(&mut client, parent, "Original architecture decision");
+    client
+        .chat(parent, ChatAction::Send("wait".into()))
+        .unwrap();
+    wait_for_chat(&mut client, parent, |n| n.state == ChatState::Answering);
+    client
+        .chat(
+            parent,
+            ChatAction::Draft {
+                text: "Unsent main draft".into(),
+            },
+        )
+        .unwrap();
+    let before = chat_now(&mut client, parent);
+    side_reply(
+        &mut client,
+        parent,
+        S::Open {
+            question: "Why cookies?".into(),
+        },
+    );
+    let side = side_finished(&mut client, parent, 1);
+    assert!(last_words(&side).contains("Why cookies?"));
+    assert_eq!(chat_now(&mut client, parent).turns, before.turns);
+    assert_eq!(chat_now(&mut client, parent).state, ChatState::Answering);
+    side_reply(
+        &mut client,
+        parent,
+        S::Open {
+            question: String::new(),
+        },
+    );
+    side_reply(
+        &mut client,
+        parent,
+        S::Send {
+            text: "And HTTP-only?".into(),
+        },
+    );
+    side_finished(&mut client, parent, 2);
+    let log = agent_log(&daemon, "agent.log");
+    assert!(log.contains("Original architecture decision"), "{log}");
+    assert!(log.contains("Do not call any tools"), "{log}");
+    let captured = client
+        .request(&Request::Side {
+            chat: parent,
+            action: S::Attach { turn: 0 },
+        })
+        .unwrap();
+    let Response::Context(ContextReply::Snapshot(snapshot)) = captured else {
+        panic!("{captured:?}")
+    };
+    assert!(snapshot.text.contains("Why cookies?"));
+    assert!(!snapshot.text.contains("And HTTP-only?"));
+    let selection = ContextSelection {
+        source: ContextRef::Retained {
+            id: snapshot.id.clone(),
+            grant: snapshot.grant,
+        },
+        mode: ContextMode::Contents,
+        expected: Some(snapshot.revision),
+    };
+    side_reply(&mut client, parent, S::Discard);
+    let reopened = client
+        .request(&Request::Context {
+            chat: parent,
+            action: ContextAction::Preview(selection),
+        })
+        .unwrap();
+    assert!(
+        matches!(reopened,Response::Context(ContextReply::Snapshot(ref s)) if s.text==snapshot.text)
+    );
+    let parent_now = chat_now(&mut client, parent);
+    assert_eq!(parent_now.turns, before.turns);
+    assert_eq!(parent_now.draft.as_deref(), Some("Unsent main draft"));
+    client.chat(parent, ChatAction::Stop).unwrap();
+}
+#[test]
+fn keeping_a_side_chat_promotes_its_context_and_preserves_the_parent() {
+    use clackatoo_protocol::SideAction as S;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let parent = start_chat(&mut client);
+    ask(&mut client, parent, "Captured parent background");
+    let before = chat_now(&mut client, parent);
+    side_reply(
+        &mut client,
+        parent,
+        S::Open {
+            question: "A tangent".into(),
+        },
+    );
+    side_finished(&mut client, parent, 1);
+    side_reply(&mut client, parent, S::Keep);
+    let workspace = client.watch_workspaces().unwrap();
+    let chats = workspace.list[0].terminals();
+    let kept = *chats
+        .iter()
+        .find(|&&id| id != parent)
+        .expect("normal chat in a new tab");
+    let node = wait_for_chat(&mut client, kept, |n| n.state == ChatState::Ready);
+    assert_eq!(node.turns.len(), 1);
+    ask(&mut client, kept, "Continue here");
+    let log = agent_log(&daemon, "agent.log");
+    assert!(log.contains("Captured parent background"));
+    assert!(log.contains("now a normal user chat"));
+    assert_eq!(chat_now(&mut client, parent).turns, before.turns);
+    assert!(side_reply(&mut client, parent, S::Read).node.is_none());
+}
+
+#[test]
+fn stopping_a_side_answer_leaves_the_parent_working_and_slashes_are_literal_questions() {
+    use clackatoo_protocol::SideAction as S;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let parent = start_chat(&mut client);
+    client
+        .chat(parent, ChatAction::Send("wait".into()))
+        .unwrap();
+    wait_for_chat(&mut client, parent, |n| n.state == ChatState::Answering);
+    let before = chat_now(&mut client, parent);
+    side_reply(
+        &mut client,
+        parent,
+        S::Open {
+            question: "wait".into(),
+        },
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    while !side_reply(&mut client, parent, S::Read)
+        .node
+        .is_some_and(|n| n.state == ChatState::Answering)
+    {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    side_reply(&mut client, parent, S::Stop);
+    side_finished(&mut client, parent, 1);
+    assert_eq!(chat_now(&mut client, parent).state, ChatState::Answering);
+    assert_eq!(chat_now(&mut client, parent).turns, before.turns);
+    side_reply(
+        &mut client,
+        parent,
+        S::Send {
+            text: "/init".into(),
+        },
+    );
+    assert!(
+        last_words(&side_finished(&mut client, parent, 2))
+            .contains("Answer this side question literally:")
+    );
+    side_reply(&mut client, parent, S::Discard);
+    client.chat(parent, ChatAction::Stop).unwrap();
 }

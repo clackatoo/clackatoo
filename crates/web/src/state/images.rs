@@ -91,7 +91,7 @@ mod tests {
         s.submit(false);
         let out = s.take_outbox();
         assert!(matches!(&out[0], ClientMessage::Request(Request::Chat {
-            action: ChatAction::Submit {text,images,..},..
+            action: ChatAction::SubmitContext {text,images,..},..
         }) if text.is_empty() && images == &[image()]));
         s.add_image(chat, image()).unwrap();
         let new = s.images[&chat][1].id;
@@ -121,7 +121,7 @@ mod tests {
         assert!(s.take_outbox().iter().all(|m| !matches!(
             m,
             ClientMessage::Request(Request::Chat {
-                action: ChatAction::Submit { .. },
+                action: ChatAction::SubmitContext { .. },
                 ..
             })
         )));

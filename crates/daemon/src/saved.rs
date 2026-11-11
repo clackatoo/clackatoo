@@ -9,7 +9,7 @@
 //! the command its shell was running, if one was; an editor's file, the
 //! directory it was opened from, and where its cursor and view were; an explorer's or a folder's root; a
 //! board; a review; and a chat's agent and session, which the agent kept,
-//! and for a chat an agent started, which chat started it, its profile
+//! and for a chat an agent started, which chat started it, its specialist
 //! and limits, and whether the user kept it.
 //! Beside the workspaces, the daemon's connections to the daemons on other
 //! machines: each one's host, and the command that runs clackatoo there.
@@ -420,6 +420,8 @@ pub(crate) struct Beside {
 /// start needs to make it a subagent again, with no more than it had.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Started {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) definition: Option<Box<crate::specialists::Specialist>>,
     /// The chat whose agent started it, or took it on, by its ID in the
     /// run that wrote the file, if that chat was kept too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -432,9 +434,10 @@ pub(crate) struct Started {
     /// The turn of its parent's whose card showed it, by its index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) turn: Option<u32>,
-    /// The profile it was started as, if one: `explore`.
+    /// The specialist it was started as, if one: `explore`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) profile: Option<String>,
+    #[serde(alias = "profile")]
+    pub(crate) specialist: Option<String>,
     /// What it may do beyond its agent's own settings, by the limits'
     /// names (`read-only`); one this build doesn't know reads as the
     /// strictest.
@@ -1075,10 +1078,11 @@ mod tests {
         assert!(!encoded.contains("\"started\""), "{encoded}");
         let mut state = state();
         let started = Started {
+            definition: None,
             parent: Some(7),
             depth: 1,
             turn: Some(2),
-            profile: Some("explore".into()),
+            specialist: Some("explore".into()),
             limits: Some("read-only".into()),
             kept: true,
             mode: Some(Mode {
@@ -1127,7 +1131,7 @@ mod tests {
             subagents: None,
         });
         let text = String::from_utf8(state.encode()).unwrap();
-        for absent in ["parent", "turn", "profile", "limits", "kept", "mode"] {
+        for absent in ["parent", "turn", "specialist", "limits", "kept", "mode"] {
             assert!(!text.contains(&format!("\"{absent}\"")), "{absent}: {text}");
         }
     }

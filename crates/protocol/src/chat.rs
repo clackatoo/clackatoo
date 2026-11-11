@@ -155,6 +155,13 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::CHAT_BRANCHES }, _, _>"
     )]
     pub branches: Vec<Divergence>,
+    /// Selected context in the daemon-owned unsent draft.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CONTEXT }, _>",
+        deserialize_with = "wire::since::<{ wire::CONTEXT }, _, _>"
+    )]
+    pub draft_context: Vec<crate::ContextSelection>,
 }
 
 /// Where branches of a chat's conversation part, on the branch shown
@@ -327,6 +334,7 @@ pub fn slash_command(text: &str) -> Option<(&str, &str)> {
 /// unless the chat's agent offers a command of the name, which is the
 /// agent's.
 pub const INTERFACE_COMMANDS: &[&str] = &[
+    "btw",
     "clear",
     "new",
     "resume",
@@ -585,6 +593,13 @@ pub struct ChatDelivery {
 /// A pending message, addressed by a stable chat-local ID.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessage {
+    /// Number of captured text attachments, whose bodies stay in the daemon.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CONTEXT }, _>",
+        deserialize_with = "wire::since::<{ wire::CONTEXT }, _, _>"
+    )]
+    pub context_count: u8,
     /// Stable until sent or removed.
     pub id: u64,
     /// The user's text.
@@ -614,8 +629,9 @@ pub struct Subagent {
     pub chat: crate::TerminalId,
     /// Its agent, as it's shown: "Claude Code".
     pub agent: String,
-    /// The profile it was started with, such as `explore`, if one.
-    pub profile: Option<String>,
+    /// The specialist it was started with, such as `explore`, if one.
+    #[serde(alias = "profile")]
+    pub specialist: Option<String>,
     /// The model it runs on, as shown, once that's known.
     pub model: Option<String>,
     /// What it was asked to do: its first message's first line, cut short.
@@ -1038,6 +1054,13 @@ impl Setting {
 /// A message the user sent, and what the agent did with it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
+    /// Immutable context actually included with this message.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CONTEXT }, _>",
+        deserialize_with = "wire::since::<{ wire::CONTEXT }, _, _>"
+    )]
+    pub context: Vec<crate::ContextSnapshot>,
     /// The message. Empty for a turn holding a conversation from before
     /// chats were kept as turns.
     pub prompt: String,
@@ -1100,8 +1123,9 @@ pub struct FinishedChat {
     pub chat: crate::TerminalId,
     /// Its agent, as it's shown: "Claude Code".
     pub agent: String,
-    /// The profile it was started as, such as `explore`, if one.
-    pub profile: Option<String>,
+    /// The specialist it was started as, such as `explore`, if one.
+    #[serde(alias = "profile")]
+    pub specialist: Option<String>,
     /// What it was asked: the first line of the message it answered, cut
     /// short.
     pub asked: String,
@@ -1169,7 +1193,7 @@ impl FinishedChat {
         let mut label = format!("chat {}", self.chat);
         // A chat closed before a notice's cards were read back from its
         // text has no agent known.
-        let what = self.profile.as_deref().unwrap_or(&self.agent);
+        let what = self.specialist.as_deref().unwrap_or(&self.agent);
         if !what.is_empty() {
             let _ = write!(label, " · {what}");
         }
@@ -1914,14 +1938,15 @@ pub struct ChatSummary {
     /// When something last happened in it, in milliseconds since the Unix
     /// epoch: its last message sent, or its last turn's end.
     pub active: u64,
-    /// The profile it was started as, such as `explore`, if an agent
+    /// The specialist it was started as, such as `explore`, if an agent
     /// started it as one. `None` from a daemon older than protocol 109.
     #[serde(
         default,
-        skip_serializing_if = "wire::before::<{ wire::SUBAGENT_PROFILE }, _>",
-        deserialize_with = "wire::since::<{ wire::SUBAGENT_PROFILE }, _, _>"
+        skip_serializing_if = "wire::before::<{ wire::SUBAGENT_SPECIALIST }, _>",
+        deserialize_with = "wire::since::<{ wire::SUBAGENT_SPECIALIST }, _, _>"
     )]
-    pub profile: Option<String>,
+    #[serde(alias = "profile")]
+    pub specialist: Option<String>,
     /// Whether its last turn went wrong (ended `Outcome::Failed`), for a
     /// notification of it to say so. `None` from a daemon older than
     /// protocol 116, which doesn't say.
@@ -2440,6 +2465,26 @@ pub enum ChatAction {
         /// The turn that failed.
         turn: u32,
     },
+    /// Submit a message after its selected workspace context has been captured.
+    SubmitContext {
+        /// User's message.
+        text: String,
+        /// Existing image attachments.
+        images: Vec<ChatImage>,
+        /// Sources to capture before accepting this message.
+        context: Vec<crate::ContextSelection>,
+        /// Optional provider handoff.
+        target: Option<ChatTarget>,
+        /// Redirect active work, preserving attachments.
+        steer: bool,
+    },
+    /// Persist a text draft and its source selections together.
+    DraftContext {
+        /// Draft text.
+        text: String,
+        /// Source selectors; bodies are captured only for preview or submission.
+        context: Vec<crate::ContextSelection>,
+    },
 }
 
 /// Where a chat copied with [`ChatAction::Fork`] goes.
@@ -2529,6 +2574,7 @@ impl ChatNode {
             )
             .min(self.turns.len());
         Self {
+            draft_context: self.draft_context.clone(),
             agent: self.agent.clone(),
             turns: self.turns[start..].to_vec(),
             state: self.state.clone(),
@@ -2641,7 +2687,10 @@ impl ChatNode {
             ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::Retrying(retrying) => self.retrying = retrying,
-            ChatPatch::DraftCleared { .. } => self.draft = Some(String::new()),
+            ChatPatch::DraftCleared { .. } => {
+                self.draft = Some(String::new());
+                self.draft_context.clear();
+            }
             ChatPatch::Branches(branches) => self.branches = branches,
             ChatPatch::History {
                 first,
@@ -3232,7 +3281,7 @@ mod tests {
         let chat = |id: u32, outcome: Option<Outcome>| FinishedChat {
             chat: crate::TerminalId(id),
             agent: "Claude Code".into(),
-            profile: (id == 7).then(|| "explore".into()),
+            specialist: (id == 7).then(|| "explore".into()),
             asked: "Find where turns are drawn".into(),
             started: 1_000,
             ended: 81_000,
@@ -3279,7 +3328,7 @@ mod tests {
         // One read back from a notice's text, of a chat since closed.
         let read_back = FinishedChat {
             agent: String::new(),
-            profile: None,
+            specialist: None,
             asked: String::new(),
             started: 0,
             ended: 0,
@@ -3634,6 +3683,7 @@ mod tests {
 
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),

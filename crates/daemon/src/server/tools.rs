@@ -577,20 +577,36 @@ impl Daemon {
     }
 
     /// What the chat `chat`'s agent is told about its tools when it
-    /// connects: what they're for, how to hand work on, as which profiles,
+    /// connects: what they're for, how to hand work on, as which specialists,
     /// which chat it is, what it may do, and the boards it shares with
     /// other agents.
     fn tools_instructions(&self, chat: TerminalId) -> String {
         let own = self.chat_ref(chat);
         let task = own.is_none_or(crate::chat::HostedChat::task);
-        let mut profiles = String::new();
-        for profile in self.config.agents.profiles() {
-            let about = if profile.about.is_empty() {
+        let mut specialists = String::new();
+        for specialist in self.specialists_for(chat).into_iter().filter(|s| {
+            s.extra.agent_invocable
+                && own
+                    .and_then(|chat| chat.specialist_definition())
+                    .and_then(|s| s.extra.delegates_to.as_ref())
+                    .is_none_or(|allowed| allowed.contains(&s.name))
+        }) {
+            let description = if specialist.description.is_empty() {
                 "the user's own"
             } else {
-                &profile.about
+                &specialist.description
             };
-            let _ = write!(profiles, " {}: {about}.", profile.name);
+            let routing = if specialist.extra.when_to_use.is_empty() {
+                description
+            } else {
+                &specialist.extra.when_to_use
+            };
+            let routing = crate::skills::line(routing, 1024);
+            let name = crate::skills::line(&specialist.name, 64);
+            if specialists.len() + name.len() + routing.len() > 24 * 1024 {
+                break;
+            }
+            let _ = write!(specialists, " {name}: {routing}.");
         }
         let limits = own
             .and_then(|own| own.limits().told())
@@ -601,8 +617,8 @@ impl Daemon {
         } else {
             String::new()
         };
-        format!(
-            "{} {} The profiles are:{profiles} This chat is chat {chat}: other agents name it \
+        let mut instructions = format!(
+            "{} {} The specialists are:{specialists} This chat is chat {chat}: other agents name it \
              by that number.{limits}{browser}{}",
             mcp::INSTRUCTIONS,
             if task {
@@ -611,7 +627,9 @@ impl Daemon {
                 mcp::DELEGATING_WITHOUT_TASK
             },
             self.boards_told(chat)
-        )
+        );
+        instructions.push_str(" Shared skills are provided by clackatoo: load_skill reads a procedure and list_skills refreshes the catalogue. The chat supplies skill descriptions with its first ordinary request.");
+        instructions
     }
 
     /// The chat `chat`'s Browser setting went on or off. Its catalogue
@@ -1166,6 +1184,22 @@ impl Daemon {
     #[allow(clippy::too_many_lines, reason = "dispatches the tool catalogue")]
     fn carry_out(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool, raw: mcp::Raw) {
         let result = match tool {
+            Tool::ReadContext { id: key, turn } => {
+                self.read_context_tool(token, chat, &id, &key, turn);
+                return;
+            }
+            Tool::Outline(query) => {
+                self.outline_tool(token, chat, &id, query);
+                return;
+            }
+            Tool::ListSkills => {
+                self.skill_tool(token, id, chat, None);
+                return;
+            }
+            Tool::LoadSkill { name, arguments } => {
+                self.skill_tool(token, id, chat, Some((name, arguments)));
+                return;
+            }
             Tool::StartActivity {
                 id,
                 title,
@@ -2588,7 +2622,7 @@ impl Daemon {
     /// `get_diagnostics`: what language servers say is wrong, in the file
     /// at `path` or everywhere, the worst first, as `path:line:col`
     /// counted from 1, with paths from the chat's directory.
-    fn get_diagnostics(&mut self, chat: TerminalId, path: Option<&str>) -> String {
+    pub(super) fn get_diagnostics(&mut self, chat: TerminalId, path: Option<&str>) -> String {
         let dir = self.chat_dir(chat).unwrap_or_default();
         let Some(root) = self.project_root(chat) else {
             return "The chat has closed.".to_owned();
@@ -3668,7 +3702,7 @@ mod tests {
             serde_json::from_str(update).unwrap();
         let hosted = daemon.chat(chat).unwrap();
         hosted.update(update.update);
-        assert_eq!(hosted.all_limits(), crate::profiles::Limits::ReadOnly);
+        assert_eq!(hosted.all_limits(), crate::specialists::Limits::ReadOnly);
         assert!(hosted.node().question.is_some(), "nothing took it back");
         daemon.permitted(3, true);
         let mut said = String::new();

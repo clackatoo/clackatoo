@@ -3,7 +3,7 @@
 size 1100x900
 keys <C-;>:Agent claude<CR>
 keys i
-type mcp start_chat {"prompt":"Find where turns are drawn","profile":"explore"}
+type mcp start_chat {"prompt":"Find where turns are drawn","specialist":"explore"}
 keys <S-CR>
 type mcp start_chat {"prompt":"usage-limit"}
 keys <CR>

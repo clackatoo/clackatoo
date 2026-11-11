@@ -23,6 +23,8 @@ pub enum Action {
     Stop,
     /// Sends what's typed.
     Send,
+    Context(crate::state::context::Control),
+    Side(crate::state::side::Control),
     AttachPhotos,
     RemovePhoto(u64),
     /// Asks for notifications.
@@ -203,6 +205,8 @@ impl Action {
             Self::Answer { question, choice } => format!("answer:{question}:{choice}"),
             Self::Stop => "stop".to_owned(),
             Self::Send => "send".to_owned(),
+            Self::Side(c) => format!("side:{}", c.encode()),
+            Self::Context(c) => format!("context:{}", c.encode()),
             Self::AttachPhotos => "attach-photos".to_owned(),
             Self::RemovePhoto(id) => format!("remove-photo:{id}"),
             Self::Notify => "notify".to_owned(),
@@ -257,6 +261,8 @@ impl Action {
             }
             ("stop", "") => Self::Stop,
             ("send", "") => Self::Send,
+            ("side", rest) => Self::Side(crate::state::side::Control::decode(rest)?),
+            ("context", rest) => Self::Context(crate::state::context::Control::decode(rest)?),
             ("attach-photos", "") => Self::AttachPhotos,
             ("remove-photo", id) => Self::RemovePhoto(id.parse().ok()?),
             ("notify", "") => Self::Notify,

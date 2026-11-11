@@ -329,6 +329,80 @@ impl Tree {
 }
 
 impl HostedChat {
+    pub(crate) fn hand_over_context_state(&self) -> handover::ChatContext {
+        let mut turns = self
+            .turn_uids(0..self.node.turns.len())
+            .iter()
+            .zip(&self.node.turns)
+            .filter(|(_, t)| !t.context.is_empty())
+            .map(|(uid, t)| (uid.0, t.context.clone()))
+            .collect::<Vec<_>>();
+        for seg in self.tree.segs.iter().flatten() {
+            if let Some(held) = &seg.held {
+                turns.extend(
+                    held.turns
+                        .iter()
+                        .filter(|(_, t)| !t.context.is_empty())
+                        .map(|(uid, t)| (uid.0, t.context.clone())),
+                );
+            }
+        }
+        handover::ChatContext {
+            draft: self.node.draft_context.clone(),
+            chat: self.id.0,
+            turns,
+            queued: self
+                .user_queue
+                .messages
+                .iter()
+                .filter(|p| p.prompt.resolved_context || !p.prompt.context.is_empty())
+                .map(|p| (p.id, p.prompt.context.clone(), p.prompt.resolved_context))
+                .collect(),
+            waiting: self
+                .queued
+                .as_ref()
+                .map(|p| p.context.clone())
+                .unwrap_or_default(),
+            waiting_resolved: self.queued.as_ref().is_some_and(|p| p.resolved_context),
+        }
+    }
+
+    pub(crate) fn resume_context_state(&mut self, records: &mut Vec<handover::ChatContext>) {
+        let Some(at) = records.iter().position(|r| r.chat == self.id.0) else {
+            return;
+        };
+        let record = records.swap_remove(at);
+        self.node.draft_context.clone_from(&record.draft);
+        let contexts = record
+            .turns
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let uids = self.turn_uids(0..self.node.turns.len()).to_vec();
+        for (uid, turn) in uids.iter().zip(&mut self.node.turns) {
+            if let Some(context) = contexts.get(&uid.0) {
+                turn.context.clone_from(context);
+            }
+        }
+        for seg in self.tree.segs.iter_mut().flatten() {
+            if let Some(held) = &mut seg.held {
+                for (uid, turn) in &mut held.turns {
+                    if let Some(context) = contexts.get(&uid.0) {
+                        turn.context.clone_from(context);
+                    }
+                }
+            }
+        }
+        for (id, context, resolved) in record.queued {
+            if let Some(p) = self.user_queue.messages.iter_mut().find(|p| p.id == id) {
+                p.prompt.context = context;
+                p.prompt.resolved_context = resolved;
+            }
+        }
+        if let Some(prompt) = &mut self.queued {
+            prompt.context = record.waiting;
+            prompt.resolved_context = record.waiting_resolved;
+        }
+    }
     /// Whether a new branch of the conversation, not yet written to, ends
     /// the branch shown.
     pub(crate) fn branch_pending(&self) -> bool {
@@ -449,14 +523,23 @@ impl HostedChat {
         Ok(Copied {
             turns: self.node.turns[..keep].to_vec(),
             uids: self.uids.within(0..keep).to_vec(),
-            plan,
+            plan: if self.side_parent().is_some() {
+                None
+            } else {
+                plan
+            },
             title: self.title.clone(),
-            // Its limits and profile go with it, never more than it may
+            // Its limits and specialist go with it, never more than it may
             // do; the user's keeping it, and a browser it was let use,
             // are the chat's own, to be given the copy again.
             chosen: (self.chosen.iter())
                 .filter(|(setting, _)| {
-                    setting != super::KEPT_SETTING && setting != super::BROWSING_SETTING
+                    setting != super::KEPT_SETTING
+                        && setting != super::BROWSING_SETTING
+                        && !(self.side_parent().is_some()
+                            && self
+                                .setting_of(clackatoo_protocol::SettingKind::Mode)
+                                .is_some_and(|mode| mode.id == *setting))
                 })
                 .cloned()
                 .collect(),
@@ -1952,6 +2035,7 @@ fn first_line(prompt: &str) -> String {
 /// tell again.
 fn not_told_turn() -> Turn {
     Turn {
+        context: Vec::new(),
         woke: None,
         notice: None,
         previews: Vec::new(),
@@ -2065,7 +2149,7 @@ mod tests {
 
     fn card(turn: u32) -> Subagent {
         let json = serde_json::json!({
-            "chat": 9, "agent": "Claude Code", "profile": null, "model": null,
+            "chat": 9, "agent": "Claude Code", "specialist": null, "model": null,
             "task": "look", "status": "Working", "started": 1, "ended": null,
             "turn": turn, "shown": false, "tasks": [],
         });

@@ -127,6 +127,11 @@ enum Asked {
     ChatChoices,
     /// The same, for the settings menu's cards of agents.
     SettingsAgents,
+    /// The shared skill catalogue for Settings.
+    SettingsSkills,
+    Work,
+    SettingsSpecialists,
+    SettingsSpecialistSaved(clackatoo_protocol::SpecialistDefinition),
     /// The daemon's settings, for the settings menu.
     DaemonSettings,
     /// A change to one of the daemon's settings the menu asked for.
@@ -189,6 +194,7 @@ mod chats;
 mod clipboard;
 mod colours;
 mod connecting;
+mod work;
 use connecting::Said as _;
 mod devices;
 mod dragging;
@@ -208,6 +214,7 @@ mod messages;
 mod mode;
 mod notices;
 mod offers;
+mod outline;
 mod pasting;
 mod pictures;
 mod places;
@@ -336,6 +343,9 @@ pub(crate) struct Desk {
     /// The background tab whose screen the list of them last asked for,
     /// and when (see [`background`]).
     background_preview: Option<(TabId, std::time::Instant)>,
+    work: Vec<clackatoo_protocol::WorkItem>,
+    outlines: outline::Outlines,
+    symbol_refresh: bool,
     /// The background tab still running that Ctrl+D in the list was
     /// pressed on once, which a second press dismisses, and when it was:
     /// see [`background::DISMISS_FOR`].
@@ -1568,9 +1578,16 @@ impl Desk {
     /// history.
     pub(crate) fn connected(&mut self, workspaces: Workspaces, remote: bool) {
         self.connected = true;
+        self.work.clear();
         self.remote = remote;
         self.own_home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
         self.forget_asked();
+        if self.daemon_has(clackatoo_protocol::wire::WORK) {
+            self.request(
+                Request::Work(clackatoo_protocol::WorkAction::List),
+                Asked::Work,
+            );
+        }
         self.tell_places_again();
         for pane in self.panes.values_mut() {
             pane.reconnected();
@@ -1609,6 +1626,7 @@ impl Desk {
     /// will be answered.
     pub(crate) fn lost(&mut self) {
         self.connected = false;
+        self.work_changed(Vec::new());
         self.forget_asked();
         // A chat's agent may have long finished by the time it's back:
         // none says it's working, nor counts, meanwhile.
@@ -1956,6 +1974,12 @@ impl Desk {
             }
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
             Some(Asker::Window(Asked::SettingsAgents)) => self.settings_agents(response),
+            Some(Asker::Window(Asked::Work)) => self.work_answered(response),
+            Some(Asker::Window(Asked::SettingsSkills)) => self.settings_skills(response),
+            Some(Asker::Window(Asked::SettingsSpecialists)) => self.settings_specialists(response),
+            Some(Asker::Window(Asked::SettingsSpecialistSaved(edit))) => {
+                self.settings_specialist_saved(&edit, response)
+            }
             Some(Asker::Window(Asked::DaemonSettings)) => self.daemon_settings_answered(response),
             Some(Asker::Window(Asked::DaemonOption(info))) => {
                 self.daemon_option_answered(info, response)
@@ -2985,6 +3009,9 @@ impl Desk {
             Command::On { host, command } => return self.run_on(&host, *command),
             Command::Workspace(name) => return self.switch_workspace(name),
             Command::Settings(query) => return self.open_settings(&query),
+            Command::SpecialistSettings => return self.open_specialist_settings(),
+            Command::Work => return self.open_work(),
+            Command::Outline { focus } => return self.toggle_outline(focus),
             Command::MapPersist(mapping) => return self.map_persist(mapping),
             _ => {}
         }
@@ -3155,6 +3182,9 @@ impl Desk {
             | Command::PortForward(_)
             | Command::On { .. }
             | Command::Workspace(_)
+            | Command::Work
+            | Command::Outline { .. }
+            | Command::SpecialistSettings
             | Command::Settings(_)
             | Command::MapPersist(_) => {}
         }
@@ -3288,6 +3318,7 @@ mod tests {
     mod mode;
     mod mouse;
     mod notices;
+    mod outline;
     mod pasting;
     mod places;
     mod remedies;
@@ -3303,6 +3334,7 @@ mod tests {
     mod typing;
     mod view;
     mod windows;
+    mod work;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};
@@ -3668,7 +3700,7 @@ mod tests {
             parent: None,
             workspace: Some(WorkspaceId(workspace)),
             active: 0,
-            profile: None,
+            specialist: None,
             failed: Some(false),
         };
         let choices = ChatChoices {
@@ -4234,6 +4266,7 @@ mod tests {
             snapshot(&mut desk, terminal);
         }
         let turn = Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -4277,7 +4310,7 @@ mod tests {
             parent: None,
             workspace: Some(WorkspaceId(workspace)),
             active: 0,
-            profile: None,
+            specialist: None,
             failed: Some(false),
         }
     }
@@ -5135,7 +5168,7 @@ mod tests {
                 ("p", "+project"),
                 ("?", "open files"),
                 ("d", "+problems"),
-                ("b", "+file symbols"),
+                ("b", "+buffer"),
                 ("h", "+git hunks"),
                 ("e", "explorer"),
                 ("a", "ask chat"),
@@ -8867,6 +8900,8 @@ mod tests {
     fn space_p_s_finds_the_projects_symbols_as_typed_and_opens_the_one_picked() {
         use clackatoo_protocol::{Done, Found, FoundSymbol, OpenFile, Search};
         let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        // Peers before shared indexing keep their language-server search.
+        desk.daemon_is(clackatoo_protocol::wire::CODE_OUTLINES - 1, None);
         type_keys(&mut desk, " ps");
         let (first, search) = search_in(&finds(&mut desk));
         // Asked at once, for what a server lists for nothing typed.
@@ -10006,6 +10041,7 @@ mod tests {
         let node = ChatNode {
             state: ChatState::Ready,
             turns: vec![Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),

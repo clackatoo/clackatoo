@@ -305,6 +305,9 @@ impl Digest<'_> {
         if !turn.prompt.is_empty() {
             let _ = write!(whole, "### {}\n{}\n", asker(turn), turn.prompt.trim_end());
         }
+        for context in &turn.context {
+            let _ = writeln!(whole, "\n{}", context.quoted());
+        }
         let words: Vec<&str> = (turn.items.iter())
             .filter_map(|item| match item {
                 Item::Words(words) if !words.trim().is_empty() => Some(words.trim()),
@@ -339,6 +342,17 @@ impl Digest<'_> {
             asker(turn),
             one_line(&turn.prompt, LINE_ASK)
         );
+        for context in turn.context.iter().take(3) {
+            let _ = write!(
+                line,
+                " [context {}: {}]",
+                context.id,
+                one_line(&context.label, 60)
+            );
+        }
+        if turn.context.len() > 3 {
+            let _ = write!(line, " [{} more attachments]", turn.context.len() - 3);
+        }
         let tools = self.tools(turn);
         if !tools.is_empty() {
             let _ = write!(line, " → {tools}");
@@ -512,6 +526,7 @@ mod tests {
 
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),

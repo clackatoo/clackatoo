@@ -31,8 +31,12 @@ impl ChatView {
         if !self.queue_supported || self.handoff_sent.is_some() {
             return;
         }
+        if self.context.attached.iter().any(|a| !a.ready) {
+            self.say("An attachment needs a preview. Open Context to refresh it, choose Reference only, or remove it.".into());
+            return;
+        }
         let text = self.editor.raw_text().trim().to_owned();
-        if text.is_empty() && self.images.is_empty() {
+        if text.is_empty() && self.images.is_empty() && self.context.attached.is_empty() {
             return;
         }
         let target = self.handoff.as_ref().map(|p| ChatTarget {
@@ -41,13 +45,27 @@ impl ChatView {
             budget: 0,
         });
         let images = std::mem::take(&mut self.images);
-        settled.actions.push(ChatAction::Submit {
-            text,
-            images: images.clone(),
-            target,
-            steer,
-        });
+        let attached = std::mem::take(&mut self.context.attached);
+        settled
+            .actions
+            .push(if attached.is_empty() && !self.context_supported {
+                ChatAction::Submit {
+                    text,
+                    images: images.clone(),
+                    target,
+                    steer,
+                }
+            } else {
+                ChatAction::SubmitContext {
+                    text,
+                    images: images.clone(),
+                    target,
+                    steer,
+                    context: attached.iter().map(|a| a.selection.clone()).collect(),
+                }
+            });
         self.handoff_sent = Some(handoff::Draft {
+            context: attached,
             text: self.editor.raw_text().to_owned(),
             images,
         });
@@ -101,7 +119,14 @@ impl super::ChatView {
         }
         let text = message.text.clone();
         if let Some(typed) = self.take_draft(true) {
-            settled.actions.push(ChatAction::Draft { text: typed });
+            settled.actions.push(if self.context_supported {
+                ChatAction::DraftContext {
+                    text: typed,
+                    context: self.context.selections(),
+                }
+            } else {
+                ChatAction::Draft { text: typed }
+            });
         }
         self.memory.taking_back = Some(super::prompts::TakingBack { id, text });
         settled.actions.push(ChatAction::TakeBack { queued: id });

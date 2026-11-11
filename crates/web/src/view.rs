@@ -550,6 +550,20 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         }
         section = section.child(prompt);
     }
+    for (attached, snapshot) in turn.context.iter().enumerate() {
+        section = section.child(
+            el("button")
+                .class("context-captured")
+                .action(&Action::Context(crate::state::context::Control::Read(
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    attached,
+                )))
+                .text(format!(
+                    "Context · {} · {} bytes · inspect",
+                    snapshot.label, snapshot.bytes
+                )),
+        );
+    }
     // A turn the agent took by itself has no message: a line says so.
     if let Some(why) = &turn.woke {
         let mut said = format!("{} went on by itself", node.agent);
@@ -647,16 +661,16 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
 
 /// A message no one typed, quoted down the left under where it came
 /// from: "From chat 7 · explore", from another chat's agent, with the
-/// profile it was started as if this chat's agent started it; or what a
+/// specialist it was started as if this chat's agent started it; or what a
 /// notice of clackatoo's is.
 fn quoted(node: &ChatNode, turn: &Turn, from: &clackatoo_protocol::Sender) -> Element {
     let head = if let Some(notice) = &turn.notice {
         el("div").class("from").text(notice.heading(&from.title))
     } else {
-        let profile = (node.subagents.iter())
+        let specialist = (node.subagents.iter())
             .find(|entry| entry.chat == from.chat)
-            .and_then(|entry| entry.profile.as_deref());
-        let what = profile.unwrap_or(&from.agent);
+            .and_then(|entry| entry.specialist.as_deref());
+        let what = specialist.unwrap_or(&from.agent);
         el("div")
             .class("from")
             .class("subagent")
@@ -1038,8 +1052,8 @@ fn card(subagent: &Subagent, now: u64) -> Element {
         SubagentStatus::Closed => "closed".to_owned(),
     };
     let mut who = subagent.agent.clone();
-    if let Some(profile) = &subagent.profile {
-        who = format!("{profile} · {who}");
+    if let Some(specialist) = &subagent.specialist {
+        who = format!("{specialist} · {who}");
     }
     if let Some(model) = &subagent.model {
         who = format!("{who} · {model}");
@@ -1518,7 +1532,7 @@ pub const SETTINGS_FOLD: &str = "settings";
 
 /// The same accessible sheet for settings and account usage. Its close button
 /// takes focus; the app contains Tab and restores focus when it closes.
-fn sheet(title: &str, close: &Action, content: Element) -> Element {
+pub(crate) fn sheet(title: &str, close: &Action, content: Element) -> Element {
     el("div")
         .class("sheet-layer")
         .child(
@@ -1564,7 +1578,13 @@ pub fn commands(node: &ChatNode, draft: &str) -> Element {
         return list;
     };
     let typed = typed.to_lowercase();
-    let matching: Vec<&clackatoo_protocol::AgentCommand> = (node.commands.iter())
+    let side = clackatoo_protocol::AgentCommand {
+        name: "btw".into(),
+        description: "Ask a side question without changing this conversation".into(),
+        hint: Some("question".into()),
+    };
+    let matching: Vec<&clackatoo_protocol::AgentCommand> = std::iter::once(&side)
+        .chain(node.commands.iter().filter(|c| c.name != "btw"))
         .filter(|command| command.name.to_lowercase().starts_with(&typed))
         .take(MOST_COMMANDS_SHOWN)
         .collect();
@@ -1691,8 +1711,10 @@ pub fn queue(node: &ChatNode, online: Online) -> Element {
             .text(format!("{title} · {}", node.delivery.queued.len())),
     );
     for message in &node.delivery.queued {
-        let steering =
-            node.delivery.native_steering && message.images == 0 && message.target.is_none();
+        let steering = node.delivery.native_steering
+            && message.images == 0
+            && message.context_count == 0
+            && message.target.is_none();
         let busy = crate::state::busy(node);
         let label = if !busy {
             "Send now"
@@ -1718,6 +1740,9 @@ pub fn queue(node: &ChatNode, online: Online) -> Element {
             remove = remove.attr("disabled", "");
         }
         let mut text = el("div").class("queued-text").text(message.text.clone());
+        if message.context_count > 0 {
+            text = text.child(el("small").text(format!(" · {} context", message.context_count)));
+        }
         if message.images > 0 {
             text = text.child(el("small").text(format!(" · {} image(s)", message.images)));
         }
@@ -2071,7 +2096,7 @@ mod tests {
             parent: None,
             workspace: workspace.map(WorkspaceId),
             active,
-            profile: None,
+            specialist: None,
             failed: None,
         }
     }
@@ -2150,7 +2175,7 @@ mod tests {
         };
         assert_eq!(
             commands(&node, "/").all_text(),
-            "Commands/compactDoes compact/review ‹what›Does review"
+            "Commands/btw ‹question›Ask a side question without changing this conversation/compactDoes compact/review ‹what›Does review"
         );
         assert_eq!(
             commands(&node, "/re").all_text(),
@@ -2264,6 +2289,7 @@ mod tests {
         let mut node = ChatNode::default();
         for prompt in ["one", "two"] {
             node.turns.push(Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),
@@ -2320,6 +2346,7 @@ mod tests {
         assert!(fetched.valid() && !fetched.has_pixels());
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: vec![fetched],
@@ -2349,6 +2376,7 @@ mod tests {
     fn a_failed_last_turn_offers_what_clackatoo_can_do_about_it() {
         use clackatoo_protocol::Remedy;
         let failed = |remedy| Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -2416,6 +2444,7 @@ mod tests {
         };
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -2461,7 +2490,7 @@ mod tests {
         let finished = clackatoo_protocol::FinishedChat {
             chat: TerminalId(7),
             agent: "Claude Code".into(),
-            profile: Some("explore".into()),
+            specialist: Some("explore".into()),
             asked: "Find the parser".into(),
             started: 1_000,
             ended: 21_000,
@@ -2469,6 +2498,7 @@ mod tests {
             answer: "It's in `parse.rs`.\n\nMore.".into(),
         };
         let told = Turn {
+            context: Vec::new(),
             woke: None,
             notice: Some(clackatoo_protocol::TurnNotice {
                 finished: vec![finished],
@@ -2535,6 +2565,7 @@ mod tests {
         let nested = |item| Item::nested("task".into(), item);
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -3188,6 +3219,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "complete working-state fixture and its assertions"
+    )]
     fn while_the_agent_works_the_line_above_the_box_says_what_and_how_long() {
         let tool = Tool {
             id: "t".into(),
@@ -3204,6 +3239,7 @@ mod tests {
             ..ChatNode::default()
         };
         node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -3364,6 +3400,7 @@ mod tests {
         node.delivery
             .queued
             .push(clackatoo_protocol::QueuedMessage {
+                context_count: 0,
                 id: 87,
                 text: "guide".into(),
                 images: 0,

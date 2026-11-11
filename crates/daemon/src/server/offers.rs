@@ -281,6 +281,9 @@ impl Daemon {
         } in ended
         {
             log::info!("installing {language}: {outcome:?}");
+            if outcome.is_ok() {
+                self.invalidate_outlines();
+            }
             let tokens = self
                 .installs
                 .installing

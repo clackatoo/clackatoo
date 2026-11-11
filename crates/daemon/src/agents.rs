@@ -49,8 +49,6 @@ use std::path::{Path, PathBuf};
 use clackatoo_syntax::install::Download;
 use clackatoo_syntax::servers::{KnownServer, Packed, Source};
 
-use crate::profiles::{self, Profile};
-
 /// The lockfile `npm ci` installs a known agent's adapter from, and the
 /// manifest beside it, by the agent's name, as `npm install
 /// --package-lock-only` wrote them for the version pinned.
@@ -320,29 +318,39 @@ pub struct AgentConfig {
 }
 
 /// What the daemon's config says of agents (see [`crate::settings`]): the
-/// agents it adds, or gives another command, the profiles it adds or
-/// changes, the limits on chats agents start, and whether agents go on
+/// agents it adds, or gives another command, the limits on chats agents start, and whether agents go on
 /// through upgrades.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Configured {
     pub(crate) agents: Vec<CustomAgent>,
-    pub(crate) profiles: Vec<profiles::Change>,
     pub(crate) subagents: SubagentLimits,
     pub(crate) keep_agents: bool,
+    pub(crate) claude_plugins: bool,
+    pub(crate) codex_plugins: bool,
 }
 
 impl Default for Configured {
     fn default() -> Self {
         Self {
             agents: Vec::new(),
-            profiles: Vec::new(),
             subagents: SubagentLimits::default(),
             keep_agents: true,
+            claude_plugins: false,
+            codex_plugins: false,
         }
     }
 }
 
 impl Configured {
+    /// Whether this known runtime may use its own plugins and skills.
+    pub(crate) fn native_plugins(&self, name: &str) -> bool {
+        match name {
+            "claude" => self.claude_plugins,
+            "codex" => self.codex_plugins,
+            _ => false,
+        }
+    }
+
     /// As the daemon's config `settings` says.
     #[must_use]
     pub fn from(settings: &crate::settings::Settings) -> Self {
@@ -624,29 +632,6 @@ impl AgentConfig {
                 .map(|dir| dir.join(name))
                 .find(|candidate| is_program(candidate)),
         }
-    }
-
-    /// Every profile chats can be started as: clackatoo's, changed by
-    /// the config, then the user's own.
-    pub(crate) fn profiles(&self) -> Vec<Profile> {
-        let mut profiles = profiles::built_in();
-        profiles::apply(&self.configured.profiles, &mut profiles);
-        profiles
-    }
-
-    /// The profile called `name`, or why there isn't one.
-    pub(crate) fn profile(&self, name: &str) -> Result<Profile, String> {
-        let profiles = self.profiles();
-        if let Some(profile) = profiles.iter().find(|profile| profile.name == name) {
-            return Ok(profile.clone());
-        }
-        let names: Vec<&str> = (profiles.iter())
-            .map(|profile| profile.name.as_str())
-            .collect();
-        Err(format!(
-            "there's no profile called {name}: the profiles are {}",
-            names.join(", ")
-        ))
     }
 
     /// The directories the user's agents are run from, as the config and

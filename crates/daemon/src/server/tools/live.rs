@@ -514,7 +514,7 @@ mod tests {
         drop(fds);
         // The chat may run no commands now, as this build reads it.
         let wanted = crate::chat::Wanted::default();
-        let limits = crate::profiles::Limits::NoCommands;
+        let limits = crate::specialists::Limits::NoCommands;
         (daemon.chat(chat).unwrap()).start_as("reader", limits, None, wanted);
         let mut fds = Fds::from_received(received);
         daemon.resume_tools(&mut live, &mut fds, &HashSet::from([chat]));

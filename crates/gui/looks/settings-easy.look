@@ -16,13 +16,17 @@ shot editor-end
 keys }
 shot terminals
 keys }
-shot agents
-keys }
 shot keys
 keys }
 shot machines
+keys }
+shot agents
+keys }
+shot specialists
+keys }
+shot skills
 # The pages down the side, by the mouse: Appearance again.
-click 180 151
+click 180 180
 shot appearance-clicked
 # Hovering over a choice, then the font picker, by the keys: from the
 # pages down the side into the page, and Enter on the font.

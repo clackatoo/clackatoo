@@ -331,7 +331,9 @@ impl Focus {
         modifiers: crate::input::Modifiers,
     ) -> bool {
         match self {
-            Self::Editor(id) => desk.editor_wheel(id, lines),
+            Self::Editor(id) => {
+                desk.outline_wheel(id, point, lines) || desk.editor_wheel(id, lines)
+            }
             // List panes count downwards; terminal wheel input counts upwards.
             Self::Explorer(id) => desk
                 .explorers
@@ -386,7 +388,9 @@ impl Focus {
     ) -> bool {
         match self {
             Self::Editor(id) => {
-                desk.rendered_click(point) || desk.editor_press(id, cell, clicks, modifiers.alt)
+                desk.outline_press(id, cell)
+                    || desk.rendered_click(point)
+                    || desk.editor_press(id, cell, clicks, modifiers.alt)
             }
             Self::Explorer(id) => {
                 desk.acting_from_list(|desk| desk.explorer_click(id, point, cell, clicks))

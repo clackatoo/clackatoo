@@ -1,0 +1,24 @@
+# The index-backed editor outline and project symbol finder.
+size 1400x860
+file auth.fk <<END
+fn authenticate(user) {
+    fn validate(user) { user; }
+    user;
+}
+
+fn logout() {}
+END
+file storage.fk <<END
+fn save_session(value) { value; }
+fn load_session() {}
+END
+open auth.fk
+keys :Outline<CR>
+wait-for 3 symbols
+shot editor-outline
+keys j<CR>
+shot outline-jump
+keys <Space>ps
+type session
+wait-for save_session
+shot project-symbols

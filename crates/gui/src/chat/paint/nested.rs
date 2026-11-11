@@ -131,6 +131,7 @@ mod tests {
         ChatNode {
             state: ChatState::Answering,
             turns: vec![Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),

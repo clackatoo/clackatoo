@@ -98,6 +98,7 @@ pub(crate) struct Rules {
     /// Whether what's hidden, by a name starting `.`, is left out, unless
     /// an ignore file says to keep it.
     hidden: bool,
+    max_dirs: usize,
     /// Where the walk starts, as it was given.
     root: PathBuf,
     /// Where that really is, its links resolved, which the directories
@@ -145,6 +146,7 @@ impl Rules {
         Self {
             require_git,
             hidden,
+            max_dirs: usize::MAX,
             root: root.to_owned(),
             real: root.canonicalize().ok(),
             user: global(),
@@ -152,6 +154,13 @@ impl Rules {
             read: AtomicU64::new(0),
             said_too_much: AtomicBool::new(false),
         }
+    }
+
+    /// Bounds directory memoization for streaming walks; clearing it only
+    /// causes rules to be looked up again, never changes matching semantics.
+    pub(crate) fn bounded(mut self, max_dirs: usize) -> Self {
+        self.max_dirs = max_dirs.max(1);
+        self
     }
 
     /// Whether the walk goes on with `entry`: its root always, and anything
@@ -263,6 +272,9 @@ impl Rules {
             let dir = Dir::read(self, &key.0, key.1, found);
             // As another thread of the walk may have read it meanwhile.
             let mut dirs = self.dirs.write().unwrap_or_else(PoisonError::into_inner);
+            if dirs.len() >= self.max_dirs {
+                dirs.clear();
+            }
             found = dirs.entry(key).or_insert(dir).as_ref().map(Arc::clone);
         }
         found
@@ -416,6 +428,41 @@ mod tests {
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn bounded_directory_cache_preserves_nested_ignore_precedence_after_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join(".gitignore"), "*.log\n");
+        write(&root.join("a/.gitignore"), "!kept.log\n");
+        write(&root.join("a/deep/.gitignore"), "kept.log\n");
+        for file in [
+            "a/kept.log",
+            "a/hidden.log",
+            "a/deep/kept.log",
+            "b/hidden.log",
+        ] {
+            write(&root.join(file), "");
+        }
+        let bounded = Rules::new(root, false, false).bounded(1);
+        let ordinary = Rules::new(root, false, false);
+        for _ in 0..3 {
+            for file in [
+                "a/kept.log",
+                "b/hidden.log",
+                "a/deep/kept.log",
+                "a/hidden.log",
+            ] {
+                assert_eq!(
+                    bounded.ignored(&root.join(file), false),
+                    ordinary.ignored(&root.join(file), false),
+                    "{file}"
+                );
+            }
+        }
+        assert!(!bounded.ignored(&root.join("a/kept.log"), false));
+        assert!(bounded.ignored(&root.join("a/deep/kept.log"), false));
     }
 
     #[test]

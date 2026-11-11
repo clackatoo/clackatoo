@@ -294,6 +294,7 @@ impl HostedChat {
 
     fn push_replayed(&mut self, prompt: String) {
         self.push_turn(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -474,6 +475,7 @@ impl HostedChat {
             Held::End(outcome) => {
                 self.set_notice(None);
                 self.push_turn(Turn {
+                    context: Vec::new(),
                     woke: None,
                     notice: None,
                     previews: Vec::new(),

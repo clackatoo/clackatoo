@@ -1,0 +1,27 @@
+# Capture, inspect and send a source through the shared context picker.
+size 1280x900
+file context-example.rs <<END
+fn authenticate(user: &str) -> bool {
+    !user.is_empty()
+}
+END
+keys <C-;>:Agent claude<CR>
+keys i
+type @file:context-example
+sleep 300
+shot context-search
+keys <CR>
+sleep 200
+shot context-preview
+keys <CR>
+sleep 100
+keys <Esc>
+type Explain this function
+shot context-draft
+keys <CR>
+wait-for echo: Explain this function
+shot context-sent
+size 560x780
+type @context:
+sleep 300
+shot context-narrow

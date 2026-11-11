@@ -394,6 +394,7 @@ impl Desk {
 
     /// Sizes the editor of `pane` to its tile.
     pub(super) fn fit_editor(&mut self, pane: PaneId, size: Size) {
+        let size = self.fit_outline(pane, size);
         if let Some(editor) = self.editors.panes.get_mut(&pane) {
             editor.resize(size);
         }
@@ -1241,6 +1242,11 @@ impl Desk {
     /// Hands `stroke`, typed, to the focused pane's editor: by a macro,
     /// if the key comes from one.
     fn editor_stroke(&mut self, stroke: Stroke) -> bool {
+        if let Some(pane) = self.shown.map(|shown| shown.pane)
+            && self.outline_stroke(pane, stroke)
+        {
+            return true;
+        }
         let Some(focused) = self.shown.map(|shown| shown.pane) else {
             return false;
         };
@@ -1809,7 +1815,7 @@ impl Desk {
     /// too long for the grammar, or in an editor the focus has left.
     /// Returns whether any asked anything, or gave up.
     pub(crate) fn tick_editors(&mut self, now: std::time::Instant) -> bool {
-        let mut asked = self.give_up_off_focus();
+        let mut asked = self.give_up_off_focus() | self.tick_outlines(now);
         // Only the focused editor asks where a name is used, of a daemon
         // that reads the question.
         let focused = (self.shown.map(|shown| shown.pane)).filter(|_| self.daemon_has(wire::USES));
@@ -1854,6 +1860,7 @@ impl Desk {
     /// waiting is to give up.
     pub(crate) fn editor_wakes(&self) -> Option<std::time::Instant> {
         (self.editors.panes.values().filter_map(Editor::wakes))
+            .chain(self.outline_due())
             .chain(self.macro_gives_up())
             .chain(self.insert_gives_up())
             .chain(self.pane_wait_gives_up())
@@ -2285,6 +2292,7 @@ impl Desk {
 
     /// Forgets what was attached on the last connection.
     pub(super) fn editors_reconnected(&mut self) {
+        self.reconnect_outlines();
         self.editors.reconnected();
     }
 }

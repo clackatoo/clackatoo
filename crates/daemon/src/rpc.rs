@@ -214,7 +214,21 @@ impl Peer {
         framing: Framing,
         parser: &Parser,
     ) -> io::Result<Self> {
+        Self::start_with_env(name, command, cwd, display, framing, parser, &[])
+    }
+
+    /// Like `start`, with child-only environment overrides.
+    pub(crate) fn start_with_env(
+        name: &str,
+        command: &[OsString],
+        cwd: Option<&Path>,
+        display: Option<&crate::display::Env>,
+        framing: Framing,
+        parser: &Parser,
+        environment: &[(&str, OsString)],
+    ) -> io::Result<Self> {
         let mut command = command_for(command, cwd, std::env::var_os("PATH").as_deref())?;
+        command.envs(environment.iter().cloned());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

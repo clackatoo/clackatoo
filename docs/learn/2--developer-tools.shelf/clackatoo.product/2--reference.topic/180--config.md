@@ -535,8 +535,12 @@ and a close button. The menu opens in the mode used last, in any window, and
 in Easy the first time. `m`, or a click on the switch, changes mode, keeping
 what's typed in the search.
 
-**Easy** has six pages down its left, each with an icon: Appearance, Editor,
-Terminals, Agents, Keys, and Phone & other machines. A page has rows in
+**Easy** groups its pages into **General** (Appearance, Editor, Terminals,
+Keys, and Phone & other machines) and **Agents** (Agents,
+[Specialists](~clackatoo/reference/specialists), and [Skills](~clackatoo/reference/skills)). The Skills page browses shared
+procedures and skillset bundles and opens their source files. The Agents
+page has separate native-plugin opt-ins for Claude Code and Codex, off by
+default. A settings page has rows in
 cards under small headings: what the setting does in words, a line of help,
 and its control at the right, drawn as such: a switch, buttons side by side,
 a slider, a number between − and +, a card for each agent, the font picker
@@ -804,25 +808,18 @@ daemon.history.lines = 20000
 daemon.agents.opencode = { name = "OpenCode", command = { "opencode", "acp" } }
 daemon.agents.claude = { command = { "claude-agent-acp" }, tasks = false }
 
--- A profile for chats agents start.
-daemon.profiles.review = {
-  about = "Reviews a change for bugs",
-  agent = "codex",
-  model = { codex = "gpt-6-luna", claude = "haiku" },
-  limits = "read-only",
-}
 ```
 
 A setting reads back what it is, the default until something sets it, so
 `print(daemon.history.lines)` prints `10000`, and `nil` puts it back as it
-starts. `daemon.agents` and `daemon.profiles` are tables by name, so
+starts. `daemon.agents` is a table by name, so
 `daemon.agents.mine.tasks = false` changes one set above, `= nil` takes one
 out, and `for name, agent in daemon.agents do … end` goes through them
 (`pairs` finds none, as the table only stands for them). A name that isn't a
-word is written `daemon.agents["my agent"]`. What an agent and a profile can
-have is in
-[Which agent](~clackatoo/reference/agent-settings#which-agent) and
-[Profiles](~clackatoo/reference/chats-together#profiles).
+word is written `daemon.agents["my agent"]`. Agent fields are described in
+[Which agent](~clackatoo/reference/agent-settings#which-agent).
+[Specialists](~clackatoo/reference/specialists) are defined separately in
+`SPECIALIST.md` files and edited in Settings; Lua does not define them.
 
 `require` loads modules from `daemon/lua/`, or else the `lua/` shared with the
 window's config, by a name of letters, digits, `_` and `-`, a dot being a
@@ -840,7 +837,7 @@ It watches its files too: `daemon/settings.lua`, `daemon/init.lua`, and the
 modules they require, in `daemon/lua/` and `lua/`. A quarter of a second
 after one changes, it runs the config again, on a thread of its own, never
 holding up the terminals. What can change as the daemon runs does, at once,
-for what it starts from then on: the agents and profiles new chats can start
+for what it starts from then on: the agents new chats can start
 with, the limits on chats agents start, whether agents go on through
 upgrades, the notification when a long command ends, how terminals started
 then lay out emoji, and how many lines of terminals' history are kept, and
@@ -853,7 +850,7 @@ terminal and agent running, takes it in.
 When the config runs again as its files changed, and not for a change you
 made in the settings menu, every window says what it changed of what runs
 programs, lets the web in, or keeps lines programs mark secret: any field of
-any agent, any profile, a limit on chats agents start raised, any `web.`
+any agent, any specialist, a limit on chats agents start raised, any `web.`
 option, and any `hints.` option loosened, as `daemon.hints.noagent =
 "show"`. The bar says each, with what it was and what it is, as `config
 changed outside clackatoo: agents.claude command: { "claude-agent-acp" } →
@@ -922,7 +919,7 @@ finds them there and no `settings.lua`, it moves every value they set into
 beside it as `agents.toml.bak` and so on. `machine.toml`'s `[terminals]`
 becomes `daemon.terminals`. A value the config can't hold, or a
 key that was never a setting, is written commented out, saying why, so the
-rest still runs. A field an agent or profile never had is left out alone,
+rest still runs. A field an agent or specialist never had is left out alone,
 keeping the agent, as before. If any of `web.toml` is left out, so is its
 `mode`: the web app stays off until it's put right, as it did when `web.toml`
 went wrong. Every comment written is a line comment of its own, with nothing
@@ -987,6 +984,8 @@ config runs again (see [When it runs](#when-it-runs)). The
 | Option | Is | Starts |
 |---|---|---|
 | `daemon.upgrade.keep_agents` | Agents go on through an upgrade, with what they run, rather than being stopped and started again (see [agents through upgrades](~clackatoo/reference/agents-lasting)). | on |
+| `daemon.plugins.claude` | Allow Claude Code's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
+| `daemon.plugins.codex` | Allow Codex's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
 
 ### Chats agents start
 

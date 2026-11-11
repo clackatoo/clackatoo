@@ -124,10 +124,12 @@ what's being composed shows in the box, at the cursor, until it's committed.
 ### Slash commands
 
 Agents take commands in a message that begins with `/`: Claude Code's
-`/compact` and `/init`, Codex's `/review`, your skills, and prompts your Model
+`/compact` and `/init`, Codex's `/review`, and prompts your Model
 Context Protocol (MCP) servers offer. Type `/` at the start of a message and a
 menu opens over the box: the commands the agent says it has, then clackatoo's
-own (marked `clackatoo`). It narrows as you type the name, those starting with
+own (marked `clackatoo`). [Shared skills](~clackatoo/reference/skills) also
+appear by name: `/release-check v2.0`, for example, loads that skill's
+instructions through clackatoo. It narrows as you type the name, those starting with
 what you typed first, each with what it does and, if it takes something after
 it, a hint such as `‹branch name›`.
 
@@ -139,7 +141,8 @@ it, a hint such as `‹branch name›`.
 | <kbd>Esc</kbd> | Closes the menu, staying in insert mode, until what you've typed changes. |
 
 Selecting a command with the mouse puts it in, as <kbd>Tab</kbd> does. Once
-there's a space after the name, the menu closes. The menu lists what the agent
+there's a space after the name, the menu closes. The menu combines shared
+skills with what the agent
 last said it has; a chat that has moved to another agent lists none of the old
 one's, and after a daemon upgrade or restart, the agent's own come back once
 its session opens again with your next message.
@@ -172,13 +175,13 @@ typed.
 
 A command the agent says it has (or, before it has said, one its adapter is
 known to do, such as `/compact`, `/init` or `/review`) goes to the agent on
-its own. The first message after a chat moves to another agent, or a profile's
-first message, usually goes after the conversation so far or the profile's
+its own. The first message after a chat moves to another agent, or a specialist's
+first message, usually goes after the conversation so far or the specialist's
 instructions; a command waits with those for your next message instead, as
 Codex reads a command only when it comes first, Claude Code only when it comes
 last, and some of Claude Code's only when they come alone. Any other message
 starting with `/`, such as `/usr is full`, goes with them as usual, so a
-profile's limits are never left behind.
+specialist's limits are never left behind.
 
 The phone lists the agent's commands too, as you type `/` and a name, and
 selecting one puts it in your message. It doesn't send the commands clackatoo
@@ -204,44 +207,22 @@ names a file relative to the chat's folder, or from the project's root, or an
 absolute path or one starting `~/`. Punctuation ending a sentence after it
 isn't part of it.
 
-When the message is sent, the daemon finds each file it mentions and sends it
-to the agent with the message, as Agent Client Protocol (ACP) context:
+Selecting a file from the menu also attaches it to the message. Current windows
+use [Workspace Context](~clackatoo/reference/workspace-context): the daemon
+captures a bounded snapshot, including unsaved buffer text, and the accepted
+message keeps that exact content. File ranges are checked against their preview;
+whole files are captured at send time. **+ Context** opens the browser for files,
+symbols, diagnostics, commands, changes, conversation excerpts and board entries.
 
-| What's mentioned | Claude Code | Codex, Gemini, and others |
-|---|---|---|
-| A saved file | A link to it, which it reads with its Read tool | Its text, if it's at most 64 KiB; a link if bigger |
-| A file open in an editor with changes not saved | Its text as it is in the editor, at most 64 KiB; a link if bigger, which reads the saved file | The same |
-| Lines of a file (`#L12-L40`) | Those lines' text, as they are in the editor if it's open, at most 64 KiB; a link if more, or if the file isn't open and is over 8 MiB | The same |
-| A folder, or a file that isn't text | A link | A link |
+Plain `@path` mentions typed by hand are captured when possible; unknown words
+remain words. Explicitly selected attachments that cannot be captured hold the
+message and keep its draft. A provider slash command keeps its ordinary mention
+handling. Context-bearing steering uses Stop & send so its captured content goes
+as a complete message.
 
-The text sent with one message is at most 256 KiB in all; files past that go
-as links. An agent that doesn't say it takes files' text gets links alone.
-Claude Code gets links to saved files because it edits only files its own Read
-tool has read, so text in the message would be read again before any edit;
-Read also gives it line numbers. Both agents show what they were given as
-`[@name](file:///…)` and a `<context>` block, and neither reads lines from
-anywhere but the link, so the lines go in it: `file:///…/parser.rs#L12-L40`.
-
-A mention of a file outside the chat's project (its repository, or else its
-folder, with links followed) goes to the agent as words, not the file, and the
-chat says so above the box; one that names nothing at all is only words. A
-message that begins with one of the agent's slash commands is sent as typed,
-its mentions as words, as the agents look for a command in its only or last
-part; one that only begins with a `/`, as `/usr is full @a.rs` does, is words,
-and its mentions go as files. Steering sends words alone, so a message steered
-in that mentions a file is sent whole instead, stopping the turn: the button
-says **Stop & send** for a message that seems to mention one (a path with a
-`/` or a `.`), and the daemon decides by whether it finds the file.
-
-The files are read in the background, never holding up the daemon: the message
-waits for them, and so does what you ask of the chat after it, but Stop and
-answers to the agent don't, and Stop drops the message. A read that takes more
-than 2 seconds, as on a network file system that hangs, is given up on: the
-message goes as words, and the chat says it couldn't read the files in time.
-At most 8 messages' files are read at once; past that, a message goes as
-words, and the chat says so. A file is read only if it's a plain file in the
-project when it's opened, never a link, a pipe or a device swapped in after it
-was checked, and never more of it than is sent.
+Windows older than protocol 159 retain their previous file-mention transport:
+saved files can be links, ranges and unsaved buffers are embedded when supported,
+and unreadable or oversized implicit mentions can remain links or words.
 
 In the conversation, mentions are chips in the link color. Select one, or put
 the cursor on it in normal mode and type `gf` (or `gx`), to open the file, at
@@ -418,3 +399,12 @@ work too. Web URLs are not fetched. Previews share the chat's 4 MiB history
 allowance with pasted images; older results keep their labels. Newly received
 previews survive reconnects and daemon upgrades, but history replayed after a
 full restart shows labels only. The web client shows the previews too.
+
+## Side questions
+
+`/btw <question>` opens a temporary side conversation using a snapshot of the
+current chat. The main agent continues independently. `/btw` alone or the
+**Side question** control reopens it. Hide it to return, keep it as a normal
+chat, or attach a selected answer to the main draft with **Send to main**.
+See [Side questions](~clackatoo/reference/side-questions) for capture limits and
+provider behaviour.

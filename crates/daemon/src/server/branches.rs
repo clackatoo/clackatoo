@@ -458,8 +458,16 @@ impl Daemon {
     /// As [`note_branches`](Self::note_branches), for `chat`, which may
     /// have gone already.
     pub(super) fn note_branches_of(&self, chat: &crate::chat::HostedChat) {
-        let own = chat.session().map(|session| (chat.agent(), session));
-        self.unlisted.note(chat.branch_sessions_by_agent(), own);
+        if chat.side_parent().is_some() {
+            let mut sessions = chat.branch_sessions_by_agent();
+            if let Some(session) = chat.session() {
+                sessions.push((chat.agent().into(), session.into()));
+            }
+            self.unlisted.note(sessions, None);
+        } else {
+            let own = chat.session().map(|session| (chat.agent(), session));
+            self.unlisted.note(chat.branch_sessions_by_agent(), own);
+        }
     }
 
     /// `listed`, the sessions the agent called `agent` kept, without those
@@ -471,7 +479,12 @@ impl Daemon {
     pub(super) fn without_branches(&self, agent: &str, mut listed: Vec<Listed>) -> Vec<Listed> {
         // A chat's own session is listed as ever, forked or not.
         let own: HashSet<&str> = (self.terminals.values())
-            .filter_map(|slot| slot.terminal.chat_ref()?.session())
+            .filter_map(|slot| {
+                let chat = slot.terminal.chat_ref()?;
+                (chat.side_parent().is_none())
+                    .then(|| chat.session())
+                    .flatten()
+            })
             .collect();
         let gone = self.unlisted.of(agent);
         for row in &mut listed {
@@ -481,6 +494,11 @@ impl Daemon {
             .filter_map(|slot| slot.terminal.chat_ref())
             .flat_map(crate::chat::HostedChat::branch_sessions)
             .collect();
+        hidden.extend(self.terminals.values().filter_map(|s| {
+            let chat = s.terminal.chat_ref()?;
+            chat.side_parent()?;
+            chat.session().map(str::to_owned)
+        }));
         if hidden.is_empty() {
             return listed;
         }

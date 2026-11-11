@@ -1,0 +1,36 @@
+# Native specialist Settings, source locks, multiline drafts and explicit saves.
+size 1280x900
+file .agents/skillsets/auditor/SPECIALIST.md <<END
+---
+name: auditor
+description: Audit security-sensitive changes
+limits: read-only
+---
+Inspect trust boundaries and report concrete findings.
+END
+keys <C-;>:Settings<CR>
+wait-for Appearance
+keys }}}}}}
+wait-for Create specialist
+shot specialists-list
+keys <CR>
+wait-for Instructions
+shot specialist-new
+keys <CR>
+type reviewer
+keys <CR>j<CR>
+type Review changes for bugs
+keys <CR>j<CR>
+type Review changes carefully.
+keys <C-j>
+type Report concrete bugs with file references.
+shot specialist-instructions
+keys <CR><C-s>
+wait-for Specialist saved
+shot specialist-saved
+# Newly saved roles reopen in the same editor, keeping their model defaults.
+keys G<CR>
+wait-for Instructions
+shot specialist-edit
+size 560x780
+shot specialist-narrow

@@ -37,6 +37,7 @@ use crate::handover;
 
 pub(crate) mod branches;
 mod commands;
+mod context;
 mod draft;
 mod elicit;
 mod facts;
@@ -52,12 +53,14 @@ mod plan;
 pub(crate) mod queue;
 mod relations;
 mod resume;
+mod side;
 mod tasks;
 mod uids;
 mod upgrade;
 mod woken;
 
 use resume::Held;
+mod specialist;
 mod subagent;
 
 pub(crate) use limits::Limits;
@@ -126,12 +129,12 @@ const TOOLS_VALUES: [(AgentTools, &str, &str, &str); 3] = [
 /// Code reads it only as a session opens.
 const TASK_SETTING: &str = "clackatoo.task";
 
-/// The ID a chat started as a profile keeps, with the values chosen, the
-/// profile's name under (see [`crate::profiles`]).
-const PROFILE_SETTING: &str = "clackatoo.profile";
+/// The ID a chat started as a specialist keeps, with the values chosen, the
+/// specialist's name under (see [`crate::specialists`]).
+pub(crate) const SPECIALIST_SETTING: &str = "clackatoo.specialist";
 
 /// The ID a chat keeps, with the values chosen, what it may do beyond its
-/// agent's own settings under, by [`Limits`](crate::profiles::Limits)'s
+/// agent's own settings under, by [`Limits`](crate::specialists::Limits)'s
 /// names, so each session opens with them again.
 const LIMITS_SETTING: &str = "clackatoo.limits";
 
@@ -185,10 +188,13 @@ const SUBAGENTS_ABOVE_SETTING: &str = "clackatoo.subagents.above";
 /// Whether the setting with `id` is the chat's own, kept whichever agent
 /// it talks to, rather than one of an agent's.
 fn chat_wide(id: &str) -> bool {
+    if id.starts_with("clackatoo.specialist.") {
+        return true;
+    }
     [
         TOOLS_SETTING,
         TASK_SETTING,
-        PROFILE_SETTING,
+        SPECIALIST_SETTING,
         LIMITS_SETTING,
         KEPT_SETTING,
         BROWSER_SETTING,
@@ -202,7 +208,10 @@ fn chat_wide(id: &str) -> bool {
 /// Whether the setting with `id` is one the chat shows of its own, after
 /// the agent's.
 fn shown_own(id: &str) -> bool {
-    id == TOOLS_SETTING || id == BROWSER_SETTING || id == SUBAGENTS_SETTING
+    id == TOOLS_SETTING
+        || id == BROWSER_SETTING
+        || id == SUBAGENTS_SETTING
+        || id == SPECIALIST_SETTING
 }
 
 /// The Subagents setting's value `value`, as a number: 0 for off. `None`
@@ -278,6 +287,8 @@ pub(crate) enum Choices {
 /// A message kept intact while the agent opens or reloads its session.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Prompt {
+    pub(crate) resolved_context: bool,
+    pub(crate) context: Vec<clackatoo_protocol::ContextSnapshot>,
     pub(crate) text: String,
     pub(crate) images: Vec<clackatoo_protocol::ChatImage>,
 }
@@ -287,6 +298,8 @@ impl From<String> for Prompt {
         Self {
             text,
             images: Vec::new(),
+            context: Vec::new(),
+            resolved_context: false,
         }
     }
 }
@@ -296,6 +309,14 @@ impl From<&str> for Prompt {
     }
 }
 impl Prompt {
+    pub(crate) fn words(&self) -> String {
+        let mut text = self.text.clone();
+        for snapshot in &self.context {
+            text.push_str("\n\n");
+            text.push_str(&snapshot.quoted());
+        }
+        text
+    }
     pub(super) fn shown(&self) -> String {
         let mut shown = self.text.clone();
         for image in &self.images {
@@ -316,7 +337,7 @@ pub(crate) enum Action {
     /// Send the agent this message.
     Prompt(Prompt),
     /// Send the agent this message, after `role`, which says what it's
-    /// started as: the first message of a chat started as a profile.
+    /// started as: the first message of a chat started as a specialist.
     Briefed { role: String, text: Prompt },
     /// Send the agent this message, after a digest of the turns from
     /// `from` up to `to`, which its session hasn't seen, as the chat was
@@ -421,6 +442,14 @@ enum Link {
     reason = "independent facts of a chat, each set and cleared on its own"
 )]
 pub(crate) struct HostedChat {
+    active_specialist: Option<crate::specialists::Specialist>,
+    specialist_choices: Vec<SettingChoice>,
+    /// Completed compactions, so host context can be supplied again afterwards.
+    pub(crate) context_epoch: u64,
+    /// Native commands and shared skills are combined for slash completion.
+    agent_commands: Vec<clackatoo_protocol::AgentCommand>,
+    pub(crate) native_skills: bool,
+    skill_commands: Vec<clackatoo_protocol::AgentCommand>,
     /// Only outstanding workers hold strong receipts. Replaced results revoke them.
     image_receipts: Vec<(String, std::sync::Weak<()>)>,
     pub(crate) originals: crate::tool_images::Originals,
@@ -533,7 +562,7 @@ pub(crate) struct HostedChat {
     /// message carries the digest again.
     heard: Option<usize>,
     /// What it's started as, to go before its first message, if it was
-    /// started as a profile with a role.
+    /// started as a specialist with a role.
     role: Option<String>,
     /// The settings it was started wanting, to choose as its first
     /// session opens.
@@ -772,6 +801,12 @@ impl HostedChat {
     ) -> Self {
         Self {
             image_receipts: Vec::new(),
+            context_epoch: 0,
+            active_specialist: None,
+            specialist_choices: Vec::new(),
+            agent_commands: Vec::new(),
+            native_skills: false,
+            skill_commands: Vec::new(),
             originals: crate::tool_images::Originals::default(),
             id,
             size,
@@ -1001,6 +1036,7 @@ impl HostedChat {
             .map(setting_from_handover)
             .collect();
         resumed.chosen = chat.chosen;
+        resumed.restore_specialist();
         let (relations, senders) = Relations::resume(chat.relations);
         resumed.relations = relations;
         for (index, sender) in senders {
@@ -1289,7 +1325,15 @@ impl HostedChat {
         match action {
             ChatAction::Send(text) => self.send(text, &mut actions),
             ChatAction::SendImages { text, images } => {
-                self.send_prompt(Prompt { text, images }, &mut actions);
+                self.send_prompt(
+                    Prompt {
+                        resolved_context: false,
+                        context: Vec::new(),
+                        text,
+                        images,
+                    },
+                    &mut actions,
+                );
             }
             ChatAction::Stop => self.stop(&mut actions),
             // Only an answer to the question shown counts: one sent twice,
@@ -1350,6 +1394,8 @@ impl HostedChat {
             | ChatAction::Switch { .. }
             | ChatAction::SendTo { .. }
             | ChatAction::Submit { .. }
+            | ChatAction::SubmitContext { .. }
+            | ChatAction::DraftContext { .. }
             | ChatAction::RemoveQueued { .. }
             | ChatAction::SendQueued { .. }
             | ChatAction::Draft { .. }
@@ -1410,7 +1456,7 @@ impl HostedChat {
     }
 
     fn send_prompt(&mut self, prompt: Prompt, actions: &mut Vec<Action>) {
-        if (prompt.text.trim().is_empty() && prompt.images.is_empty())
+        if (prompt.text.trim().is_empty() && prompt.images.is_empty() && prompt.context.is_empty())
             || self.user_queue.native.is_some()
             || self.answering() && !self.loading()
         {
@@ -1437,6 +1483,12 @@ impl HostedChat {
         self.relations.hops = 0;
         self.relations.cause = Some((self.id, self.next_uid().0));
         self.begin(prompt.shown(), prompt, (None, None), actions);
+    }
+
+    pub(crate) fn send_captured(&mut self, prompt: Prompt) -> Vec<Action> {
+        let mut actions = Vec::new();
+        self.send_prompt(prompt, &mut actions);
+        actions
     }
 
     /// Starts a turn: shows `shown`, sent by `from` if another chat's
@@ -1483,6 +1535,7 @@ impl HostedChat {
             self.begin_branch(actions);
         }
         self.push_turn(Turn {
+            context: prompt.context.clone(),
             woke: None,
             notice,
             previews,
@@ -1870,6 +1923,16 @@ impl HostedChat {
         actions
     }
 
+    /// A locally rejected or cancelled request never reached the model.
+    /// Keep its role for the next request and don't count its digest as heard.
+    pub(crate) fn prompt_not_sent(&mut self, action: &Action) {
+        if let Action::Briefed { role, .. } = action {
+            self.role = Some(role.clone());
+        }
+        self.heard = None;
+        self.known = self.known.min(self.node.turns.len().saturating_sub(1));
+    }
+
     /// What sends `text`, the message of the last turn, to the agent:
     /// after a digest of the turns before it the session hasn't seen, if
     /// there are any. The session has seen them all once that's answered,
@@ -1884,12 +1947,17 @@ impl HostedChat {
     /// does, such as `/compact`, never shows the model the rest either,
     /// and the digest would be counted as heard (CLACKA-189). Only a
     /// command the agent offers, or before it has said, one its adapter
-    /// is known to do, waits so: the role is a profile's limits, which
+    /// is known to do, waits so: the role is a specialist's limits, which
     /// words such as `/usr is full` mustn't slip past.
     fn prompt(&mut self, text: Prompt) -> Action {
         let to = self.node.turns.len().saturating_sub(1);
         let owed = self.role.is_some() || self.known < to;
-        if owed && clackatoo_protocol::agent_command(&text.text, &self.node.commands) {
+        let skill = clackatoo_protocol::slash_command(&text.text).is_some_and(|(name, _)| {
+            self.skill_commands
+                .iter()
+                .any(|command| command.name == name)
+        });
+        if owed && !skill && clackatoo_protocol::agent_command(&text.text, &self.node.commands) {
             return Action::Prompt(text);
         }
         if let Some(role) = self.role.take() {
@@ -1978,7 +2046,7 @@ impl HostedChat {
         // The chat's own settings go with it to every agent: what it may
         // do with clackatoo's tools, whether it keeps Claude Code's Task
         // tool, which a session with Claude Code opens with, and the
-        // profile it was started as, with its limits.
+        // specialist it was started as, with its limits.
         let wide: Vec<(String, String)> = (self.chosen.iter())
             .filter(|(id, _)| chat_wide(id))
             .cloned()
@@ -2052,6 +2120,7 @@ impl HostedChat {
         self.set_notice(None);
         self.withdraw_install();
         self.push_turn(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -3886,6 +3955,9 @@ impl HostedChat {
     }
 
     fn push_turn(&mut self, turn: Turn) {
+        if turn.end.is_none() {
+            self.start_specialist_clock();
+        }
         self.before_push();
         self.diffs.clear();
         self.terminals.clear();
@@ -4057,6 +4129,9 @@ impl HostedChat {
         settings.push(tools_setting(self.tools()));
         settings.push(browser_setting(self.browser()));
         settings.push(subagents_setting(self.subagents(), &self.subagents_offered));
+        if !self.specialist_choices.is_empty() {
+            settings.push(self.specialist_setting());
+        }
         if self.node.settings != settings {
             self.node.settings.clone_from(&settings);
             self.journal.push(ChatPatch::Settings(settings));
@@ -4813,6 +4888,7 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
 
 fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
     Turn {
+        context: Vec::new(),
         woke: None,
         notice: None,
         previews: Vec::new(),
@@ -5192,6 +5268,8 @@ mod tests {
         chat.begin(
             "test".into(),
             Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: "test".into(),
                 images: Vec::new(),
             },
@@ -5249,6 +5327,8 @@ mod tests {
         };
         for index in 0..20 {
             let prompt = Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: format!("image {index}"),
                 images: vec![clackatoo_protocol::ChatImage {
                     data: "cG5n".into(),
@@ -5284,6 +5364,8 @@ mod tests {
             let pixels = image.preview.as_ref().unwrap().has_pixels();
             assert_eq!(image.valid(), pixels);
             let prompt = Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: "named".into(),
                 images: vec![image],
             };
@@ -5333,6 +5415,8 @@ mod tests {
         chat.begin(
             "look".into(),
             Prompt {
+                resolved_context: false,
+                context: Vec::new(),
                 text: "look".into(),
                 images: Vec::new(),
             },
@@ -5460,6 +5544,8 @@ mod tests {
 
     fn image_prompt() -> Prompt {
         Prompt {
+            resolved_context: false,
+            context: Vec::new(),
             text: "look".into(),
             images: vec![clackatoo_protocol::ChatImage {
                 preview: None,
@@ -7840,7 +7926,7 @@ mod tests {
     }
 
     #[test]
-    fn a_profiles_role_waits_for_the_message_after_a_slash_command() {
+    fn a_specialists_role_waits_for_the_message_after_a_slash_command() {
         let mut c = chat();
         c.role = Some("Review only; do not edit files.".into());
         connect(&mut c, "s");
@@ -7871,6 +7957,56 @@ mod tests {
         assert_eq!(send(&mut c, "/deploy"), [Action::Prompt("/deploy".into())]);
         let next = send_after(&mut c, "/compact");
         assert!(matches!(&next[..], [Action::Briefed { .. }]), "{next:?}");
+    }
+
+    #[test]
+    fn a_shared_skill_keeps_its_role_and_a_local_rejection_preserves_it() {
+        let mut c = chat();
+        c.role = Some("Review only; do not edit files.".into());
+        c.offer_skills(vec![clackatoo_protocol::AgentCommand {
+            name: "inspect-code".into(),
+            description: "Inspect code".into(),
+            hint: None,
+        }]);
+        connect(&mut c, "s");
+        let first = send(&mut c, "/inspect-code");
+        assert!(
+            matches!(&first[..], [Action::Briefed { role, .. }] if role.starts_with("Review only"))
+        );
+        c.prompt_not_sent(&first[0]);
+        c.answered(Err("The skill file is invalid.".into()));
+        let next = send(&mut c, "inspect without the skill");
+        assert!(
+            matches!(&next[..], [Action::Briefed { role, .. }] if role.starts_with("Review only")),
+            "{next:?}"
+        );
+    }
+
+    #[test]
+    fn native_plugin_skills_are_visible_only_after_opt_in_and_shared_commands_win() {
+        let mut chat = chat();
+        connect(&mut chat, "c");
+        let said = r#"{"sessionUpdate":"available_commands_update","availableCommands":[
+            {"name":"compact","description":"Compact"},
+            {"name":"bundle:inspect","description":"Native skill","_meta":{"jetbrains":{"air":{"kind":"skill"}}}}]}"#;
+        update(&mut chat, said);
+        assert_eq!(chat.node.commands.len(), 1);
+        chat.native_skills = true;
+        update(&mut chat, said);
+        assert_eq!(chat.node.commands.len(), 2);
+        chat.offer_skills(vec![clackatoo_protocol::AgentCommand {
+            name: "bundle:inspect".into(),
+            description: "Shared skill".into(),
+            hint: None,
+        }]);
+        let matching: Vec<_> = chat
+            .node
+            .commands
+            .iter()
+            .filter(|command| command.name == "bundle:inspect")
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].description, "Shared skill");
     }
 
     #[test]
@@ -7974,7 +8110,7 @@ mod tests {
     #[test]
     fn a_parents_read_only_mode_holds_as_limits_and_a_chat_with_no_mode_to_start_in_starts_safest()
     {
-        use crate::profiles::Limits;
+        use crate::specialists::Limits;
         let codex_in = |mode: &str| {
             let mut settings = codex_settings();
             settings[0] = serde_json::from_str(&format!(
@@ -8038,7 +8174,7 @@ mod tests {
 
     #[test]
     fn a_subagent_made_again_after_a_restart_stands_as_it_did_in_the_mode_it_was_in() {
-        use crate::profiles::Limits;
+        use crate::specialists::Limits;
 
         let mut kid = chat_with("codex");
         kid.go_on_with(clackatoo_protocol::ResumeSession {
@@ -8049,7 +8185,7 @@ mod tests {
             parent: Some(TerminalId(7)),
             root: Some(TerminalId(7)),
             depth: 1,
-            profile: Some("explore".into()),
+            specialist: Some("explore".into()),
             limits: Limits::None,
             kept: true,
             mode: Some(("mode".into(), "read-only".into())),
@@ -8061,7 +8197,7 @@ mod tests {
             (Some(TerminalId(7)), 1)
         );
         assert_eq!(
-            (kid.profile(), kid.limits()),
+            (kid.specialist(), kid.limits()),
             (Some("explore"), Limits::None)
         );
         assert!(kid.kept_by_user() && kid.agents_chat());
@@ -8078,12 +8214,12 @@ mod tests {
             value: "read-only".into(),
         };
         assert!(actions.contains(&read_only), "{actions:?}");
-        // And the limits go with the profile: one that may run no commands
+        // And the limits go with the specialist: one that may run no commands
         // opens read-only, whatever mode was kept.
         let mut kid = chat_with("codex");
         kid.stand_again(Standing {
             depth: 1,
-            profile: Some("x".into()),
+            specialist: Some("x".into()),
             limits: Limits::NoCommands,
             mode: Some(("mode".into(), "agent".into())),
             ..Standing::default()

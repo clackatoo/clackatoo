@@ -116,6 +116,89 @@ impl Desk {
             );
         }
         self.ask_daemon_settings();
+        self.ask_settings_specialists();
+        if self.connected && self.daemon_has(wire::SKILLS) {
+            let pane = self.shown.map(|shown| shown.pane);
+            self.request(Request::Skills { pane }, Asked::SettingsSkills);
+        } else if let Some(menu) = &mut self.settings {
+            menu.skills_came(Err(
+                "Connect to a current daemon to browse shared skills.".into()
+            ));
+        }
+    }
+
+    fn ask_settings_specialists(&mut self) {
+        if self.connected && self.daemon_has(wire::SPECIALIST_FILES) {
+            self.request(
+                Request::SpecialistFiles {
+                    pane: self.shown.map(|s| s.pane),
+                },
+                Asked::SettingsSpecialists,
+            );
+        } else if let Some(menu) = &mut self.settings {
+            menu.specialists_came(Err(
+                "Connect to a current daemon to edit specialists.".into()
+            ));
+        }
+    }
+    pub(super) fn settings_specialists(&mut self, response: Response) -> bool {
+        if let Response::SpecialistFiles(files) = response {
+            if let Some(menu) = &mut self.settings {
+                menu.specialist_files_came(files);
+            }
+            self.settings_changed();
+            return true;
+        }
+        let result = match response {
+            Response::Specialists(s) => Ok(s),
+            Response::Error(e) => Err(e.to_string()),
+            _ => return false,
+        };
+        if let Some(menu) = &mut self.settings {
+            menu.specialists_came(result);
+        }
+        self.settings_changed();
+        true
+    }
+    pub(super) fn settings_specialist_saved(
+        &mut self,
+        edit: &clackatoo_protocol::SpecialistDefinition,
+        response: Response,
+    ) -> bool {
+        let result = match response {
+            Response::SpecialistSaved => Ok(()),
+            Response::Error(e) => Err(format!("Could not save specialist: {e}")),
+            _ => return false,
+        };
+        let worked = result.is_ok();
+        if let Some(menu) = &mut self.settings {
+            menu.specialist_saved(edit, result);
+        }
+        if worked {
+            self.ask_settings_specialists();
+        }
+        self.settings_changed();
+        true
+    }
+    pub(super) fn open_specialist_settings(&mut self) {
+        self.open_settings("");
+        if let Some(menu) = &mut self.settings {
+            menu.show_specialists();
+        }
+        self.settings_changed();
+    }
+
+    pub(super) fn settings_skills(&mut self, response: Response) -> bool {
+        let result = match response {
+            Response::Skills(skills) => Ok(skills),
+            Response::Error(err) => Err(format!("Could not read skills: {err}")),
+            _ => return false,
+        };
+        if let Some(menu) = &mut self.settings {
+            menu.skills_came(result);
+        }
+        self.settings_changed();
+        true
     }
 
     /// Asks the daemon for its settings, for the menu, if it can say them:
@@ -501,6 +584,33 @@ impl Desk {
                     Err(saved) => self.save_change(Change::Options(saved)),
                 }
             }
+            Outcome::SaveSpecialist {
+                specialist,
+                scope,
+                path,
+            } => {
+                if self.automating || self.controlled {
+                    if let Some(menu) = &mut self.settings {
+                        menu.specialist_saved(
+                            &specialist,
+                            Err(
+                                "An agent's input can't save specialists: this setting is yours"
+                                    .into(),
+                            ),
+                        );
+                    }
+                    return;
+                }
+                self.request(
+                    Request::SaveSpecialistFile {
+                        pane: self.shown.map(|s| s.pane),
+                        scope,
+                        path,
+                        specialist: specialist.clone(),
+                    },
+                    Asked::SettingsSpecialistSaved(specialist),
+                );
+            }
             Outcome::Mode(mode) => self.remember_settings_mode(mode),
             Outcome::ClearLocal(info) => self.drop_local_option(info),
             Outcome::Keys(changes) => {
@@ -515,6 +625,29 @@ impl Desk {
             Outcome::OpenDaemons(place) => {
                 self.settings = None;
                 self.open_config_line(&place, true);
+            }
+            Outcome::OpenSkill(place) => {
+                self.settings = None;
+                let Some(shown) = self.shown else {
+                    return;
+                };
+                let path = place.file.to_string();
+                let landing = FileLocation {
+                    path: path.clone(),
+                    line: 0,
+                    col: 0,
+                    offset: None,
+                    text: String::new(),
+                };
+                self.request(
+                    Request::Split {
+                        pane: shown.pane,
+                        side: Side::Right,
+                        terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
+                        on: None,
+                    },
+                    Asked::PaneAt(Some(landing)),
+                );
             }
         }
     }

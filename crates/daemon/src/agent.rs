@@ -36,9 +36,9 @@ use serde_json::{Value, json};
 
 use crate::handover::{self, Fds};
 use crate::mcp;
-use crate::profiles::Limits;
 use crate::pty::Process;
 use crate::rpc::{Framing, Message, Parser, Peer, RpcError};
+use crate::specialists::Limits;
 
 /// The ACP version spoken.
 const PROTOCOL_VERSION: u16 = 1;
@@ -452,6 +452,9 @@ pub(crate) fn client_capabilities(files: bool, tasks: bool) -> Value {
     // Codex's adapter streams commands' output in this, which the daemon
     // adds to the tool's.
     let mut meta = json!({ "terminal_output_delta": true });
+    // This is also part of the upgrade declaration: a runtime started by
+    // a build that left skills native must restart before we own them.
+    meta["clackatoo"] = json!({ "skills": 1, "plugins": 1 });
     // ACP's notices (schema feature `unstable_session_notices`), asked of
     // every agent: else Claude Code's adapter says its notices, such as
     // that a task was stopped, as words, which would seem a turn of its
@@ -490,7 +493,16 @@ pub(crate) fn declaration_kind(files: bool, tasks: bool) -> &'static str {
 
 /// A fingerprint of `capabilities`, the same in every build that declares
 /// the same: FNV-1a over its JSON, in hex.
+/// The per-process plugin choice is compared separately on adoption; it
+/// does not change the ACP capabilities this build supports.
 pub(crate) fn declaration_hash(capabilities: &Value) -> String {
+    let mut capabilities = capabilities.clone();
+    if let Some(meta) = capabilities
+        .pointer_mut("/_meta/clackatoo")
+        .and_then(Value::as_object_mut)
+    {
+        meta.remove("native_plugins");
+    }
     let hash = (capabilities.to_string().bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     });
@@ -507,10 +519,30 @@ impl Agent {
         command: &[OsString],
         (display, trace): (Option<&crate::display::Env>, Option<&std::path::Path>),
         tasks: bool,
+        native_plugins: bool,
         parser: &Parser,
     ) -> io::Result<Self> {
         let logged = format!("agent {name}");
-        let mut peer = Peer::start(&logged, command, None, display, Framing::Lines, parser)?;
+        let environment = if name == "codex" {
+            vec![(
+                "CODEX_CONFIG",
+                shared_skill_config(
+                    std::env::var("CODEX_CONFIG").ok().as_deref(),
+                    native_plugins,
+                )?,
+            )]
+        } else {
+            Vec::new()
+        };
+        let mut peer = Peer::start_with_env(
+            &logged,
+            command,
+            None,
+            display,
+            Framing::Lines,
+            parser,
+            &environment,
+        )?;
         if let Some(dir) = trace {
             peer.trace_agent_to(dir, name);
         }
@@ -530,7 +562,10 @@ impl Agent {
             client: Value::Null,
             asked_at: BTreeMap::new(),
         };
-        let capabilities = client_capabilities(client_files(name), tasks);
+        let mut capabilities = client_capabilities(client_files(name), tasks);
+        if native_plugins {
+            capabilities["_meta"]["clackatoo"]["native_plugins"] = json!(true);
+        }
         agent.client = capabilities.clone();
         agent.request(
             Pending::Initialize,
@@ -715,11 +750,17 @@ impl Agent {
     /// Asks for a session in `cwd` only to learn the settings the agent
     /// offers, such as its models, with none of clackatoo's tools. It's
     /// to be closed once it's made.
-    pub(crate) fn probe(&mut self, cwd: &str) {
+    pub(crate) fn probe(&mut self, cwd: &str, native_plugins: bool) {
         self.request(
             Pending::Probe,
             "session/new",
-            &session_params(cwd, Opening::default()),
+            &session_params(
+                cwd,
+                Opening {
+                    native_plugins,
+                    ..Opening::default()
+                },
+            ),
         );
     }
 
@@ -1509,8 +1550,15 @@ impl Agent {
         })
     }
 
-    /// The client capabilities clackatoo declared to the agent as it
-    /// started (see [`client_capabilities`]).
+    /// Whether this process was launched with native plugins permitted.
+    pub(crate) fn native_plugins(&self) -> bool {
+        self.client
+            .pointer("/_meta/clackatoo/native_plugins")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// The client capabilities clackatoo declared as the agent started.
     pub(crate) fn declared(&self) -> &Value {
         &self.client
     }
@@ -1601,6 +1649,11 @@ impl Pending {
 /// What a chat's session opens with, beside its working directory.
 #[derive(Debug)]
 pub(crate) struct Opening {
+    /// Context-only side question: remove built-in tools where supported.
+    pub(crate) no_tools: bool,
+    pub(crate) budget: crate::specialists::Budget,
+    /// Opt in to the hosted runtime's own plugins and skill mechanism.
+    pub(crate) native_plugins: bool,
     /// The MCP server that gives it clackatoo's tools, if it gets them.
     pub(crate) tools: Option<Value>,
     /// Whether Claude Code keeps its own Task tool.
@@ -1612,6 +1665,9 @@ pub(crate) struct Opening {
 impl Default for Opening {
     fn default() -> Self {
         Self {
+            no_tools: false,
+            budget: crate::specialists::Budget::default(),
+            native_plugins: false,
             tools: None,
             task: true,
             limits: Limits::None,
@@ -1630,16 +1686,62 @@ impl Default for Opening {
 /// ignore what's said to Claude Code.
 fn session_params(cwd: &str, opening: Opening) -> Value {
     let Opening {
+        no_tools,
+        budget,
+        native_plugins,
         tools,
         task,
         limits,
     } = opening;
     let mut options = serde_json::Map::new();
+    if let Some(turns) = budget.turns {
+        options.insert("maxTurns".into(), json!(turns));
+    }
+    if let Some(micros) = budget.usd_micros {
+        let usd: f64 = format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
+            .parse()
+            .expect("USD amount");
+        options.insert("maxBudgetUsd".into(), json!(usd));
+    }
     if tools.is_some() {
         let allowed = format!("mcp__{}", mcp::SERVER_NAME);
         options.insert("allowedTools".to_owned(), json!([allowed]));
     }
     let mut disallowed: Vec<&str> = limits.claude_tools().to_vec();
+    if !native_plugins {
+        disallowed.push("Skill");
+        options.insert("skills".into(), json!([]));
+        // An empty plugins array alone only stops SDK-supplied plugins.
+        // Policy gates also suppress already-installed marketplace plugins
+        // and directory plugins; ordinary user hooks and MCP stay native.
+        options.insert("plugins".into(), json!([]));
+        options.insert(
+            "managedSettings".into(),
+            json!({
+                "strictKnownMarketplaces": [],
+                "blockedMarketplaces": [
+                    { "source": "skills-dir" },
+                    { "source": "hostPattern", "hostPattern": ".*" },
+                    { "source": "pathPattern", "pathPattern": ".*" }
+                ],
+                "disableCommandPluginSources": true
+            }),
+        );
+        let plugin_env = json!({
+            "CLAUDE_CODE_PLUGIN_DIRS": "",
+            "CLAUDE_CODE_DESKTOP_SKILLS_PLUGIN_DIR": "",
+            "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"
+        });
+        options.insert("env".into(), plugin_env.clone());
+        // Settings can themselves set env after the subprocess starts.
+        options.insert(
+            "settings".into(),
+            json!({
+                "syncClaudeAiPlugins": false,
+                "env": plugin_env
+            }),
+        );
+    }
     if !task && !disallowed.contains(&"Task") {
         disallowed.extend(["Agent", "Task"]);
     }
@@ -1652,11 +1754,98 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
         // the chat can't: only clackatoo's, given with the session.
         options.insert("strictMcpConfig".to_owned(), json!(true));
     }
-    let mut params = json!({ "cwd": cwd, "mcpServers": Vec::from_iter(tools) });
+    if no_tools {
+        options.insert("tools".into(), json!([]));
+        options.insert("strictMcpConfig".into(), json!(true));
+        options.insert("plugins".into(), json!([]));
+    }
+    let servers = if no_tools {
+        Vec::new()
+    } else {
+        Vec::from_iter(tools)
+    };
+    let mut params = json!({ "cwd": cwd, "mcpServers": servers });
     if !options.is_empty() {
         params["_meta"] = json!({ "claudeCode": { "options": options } });
     }
     params
+}
+
+/// Session overrides leave the user's own Codex configuration intact.
+fn shared_skill_config(config: Option<&str>, native_plugins: bool) -> io::Result<OsString> {
+    let mut config = match config {
+        Some(text) => serde_json::from_str::<Value>(text).map_err(io::Error::other)?,
+        None => json!({}),
+    };
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("CODEX_CONFIG must be an object"))?;
+    if !native_plugins {
+        object.insert("skills.include_instructions".into(), json!(false));
+        object.insert("skills.bundled.enabled".into(), json!(false));
+        object.insert("features.plugins".into(), json!(false));
+    }
+    Ok(config.to_string().into())
+}
+
+#[cfg(test)]
+mod shared_skill_tests {
+    use super::*;
+
+    #[test]
+    fn native_skill_controls_preserve_other_configuration_and_commands() {
+        let config = shared_skill_config(Some(r#"{"approval_policy":"on-request","model":"chosen-model","skills.include_instructions":true}"#), false).unwrap();
+        let config: Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        assert_eq!(config["approval_policy"], "on-request");
+        assert_eq!(config["model"], "chosen-model");
+        assert_eq!(config["skills.include_instructions"], false);
+        assert_eq!(config["skills.bundled.enabled"], false);
+        assert_eq!(config["features.plugins"], false);
+        assert!(shared_skill_config(Some("not json"), false).is_err());
+
+        let params = session_params("/project", Opening::default());
+        let options = &params["_meta"]["claudeCode"]["options"];
+        assert_eq!(options["skills"], json!([]));
+        assert_eq!(
+            options["managedSettings"]["strictKnownMarketplaces"],
+            json!([])
+        );
+        assert_eq!(options["settings"]["syncClaudeAiPlugins"], false);
+        assert!(
+            options["disallowedTools"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("Skill"))
+        );
+        assert!(
+            options["extraArgs"].is_null(),
+            "native slash commands remain available"
+        );
+    }
+
+    #[test]
+    fn native_plugin_opt_in_restores_provider_configuration() {
+        let original = r#"{"model":"chosen-model","features.plugins":true}"#;
+        let config = shared_skill_config(Some(original), true).unwrap();
+        let config: Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        assert_eq!(config, serde_json::from_str::<Value>(original).unwrap());
+        let params = session_params(
+            "/project",
+            Opening {
+                native_plugins: true,
+                ..Opening::default()
+            },
+        );
+        let options = &params["_meta"]["claudeCode"]["options"];
+        assert!(options["skills"].is_null());
+        assert!(options["managedSettings"].is_null());
+        assert!(options["settings"].is_null());
+        assert!(options["disallowedTools"].is_null());
+        let original = client_capabilities(true, true);
+        let mut permitted = original.clone();
+        permitted["_meta"]["clackatoo"]["native_plugins"] = json!(true);
+        assert_eq!(declaration_hash(&original), declaration_hash(&permitted));
+    }
 }
 
 /// The sessions an answer to `session/list` lists, newest first, at most
@@ -2246,7 +2435,7 @@ mod fork_tests {
     fn agent() -> Agent {
         let parser = Parser::idle();
         let command: Vec<OsString> = vec!["cat".into()];
-        let mut agent = Agent::start("cat", &command, (None, None), false, &parser).unwrap();
+        let mut agent = Agent::start("cat", &command, (None, None), false, false, &parser).unwrap();
         agent.held = Some(Vec::new());
         agent.pending.clear();
         agent
@@ -2393,7 +2582,7 @@ mod handover_tests {
     fn a_request_left_unanswered_is_still_seen_to_be_after_an_upgrade() {
         let parser = Parser::idle();
         let command: Vec<OsString> = vec!["cat".into()];
-        let mut agent = Agent::start("cat", &command, (None, None), false, &parser).unwrap();
+        let mut agent = Agent::start("cat", &command, (None, None), false, false, &parser).unwrap();
         agent.held = None;
         agent.pending.clear();
         agent.asked_at.clear();
@@ -2433,7 +2622,7 @@ mod handover_tests {
     fn an_agent_handed_over_keeps_what_it_waits_for_and_what_it_can_do() {
         let parser = Parser::idle();
         let command: Vec<OsString> = vec!["cat".into()];
-        let mut agent = Agent::start("cat", &command, (None, None), true, &parser).unwrap();
+        let mut agent = Agent::start("cat", &command, (None, None), true, true, &parser).unwrap();
         // As if it had answered `initialize`, saying what it can do.
         agent.held = None;
         (agent.can_close, agent.can_steer, agent.can_list) = (true, true, Some(false));
@@ -2465,7 +2654,10 @@ mod handover_tests {
         assert_eq!(agent.can_list(), Some(false));
         assert!(agent.started());
         // What it was told as it started goes with it, as it was.
-        assert_eq!(agent.declared(), &client_capabilities(true, true));
+        let mut declared = client_capabilities(true, true);
+        declared["_meta"]["clackatoo"]["native_plugins"] = json!(true);
+        assert_eq!(agent.declared(), &declared);
+        assert!(agent.native_plugins());
         let pending: Vec<String> = (agent.pending.iter())
             .map(|(id, pending)| format!("{id} {pending:?}"))
             .collect();
@@ -2618,5 +2810,25 @@ mod task_tests {
         ] {
             assert_eq!(output_file_in(&at(id), id, &areas).is_some(), kept, "{id}");
         }
+    }
+}
+
+#[cfg(test)]
+mod side_session_tests {
+    use super::*;
+    #[test]
+    fn context_only_sessions_remove_claude_tools_and_all_mcp_servers() {
+        let params = session_params(
+            "/project",
+            Opening {
+                no_tools: true,
+                tools: Some(json!({"name":"should-not-start"})),
+                ..Opening::default()
+            },
+        );
+        let options = &params["_meta"]["claudeCode"]["options"];
+        assert_eq!(options["tools"], json!([]));
+        assert_eq!(options["strictMcpConfig"], json!(true));
+        assert_eq!(params["mcpServers"], json!([]));
     }
 }

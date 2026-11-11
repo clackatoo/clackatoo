@@ -496,6 +496,7 @@ impl Daemon {
             | Request::Unmask { terminal: id, .. }
             | Request::Block { terminal: id, .. }
             | Request::Fit { terminal: id, .. }
+            | Request::Side { chat: id, .. }
             | Request::Chat { terminal: id, .. }
             | Request::AttachBrowser { chat: id, .. } => terminal(id),
             // Ending its program is for those that may close it.
@@ -517,6 +518,7 @@ impl Daemon {
             | Request::BlankHere { pane: id, .. }
             | Request::Recover { pane: id, .. }
             | Request::ChatChoices { pane: Some(id), .. }
+            | Request::Skills { pane: Some(id) }
             | Request::Forwards { pane: id, .. } => pane(id, true),
             Request::CloseTab { tab: id }
             | Request::RenameTab { tab: id, .. }
@@ -568,6 +570,10 @@ impl Daemon {
     /// `id`: not one lent to another machine's daemon than its, unless
     /// it may have it all the same.
     pub(super) fn may_see_terminal(&self, token: Token, id: TerminalId) -> bool {
+        let id = self
+            .chat_ref(id)
+            .and_then(crate::chat::HostedChat::side_parent)
+            .unwrap_or(id);
         self.may_have(token, self.terminal_lent_to(id), true)
     }
 

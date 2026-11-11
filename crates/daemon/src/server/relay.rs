@@ -1521,6 +1521,31 @@ impl Daemon {
                 };
                 (at, Ok((fit, Then::Pass)))
             }),
+            Request::Side {
+                chat: local,
+                action,
+            } => terminal(self, *local).map(|(at, chat)| {
+                (
+                    at,
+                    Ok((
+                        Request::Side {
+                            chat,
+                            action: action.clone(),
+                        },
+                        Then::Pass,
+                    )),
+                )
+            }),
+            Request::Context {
+                chat: local,
+                action,
+            } => terminal(self, *local).map(|(at, chat)| {
+                let action = self.relay_context_action(at, action.clone());
+                (
+                    at,
+                    action.map(|action| (Request::Context { chat, action }, Then::Pass)),
+                )
+            }),
             Request::Chat {
                 terminal: local,
                 action,
@@ -1533,12 +1558,25 @@ impl Daemon {
                     ChatAction::Remedy { .. } => Then::Created,
                     _ => Then::Pass,
                 };
-                let action = action.clone();
-                (at, Ok((Request::Chat { terminal, action }, then)))
+                let mut action = action.clone();
+                let result = match &mut action {
+                    ChatAction::SubmitContext { context, .. }
+                    | ChatAction::DraftContext { context, .. } => context
+                        .iter_mut()
+                        .try_for_each(|selection| self.relay_context_selection(at, selection)),
+                    _ => Ok(()),
+                };
+                (
+                    at,
+                    result.map(|()| (Request::Chat { terminal, action }, then)),
+                )
             }),
             &Request::ChatChoices { pane, on } => {
                 self.route_chat_choices(token, pane, on).map(flip)
             }
+            Request::Skills { pane: Some(local) } => self
+                .relayed_pane(*local)
+                .map(|(at, pane)| (at, Ok((Request::Skills { pane: Some(pane) }, Then::Pass)))),
             Request::NewTab {
                 workspace: local,
                 terminal: content,
@@ -3387,6 +3425,8 @@ impl Daemon {
                 | Response::Found(_)
                 | Response::Searched { .. }
                 | Response::Block(_)
+                | Response::Context(_)
+                | Response::Side(_)
                 | Response::Image(_)
                 | Response::HiddenRun { .. }),
             )
@@ -3783,7 +3823,13 @@ fn flip(found: Result<(usize, (Request, Then)), Error>) -> (usize, Renumbered) {
 fn acts_on_text(request: &Request) -> bool {
     matches!(
         request,
-        Request::Save { .. }
+        Request::Side { .. }
+            | Request::Context { .. }
+            | Request::Chat {
+                action: ChatAction::SubmitContext { .. },
+                ..
+            }
+            | Request::Save { .. }
             | Request::SaveAs { .. }
             | Request::Discard { .. }
             | Request::Reload { .. }
@@ -4231,6 +4277,7 @@ mod tests {
         let full = ChatNode {
             turns: (0..24)
                 .map(|i| Turn {
+                    context: Vec::new(),
                     woke: None,
                     notice: None,
                     prompt: i.to_string(),

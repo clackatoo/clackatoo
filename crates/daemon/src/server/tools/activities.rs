@@ -584,6 +584,7 @@ impl Daemon {
             ("Browser permission", if own.is_some_and(crate::chat::HostedChat::browser) { "Enabled; first page still asks".into() } else { "Off — enable in permissions".into() }),
             ("Native window", native),
             ("Managed activities", activities),
+            ("Code outlines", if self.config.languages.is_some() { "Available on demand through file_outline, search_symbols and repo_map; installed grammars required".into() } else { "Unavailable: language packs are not configured".into() }),
             ("Tool connection", if connections.is_empty() { "No live MCP connection".into() } else { "Connected".into() }),
             ("Catalogue discovery", if connections.contains(&true) { "Requested by the provider connection".into() } else { "Not observed on a live connection".into() }),
             ("Model acknowledgment", "Unconfirmed — this provider supplies no acknowledgment that the model saw its tools".into()),

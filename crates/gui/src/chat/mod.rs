@@ -14,6 +14,7 @@
 
 mod branches;
 mod card;
+mod context;
 mod favorites;
 mod filling;
 #[cfg(test)]
@@ -32,6 +33,7 @@ mod queue;
 mod read;
 mod search;
 mod shortcuts;
+mod side;
 pub(crate) mod slash;
 mod viewer;
 mod yank;
@@ -143,10 +145,28 @@ pub(crate) struct Settled {
 /// Something in the chat that does something when clicked.
 #[derive(Clone, Debug, PartialEq)]
 enum Hit {
+    Side,
+    SideAnswer(usize),
+    CapturedContext(usize),
+    Context,
+    CloseContext,
+    ContextSurface,
+    ContextCategory,
+    ContextAttachments(bool),
+    InspectAttachedContext(usize),
+    NarrowContext,
+    CopyContext,
+    ContextCandidate(usize),
+    AttachContext,
+    RefreshContext,
+    ContextMode,
+    RemoveContext(usize),
     CancelActivity(String),
     ModelSearch,
     MenuSurface,
     ModelRail,
+    SpecialistColumn,
+    SpecialistSettings,
     FastMode,
     ModelFilter(picker::Filter),
     Favorite(String, String),
@@ -264,6 +284,7 @@ struct Menu {
     favorites: std::collections::BTreeSet<(String, String)>,
     offset: usize,
     rail_offset: usize,
+    specialist_offset: usize,
     reveal: bool,
     /// The settings it picks from, by their IDs: a section each.
     settings: Vec<String>,
@@ -300,6 +321,11 @@ pub(crate) struct ChatView {
     /// The message being typed.
     editor: PlainEditor<Brush>,
     images: Vec<clackatoo_protocol::ChatImage>,
+    side: side::SideUi,
+    pub(crate) side_supported: bool,
+    side_child: bool,
+    context: context::ContextUi,
+    pub(crate) context_supported: bool,
     previews: images::Cache,
     image_viewer: Option<viewer::Viewer>,
     handoff: Option<handoff::Pending>,
@@ -628,6 +654,11 @@ impl ChatView {
             folder: None,
             editor: PlainEditor::new(16.0),
             images: Vec::new(),
+            side: side::SideUi::default(),
+            side_supported: false,
+            side_child: false,
+            context: context::ContextUi::default(),
+            context_supported: false,
             previews: images::Cache::default(),
             image_viewer: None,
             handoff: None,
@@ -1042,7 +1073,11 @@ impl ChatView {
             let wait = due.saturating_sub(self.now());
             std::time::Instant::now() + std::time::Duration::from_millis(wait)
         });
-        self.live.into_iter().chain(draft).min()
+        self.live
+            .into_iter()
+            .chain(draft)
+            .chain(self.side_due())
+            .min()
     }
 
     /// Whether its agent is at work, for its tab to say so, as far as the
@@ -1216,17 +1251,49 @@ impl ChatView {
     fn search_changed(&mut self) {
         let rows = self.choice_rows(self.menu.as_ref().unwrap());
         let menu = self.menu.as_mut().unwrap();
-        menu.highlighted = rows.iter().find_map(Row::spot);
+        menu.highlighted = rows
+            .iter()
+            .filter(
+                |row| !matches!(row, Row::Choice(choice) if picker::is_specialist(&choice.setting)),
+            )
+            .find_map(Row::spot);
         menu.offset = 0;
         menu.reveal = true;
     }
 
     pub(crate) fn begin_paste(&mut self) {
+        if self.side.open {
+            if let Some(child) = &mut self.side.child {
+                child.begin_paste();
+            }
+            return;
+        }
         self.pasting = true;
         self.queued.push(Input::Clipboard);
     }
 
     pub(crate) fn finish_paste(&mut self, result: Result<crate::clipboard_image::Pasted, String>) {
+        if self.side.open {
+            if let Some(child) = &mut self.side.child {
+                child.finish_paste(result);
+            }
+            return;
+        }
+        if self.context.open {
+            self.pasting = false;
+            self.queued.retain(|i| !matches!(i, Input::Clipboard));
+            match result {
+                Ok(crate::clipboard_image::Pasted::Text(text)) => self.paste(&text),
+                Ok(crate::clipboard_image::Pasted::Image(_)) => {
+                    self.say("Close Context to paste an image into the message.".into());
+                }
+                Err(why) => {
+                    self.say(why);
+                }
+            }
+            return;
+        }
+
         self.pasting = false;
         let Some(input) = self
             .queued
@@ -1243,6 +1310,22 @@ impl ChatView {
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
+        if self.side.open {
+            if let Some(child) = &mut self.side.child {
+                child.paste(text);
+            }
+            return;
+        }
+        if self.context.open {
+            let room = 1024usize.saturating_sub(self.context.query.len());
+            let text = &text[..text.floor_char_boundary(room.min(text.len()))];
+            self.context
+                .query
+                .push_str(&text.replace(['\n', '\r'], " "));
+            self.context.offset = 0;
+            self.context.search();
+            return;
+        }
         if self.viewing_modal() {
             return;
         }
@@ -1251,6 +1334,10 @@ impl ChatView {
 
     /// A mouse button went down at `at`, from the pane's top left.
     pub(crate) fn press(&mut self, at: [f32; 2], clicks: u8, shift: bool) {
+        if self.side.open {
+            self.side_press(at, clicks, shift);
+            return;
+        }
         // Clicking drops an answer armed, as a key does.
         self.armed = None;
         // A held button isn't hovering: the turns a drag's scrolling
@@ -1279,10 +1366,23 @@ impl ChatView {
 
     /// The mouse moved to `at` with a button held.
     pub(crate) fn drag(&mut self, at: [f32; 2]) {
+        if self.side.open {
+            let at = self.side_local(at);
+            if let Some(child) = &mut self.side.child {
+                child.drag(at);
+            }
+            return;
+        }
         self.queued.push(Input::Drag(at));
     }
 
     pub(crate) fn release(&mut self) {
+        if self.side.open {
+            if let Some(child) = &mut self.side.child {
+                child.release();
+            }
+            return;
+        }
         self.queued.push(Input::Release);
     }
 
@@ -1298,6 +1398,12 @@ impl ChatView {
     /// The input method is composing `text`, with its cursor over that
     /// stretch of it, or has stopped, with `None`.
     pub(crate) fn compose(&mut self, composing: Option<(String, Option<(usize, usize)>)>) {
+        if self.side.open {
+            if let Some(child) = &mut self.side.child {
+                child.compose(composing);
+            }
+            return;
+        }
         if self.image_viewer.is_some() {
             return;
         }
@@ -1307,6 +1413,13 @@ impl ChatView {
     /// How the mouse pointer looks at `at`, from the pane's top left, by
     /// what was drawn there last.
     pub(crate) fn pointer(&self, at: [f32; 2]) -> Pointer {
+        if self.side.open {
+            return self
+                .side
+                .child
+                .as_ref()
+                .map_or(Pointer::Arrow, |child| child.pointer(self.side_local(at)));
+        }
         if self.image_viewer.is_none() && self.menu.is_none() && self.previews.at(at).is_some() {
             return Pointer::Hand;
         }
@@ -1315,7 +1428,7 @@ impl ChatView {
             .map(|(hit, _)| hit);
         match hit {
             Some(Hit::Editor | Hit::ModelSearch) => Pointer::Text,
-            Some(Hit::MenuSurface | Hit::ModelRail) => Pointer::Arrow,
+            Some(Hit::MenuSurface | Hit::ModelRail | Hit::SpecialistColumn) => Pointer::Arrow,
             Some(_) => Pointer::Hand,
             None if (self.spot_at(at, false))
                 .is_some_and(|spot| self.mention_at_spot(spot).is_some()) =>
@@ -1331,6 +1444,14 @@ impl ChatView {
     /// choice or slider there lights up, and over a turn, the button that
     /// copies its answer shows. Returns whether the chat must be redrawn.
     pub(crate) fn hover(&mut self, at: [f32; 2]) -> bool {
+        if self.side.open {
+            let at = self.side_local(at);
+            return self
+                .side
+                .child
+                .as_mut()
+                .is_some_and(|child| child.hover(at));
+        }
         if self.image_viewer.is_some() {
             return false;
         }
@@ -1509,6 +1630,12 @@ impl ChatView {
 
     /// Whether input waits to be settled.
     pub(crate) fn unsettled(&self) -> bool {
+        if self.side_unsettled() {
+            return true;
+        }
+        if self.context.has_requests() {
+            return true;
+        }
         !self.queued.is_empty()
             || self
                 .image_viewer
@@ -1519,10 +1646,8 @@ impl ChatView {
     /// Carries out what's waiting in the queue, now that the fonts are at
     /// hand.
     pub(crate) fn settle(&mut self, fonts: &mut Fonts) -> Settled {
-        let mut settled = Settled {
-            redraw: self.image_viewer.as_mut().is_some_and(viewer::Viewer::poll),
-            ..Settled::default()
-        };
+        let mut settled = self.settle_side(fonts);
+        settled.redraw |= self.image_viewer.as_mut().is_some_and(viewer::Viewer::poll);
         if self.queued.is_empty() {
             settled.redraw |= self.preview_search(fonts);
             return settled;
@@ -1892,7 +2017,7 @@ impl ChatView {
     /// Sends the message typed, unless the agent is still answering the
     /// last.
     fn send_or_steer(&mut self, steer: bool, settled: &mut Settled) {
-        if self.native_command(settled) {
+        if !self.side_child && self.native_command(settled) {
             return;
         }
         if steer && self.queue_supported {
@@ -2108,6 +2233,21 @@ impl ChatView {
         fn menu_choice_key / describe_menu_choice_key(&mut self, key: &Key) -> bool;
         execute(menu: Menu, rows: Vec<Row>, spots: Vec<Spot>, at: Option<usize>, settled: &mut Settled);
         match key => {
+            Key::Named(NamedKey::Tab) if self.searching_models() =>
+                Hint::Action("Move between specialists and models"),
+                {
+                    let to_specialists = !matches!(&menu.highlighted, Some(Spot::Choice { setting, .. }) if picker::is_specialist(setting));
+                    let choices: Vec<_> = rows.iter().filter_map(|row| match row {
+                        Row::Choice(choice) if picker::is_specialist(&choice.setting) == to_specialists => Some(choice),
+                        _ => None,
+                    }).collect();
+                    if let Some(choice) = choices.iter().find(|choice| choice.current).or(choices.first())
+                        && let Some(menu) = &mut self.menu {
+                        menu.highlighted = Some(Spot::Choice { setting: choice.setting.clone(), value: choice.value.clone() });
+                        menu.reveal = true;
+                    }
+                    true
+                };
             Key::Named(direction @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) =>
                 Hint::Action(if *direction == NamedKey::ArrowUp {
                     "Previous choice"
@@ -2181,11 +2321,29 @@ impl ChatView {
     }
 
     pub(crate) fn viewing_modal(&self) -> bool {
-        self.image_viewer.is_some() || self.usage_modal
+        self.image_viewer.is_some() || self.usage_modal || self.context.open || self.side.open
     }
 
     /// The modal owns keys before bindings, permission answers, or either mode.
     pub(crate) fn chat_modal_key(&mut self, press: &KeyPress<'_>) -> bool {
+        if self.side.open {
+            return self.side_key(press);
+        }
+        if self.context.open && crate::vim::enters_normal_mode(press) {
+            self.context.open = false;
+            self.context.dirty = true;
+            return true;
+        }
+        if self.context.open
+            && press.modifiers.ctrl
+            && matches!(press.key,Key::Character(s) if s.eq_ignore_ascii_case("v"))
+        {
+            self.begin_paste();
+            return true;
+        }
+        if self.context_key(press.key) {
+            return true;
+        }
         self.modal_key(press.key, crate::vim::enters_normal_mode(press))
     }
 
@@ -2417,6 +2575,61 @@ impl ChatView {
         let hit = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit.clone());
+        if self.context.open {
+            match hit {
+                Some(Hit::CloseContext) | None => self.context.open = false,
+                Some(Hit::ContextCandidate(index)) => {
+                    self.context.editing = None;
+                    self.context.select(index);
+                }
+                Some(Hit::InspectAttachedContext(index)) => self.context.inspect_attached(index),
+                Some(Hit::ContextAttachments(next)) => {
+                    self.context.attached_offset = if next {
+                        (self.context.attached_offset + 4)
+                            .min(self.context.attached.len().saturating_sub(1))
+                    } else {
+                        self.context.attached_offset.saturating_sub(4)
+                    };
+                }
+                Some(Hit::ContextCategory) => {
+                    self.context_key(&Key::Named(NamedKey::Tab));
+                }
+                Some(Hit::NarrowContext) => {
+                    self.context.narrowing = true;
+                    self.context.range.clear();
+                    self.context.status = "Enter source lines first-last, then Enter.".into();
+                }
+                Some(Hit::CopyContext) => {
+                    if let Some(preview) = &self.context.preview {
+                        settled.copied.push((preview.text.clone(), Copy::Clipboard));
+                        self.context.status = "Snapshot copied.".into();
+                    }
+                }
+                Some(Hit::AttachContext) => self.context.add(),
+                Some(Hit::RefreshContext) => {
+                    if self.context.preview.is_some() {
+                        self.context.select(self.context.selected);
+                    } else {
+                        self.context.search();
+                    }
+                }
+                Some(Hit::ContextMode) => {
+                    self.context.mode =
+                        if self.context.mode == clackatoo_protocol::ContextMode::Contents {
+                            clackatoo_protocol::ContextMode::Reference
+                        } else {
+                            clackatoo_protocol::ContextMode::Contents
+                        };
+                    self.context.select(self.context.selected);
+                }
+                Some(Hit::RemoveContext(index)) if index < self.context.attached.len() => {
+                    self.context.attached.remove(index);
+                    self.context.editing = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.usage_modal {
             match hit {
                 Some(Hit::CloseUsage) | None => self.usage_modal = false,
@@ -2481,6 +2694,7 @@ impl ChatView {
                     | Hit::Reset { .. }
                     | Hit::MenuSurface
                     | Hit::ModelRail
+                    | Hit::SpecialistColumn
                     | Hit::FastMode
                     | Hit::ModelSearch
                     | Hit::ModelFilter(_)
@@ -2490,10 +2704,60 @@ impl ChatView {
             self.menu = None;
         }
         match hit {
+            Some(Hit::Side) => self.open_side(String::new()),
+            Some(Hit::SideAnswer(turn)) => {
+                self.side.request(clackatoo_protocol::SideAction::Attach {
+                    turn: u32::try_from(turn).expect("bounded side history"),
+                });
+            }
+            Some(Hit::Context) => self.open_context(),
+            Some(Hit::CapturedContext(turn)) => {
+                self.context.history_turn = Some(
+                    self.first_turn()
+                        .saturating_add(u32::try_from(turn).unwrap_or(u32::MAX)),
+                );
+                if let Some(turn) = self.node.turns.get(turn) {
+                    self.context.items = turn
+                        .context
+                        .iter()
+                        .map(|c| clackatoo_protocol::ContextCandidate {
+                            kind: clackatoo_protocol::ContextKind::All,
+                            label: c.label.clone(),
+                            detail: format!("Captured · {} bytes", c.bytes),
+                            source: clackatoo_protocol::ContextRef::Retained {
+                                id: c.id.clone(),
+                                grant: c.grant.clone(),
+                            },
+                        })
+                        .collect();
+                    self.context.history = turn.context.clone();
+                    self.context.preview = self.context.history.first().cloned();
+                    self.context.open = true;
+                    self.context.status =
+                        "Captured context · original contents supplied with this message".into();
+                    self.context.select(0);
+                }
+            }
+            Some(Hit::SpecialistSettings) => settled
+                .commands
+                .push(crate::command::Command::SpecialistSettings),
             Some(
-                Hit::ModelSearch
+                Hit::CloseContext
+                | Hit::ContextSurface
+                | Hit::ContextCategory
+                | Hit::ContextAttachments(_)
+                | Hit::InspectAttachedContext(_)
+                | Hit::NarrowContext
+                | Hit::CopyContext
+                | Hit::ContextCandidate(_)
+                | Hit::AttachContext
+                | Hit::RefreshContext
+                | Hit::ContextMode
+                | Hit::RemoveContext(_)
+                | Hit::ModelSearch
                 | Hit::MenuSurface
                 | Hit::ModelRail
+                | Hit::SpecialistColumn
                 | Hit::Usage
                 | Hit::CloseImage
                 | Hit::CloseUsage
@@ -2734,19 +2998,36 @@ impl ChatView {
     /// Scrolls `lines` lines up, or down if negative. Returns whether the
     /// view moved.
     pub(crate) fn scroll_lines(&mut self, lines: f32) -> bool {
+        if self.side.open {
+            return self
+                .side
+                .child
+                .as_mut()
+                .is_some_and(|child| child.scroll_lines(lines));
+        }
+        if self.context.open {
+            return self.scroll_by(-lines * self.line_height);
+        }
         if self.usage_modal {
             return self.scroll_by(-lines * self.line_height);
         }
         if self.image_viewer.is_some() {
             return false;
         }
+        let specialists = self.mouse.is_some_and(|at| {
+            self.hits
+                .iter()
+                .any(|(hit, rect)| *hit == Hit::SpecialistColumn && contains(*rect, at))
+        });
         let rail = self.mouse.is_some_and(|at| {
             self.hits
                 .iter()
                 .any(|(hit, rect)| *hit == Hit::ModelRail && contains(*rect, at))
         });
         if let Some(menu) = &mut self.menu {
-            let offset = if rail {
+            let offset = if specialists {
+                &mut menu.specialist_offset
+            } else if rail {
                 &mut menu.rail_offset
             } else {
                 &mut menu.offset
@@ -2781,6 +3062,11 @@ impl ChatView {
     }
 
     pub(crate) fn scroll_by(&mut self, pixels: f32) -> bool {
+        if self.context.open {
+            let old = self.context.scroll;
+            self.context.scroll = (old + pixels).clamp(0.0, self.context.max_scroll);
+            return (old - self.context.scroll).abs() > f32::EPSILON;
+        }
         if self.usage_modal {
             let old = self.usage_scroll;
             self.usage_scroll = (old + pixels).clamp(0.0, self.usage_max_scroll);
@@ -3220,6 +3506,7 @@ mod tests {
         assert_eq!(view.editor.raw_text(), "look pasted after");
         view.paste_image(pasted_image());
         view.node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -3531,6 +3818,7 @@ mod tests {
         let mut fonts = fonts();
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),
@@ -4435,6 +4723,107 @@ mod tests {
         );
     }
 
+    fn with_specialists() -> ChatView {
+        let mut view = with_claude();
+        view.node.settings.push(Setting {
+            id: "clackatoo.specialist".into(),
+            name: "Specialist".into(),
+            kind: SettingKind::Other,
+            value: "general".into(),
+            choices: (0..20)
+                .map(|i| clackatoo_protocol::SettingChoice {
+                    value: if i == 0 {
+                        "general".into()
+                    } else {
+                        format!("specialist-{i}")
+                    },
+                    name: format!("Specialist {i}"),
+                    description: Some("Review and explain changes".into()),
+                })
+                .collect(),
+        });
+        view
+    }
+
+    #[test]
+    fn specialist_column_stays_right_of_models_and_scrolls_independently() {
+        let mut view = with_specialists();
+        let mut fonts = fonts();
+        view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+        fixtures::paint(&mut view, &mut fonts);
+        let bounds =
+            |view: &ChatView, hit: &Hit| view.hits.iter().find(|(h, _)| h == hit).unwrap().1;
+        let specialists = bounds(&view, &Hit::SpecialistColumn);
+        let providers = bounds(&view, &Hit::ModelRail);
+        let search = bounds(&view, &Hit::ModelSearch);
+        assert!(providers[0] + providers[2] <= specialists[0]);
+        assert!(search[0] + search[2] <= specialists[0]);
+        view.hover([specialists[0] + 2.0, specialists[1] + 2.0]);
+        for _ in 0..8 {
+            view.scroll_lines(-1.0);
+        }
+        fixtures::paint(&mut view, &mut fonts);
+        let menu = view.menu.as_ref().unwrap();
+        assert_eq!(menu.specialist_offset, 8);
+        assert_eq!(menu.offset, 0);
+        assert_eq!(menu.rail_offset, 0);
+        assert!(view.hits.iter().any(|(h, _)| matches!(h, Hit::Pick { setting, value } if picker::is_specialist(setting) && value == "specialist-8")));
+        key(&mut view, NamedKey::Tab);
+        view.settle(&mut fonts);
+        assert!(
+            matches!(&view.menu.as_ref().unwrap().highlighted, Some(Spot::Choice { setting, .. }) if picker::is_specialist(setting))
+        );
+        key(&mut view, NamedKey::Enter);
+        assert!(view.settle(&mut fonts).actions.iter().any(|a| matches!(a, ChatAction::Set { setting, value } if picker::is_specialist(setting) && value == "general")));
+    }
+
+    #[test]
+    fn specialist_cog_opens_settings_even_after_the_conversation_started() {
+        for started in [false, true] {
+            let mut view = with_specialists();
+            if started {
+                view.node.turns = fixtures::talk(&[("hello", "hi")]).turns;
+            }
+            let mut fonts = fonts();
+            view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+            fixtures::paint(&mut view, &mut fonts);
+            let rect = view
+                .hits
+                .iter()
+                .find(|(hit, _)| *hit == Hit::SpecialistSettings)
+                .unwrap()
+                .1;
+            view.press([rect[0] + rect[2] / 2., rect[1] + rect[3] / 2.], 1, false);
+            let settled = view.settle(&mut fonts);
+            assert!(matches!(
+                settled.commands.as_slice(),
+                [crate::command::Command::SpecialistSettings]
+            ));
+            assert!(settled.actions.is_empty());
+            assert!(view.menu.is_none());
+        }
+    }
+
+    #[test]
+    fn an_existing_conversations_specialist_is_visible_but_cannot_be_changed() {
+        let mut view = with_specialists();
+        view.node.turns = fixtures::talk(&[("hello", "hi")]).turns;
+        let mut fonts = fonts();
+        view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(view.hits.iter().any(|(h, _)| *h == Hit::SpecialistColumn));
+        assert!(!view.hits.iter().any(
+            |(h, _)| matches!(h, Hit::Pick { setting, .. } if picker::is_specialist(setting))
+        ));
+        let mut settled = Settled::default();
+        view.choose(
+            "clackatoo.specialist".into(),
+            "specialist-1".into(),
+            &mut settled,
+        );
+        assert!(settled.actions.is_empty());
+    }
+
     #[test]
     fn provider_pages_keep_the_same_bounds_and_scroll_separately() {
         use clackatoo_protocol::{Provider, ProviderModels};
@@ -4709,6 +5098,7 @@ mod tests {
         let mut node = ChatNode::default();
         for &state in states {
             node.turns.push(Turn {
+                context: Vec::new(),
                 woke: None,
                 notice: None,
                 previews: Vec::new(),
@@ -4764,6 +5154,7 @@ mod tests {
         use clackatoo_protocol::{Outcome, TurnEnd};
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            context: Vec::new(),
             woke: None,
             notice: None,
             previews: Vec::new(),

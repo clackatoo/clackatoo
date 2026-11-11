@@ -161,7 +161,9 @@ impl ChatView {
         self.queue_supported
             && self.busy()
             && self.node.question.is_none()
-            && (!self.editor.raw_text().trim().is_empty() || !self.images.is_empty())
+            && (!self.editor.raw_text().trim().is_empty()
+                || !self.images.is_empty()
+                || !self.context.attached.is_empty())
     }
 
     pub(super) fn draw_steering(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
@@ -173,8 +175,10 @@ impl ChatView {
         let top = frame.top + frame.height - m.em(5.1);
         let left = frame.left + frame.pad;
         let right = frame.left + frame.place.column - frame.pad;
-        let native =
-            self.node.delivery.native_steering && self.images.is_empty() && self.handoff.is_none();
+        let native = self.node.delivery.native_steering
+            && self.images.is_empty()
+            && self.handoff.is_none()
+            && self.context.attached.is_empty();
         // A file a message mentions goes only with the message whole.
         let label = if !native {
             "Stop & continue"
@@ -339,6 +343,9 @@ fn excerpt(message: &clackatoo_protocol::QueuedMessage) -> String {
         .chars()
         .take(256)
         .collect();
+    if message.context_count > 0 {
+        text = format!("{text} · {} context", message.context_count);
+    }
     if message.images > 0 {
         text = format!(
             "{text} · {} image{}",

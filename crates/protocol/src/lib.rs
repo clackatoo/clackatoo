@@ -57,6 +57,7 @@ mod board;
 mod browser;
 mod buffer;
 mod chat;
+mod context;
 pub mod corpus;
 mod devices;
 mod files;
@@ -71,8 +72,10 @@ mod native;
 mod review;
 mod settings;
 mod shown;
+mod side;
 mod view;
 pub mod wire;
+mod work;
 mod workspace;
 
 use std::fmt;
@@ -85,7 +88,12 @@ pub use clackatoo_term::{
 use serde::{Deserialize, Serialize};
 
 pub use activity::{Activity, ActivityState};
+pub use context::{
+    ContextAction, ContextCandidate, ContextKind, ContextMode, ContextRef, ContextReply,
+    ContextSelection, ContextSnapshot,
+};
 pub use native::{NativeAccess, NativeAction, NativeReply};
+pub use side::{SideAction, SideReply};
 
 pub use board::{
     BoardAction, BoardAuthor, BoardEntry, BoardId, BoardLink, BoardScope, BoardSummary,
@@ -141,6 +149,8 @@ pub use machines::{
 pub use mention::{
     MOST_MENTIONS, Mention, lines_suffix, may_mention_files, mention, mention_lines, mentions,
 };
+pub use work::{WorkAction, WorkItem, WorkState};
+
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
@@ -163,7 +173,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 153;
+pub const PROTOCOL_VERSION: u32 = 160;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -786,6 +796,8 @@ pub enum Event {
         /// the room.
         hints: Box<LineHints>,
     },
+    /// Background work changed, for native windows watching workspaces.
+    Work(Vec<WorkItem>),
 }
 
 /// The TCP ports a background tab's programs listen on: see
@@ -1901,6 +1913,54 @@ pub enum Request {
         /// What's asked.
         request: Box<Request>,
     },
+    /// The skills available beside `pane`, or the daemon's home without
+    /// one. Answered with [`Response::Skills`].
+    Skills {
+        /// Which working directory to discover project skills in.
+        pane: Option<PaneId>,
+    },
+    /// Browse effective specialists for the settings editor.
+    Specialists {
+        /// The project whose bundles are included.
+        pane: Option<PaneId>,
+    },
+    /// Obsolete save request, refused by file-based specialist daemons.
+    SaveSpecialist {
+        /// Its new definition and the previous saved override.
+        specialist: SpecialistDefinition,
+    },
+    /// Browse file-backed specialists, including compatibility definitions.
+    SpecialistFiles {
+        /// The project to browse.
+        pane: Option<PaneId>,
+    },
+    /// Save a SPECIALIST.md from the native Settings editor.
+    SaveSpecialistFile {
+        /// The project whose catalogue is being edited.
+        pane: Option<PaneId>,
+        /// The draft and previous file contents for conflict detection.
+        specialist: SpecialistDefinition,
+        /// Scope for a new file.
+        scope: SpecialistScope,
+        /// Existing editable source, or None to create a custom copy.
+        path: Option<String>,
+    },
+    /// Inspect or control daemon background work from a native window.
+    Work(WorkAction),
+    /// Discover and preview workspace context for a destination chat.
+    Context {
+        /// Destination conversation, which determines source access.
+        chat: TerminalId,
+        /// Read-only operation.
+        action: ContextAction,
+    },
+    /// A temporary conversation, scoped to its parent chat.
+    Side {
+        /// The parent, whose context is captured once when opened.
+        chat: TerminalId,
+        /// Open, read, or control the side conversation.
+        action: SideAction,
+    },
 }
 
 /// What [`Request::KeepHistory`] changes.
@@ -2154,6 +2214,74 @@ pub enum Response {
         /// The hints of the line asked about.
         hints: clackatoo_term::Hints,
     },
+    /// Answers [`Request::Skills`].
+    Skills(Vec<Skill>),
+    /// Effective definitions, including their saved override for optimistic concurrency.
+    Specialists(Vec<SpecialistDefinition>),
+    /// The specialist was validated, saved, and applied to future launches.
+    SpecialistSaved,
+    /// Answers [`Request::SpecialistFiles`].
+    SpecialistFiles(Vec<SpecialistFile>),
+    /// Active work and recent outcomes, answering [`Request::Work`].
+    Work(Vec<WorkItem>),
+    /// Answers a workspace context request.
+    Context(ContextReply),
+    /// The current temporary side conversation.
+    Side(SideReply),
+}
+
+/// Where a specialist file is discovered or created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpecialistScope {
+    /// All projects for this user.
+    Personal,
+    /// The current project.
+    Project,
+}
+
+/// Source information for the specialist editor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecialistFile {
+    /// Its effective configuration. saved holds the original file contents.
+    pub definition: SpecialistDefinition,
+    /// Source path, empty for a built-in role.
+    pub path: String,
+    /// Personal or project scope.
+    pub scope: SpecialistScope,
+    /// Whether Settings edits this file directly; other sources are copied.
+    pub editable: bool,
+}
+
+/// Provider-independent specialist configuration used by the Settings editor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecialistDefinition {
+    /// Unique specialist name.
+    pub name: String,
+    /// JSON object containing its complete effective configuration.
+    pub settings: String,
+    /// Previous file contents; None when creating a new file.
+    pub saved: Option<String>,
+    /// Reserved legacy source location. New file editors use [`SpecialistFile`].
+    pub locked: Option<OptionPlace>,
+}
+
+/// A shared skill, including ones that cannot run, for the settings browser.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skill {
+    /// Its slash command and tool lookup name.
+    pub name: String,
+    /// When the agent should use it.
+    pub description: String,
+    /// The absolute path to its SKILL.md on the daemon's machine.
+    pub path: String,
+    /// Where it was discovered: project, personal, or a compatibility folder.
+    pub source: String,
+    /// Why it cannot run, if it has unsupported execution settings or is invalid.
+    pub problem: Option<String>,
+    /// Whether the agent may select it automatically.
+    pub implicit: bool,
+    /// Whether its slash command is offered to the user.
+    pub user_invocable: bool,
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out

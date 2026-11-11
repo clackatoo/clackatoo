@@ -48,7 +48,7 @@ fn shell_snapshot(terminal: TerminalId, size: Size) {
     for (row, text) in [
         "~/projects/clackatoo > cargo check",
         "    Checking clackatoo-web",
-        "    Finished dev profile",
+        "    Finished dev specialist",
         "~/projects/clackatoo >",
     ]
     .into_iter()
@@ -91,6 +91,34 @@ fn now() -> u64 {
     .unwrap()
 }
 
+fn context_snapshot(
+    source: clackatoo_protocol::ContextRef,
+    mode: clackatoo_protocol::ContextMode,
+) -> clackatoo_protocol::ContextSnapshot {
+    clackatoo_protocol::ContextSnapshot {
+        grant: "b".repeat(64),
+        id: "a".repeat(64),
+        source,
+        label: "src/auth.rs".into(),
+        location: "src/auth.rs#L1-L3".into(),
+        mode,
+        text: if mode == clackatoo_protocol::ContextMode::Contents {
+            "fn authenticate(user: &str) -> bool {\n    !user.is_empty()\n}\n".into()
+        } else {
+            String::new()
+        },
+        bytes: if mode == clackatoo_protocol::ContextMode::Contents {
+            61
+        } else {
+            0
+        },
+        revision: "revision".into(),
+        captured: 1,
+        partial: false,
+        note: "Includes unsaved buffer text.".into(),
+    }
+}
+
 fn reply(message: &ServerMessage) {
     let bytes = frame::encode(PROTOCOL_VERSION, message).unwrap();
     let mut hex = String::new();
@@ -121,6 +149,11 @@ fn workspaces() -> Workspaces {
         name: name.into(),
     };
     let mut workspaces = Workspaces {
+        machine: Some(clackatoo_protocol::Machine {
+            id: clackatoo_protocol::MachineId([0x42; 16]),
+            name: "Browser fixture".into(),
+            run: 1,
+        }),
         list: ["Clackatoo", "Website"]
             .into_iter()
             .enumerate()
@@ -279,7 +312,7 @@ fn chats() -> Vec<ChatSummary> {
             parent: None,
             workspace: Some(WorkspaceId(workspace)),
             active: now().saturating_sub(120_000),
-            profile: None,
+            specialist: None,
             failed: Some(false),
         },
     )
@@ -306,7 +339,7 @@ fn setting(id: &str, name: &str, kind: SettingKind, choices: &[&str]) -> Setting
 #[allow(clippy::too_many_lines, reason = "complete browser fixture state")]
 fn node(id: TerminalId) -> ChatNode {
     let turn = |i| {
-        Turn {
+        Turn { context: Vec::new(),
         woke: None,
         notice: None,
         prompt: if i == 39 { "Make the remote experience feel as good as the desktop, especially on my phone.".into() } else { format!("Check the behavior in case {i}.") },
@@ -361,6 +394,7 @@ fn node(id: TerminalId) -> ChatNode {
         delivery: ChatDelivery {
             native_steering: true,
             queued: vec![QueuedMessage {
+                context_count: 0,
                 id: 10,
                 text: "Also check landscape mode".into(),
                 images: 0,
@@ -439,6 +473,8 @@ fn snapshot(id: TerminalId, node: &ChatNode) {
 fn main() {
     let mut decoder = FrameDecoder::new();
     let mut nodes = std::collections::BTreeMap::new();
+    let mut sides: std::collections::BTreeMap<TerminalId, ChatNode> =
+        std::collections::BTreeMap::new();
     let mut starts = std::collections::BTreeMap::new();
     let mut shown = workspaces();
     for line in io::stdin().lock().lines() {
@@ -565,21 +601,129 @@ fn main() {
                             nodes.entry(terminal).or_insert_with(|| node(terminal)),
                         );
                     }
+                    Request::Side { chat, action } => {
+                        use clackatoo_protocol::{
+                            ContextMode, ContextRef, ContextReply, SideAction as S, SideReply,
+                        };
+                        eprintln!("Side {action:?}");
+                        if let S::Attach { turn } = action {
+                            let answer = sides
+                                .get(&chat)
+                                .and_then(|n| n.turns.get(turn as usize))
+                                .map(|t| {
+                                    t.items
+                                        .iter()
+                                        .filter_map(|i| {
+                                            if let Item::Words(s) = i {
+                                                Some(s.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                                .unwrap_or_default();
+                            let mut snapshot = context_snapshot(
+                                ContextRef::Chat {
+                                    chat: TerminalId(900),
+                                    first: turn,
+                                    last: turn,
+                                    requests: false,
+                                },
+                                ContextMode::Contents,
+                            );
+                            snapshot.label = "Side answer".into();
+                            snapshot.location = "Side question".into();
+                            snapshot.text = answer;
+                            snapshot.bytes =
+                                u32::try_from(snapshot.text.len()).expect("bounded fixture answer");
+                            reply(&ServerMessage::Response(Response::Context(
+                                ContextReply::Snapshot(snapshot),
+                            )));
+                            continue;
+                        }
+                        let mut question = None;
+                        match action {
+                            S::Open { question: q } => {
+                                sides.entry(chat).or_insert_with(|| ChatNode {
+                                    state: ChatState::Ready,
+                                    ..Default::default()
+                                });
+                                if !q.is_empty() {
+                                    question = Some(q);
+                                }
+                            }
+                            S::Send { text } => question = Some(text),
+                            S::Discard | S::Keep => {
+                                sides.remove(&chat);
+                            }
+                            _ => {}
+                        }
+                        if let Some(question) = question
+                            && let Some(side) = sides.get_mut(&chat)
+                        {
+                            let mut turn = node(chat).turns.remove(0);
+                            turn.prompt = question;
+                            turn.previews.clear();
+                            turn.items=vec![Item::Words("## Side answer\n\nUse **HTTP-only cookies** for the browser session. This answer stays separate from the main conversation.".into())];
+                            side.turns.push(turn);
+                        }
+                        reply(&ServerMessage::Response(Response::Side(SideReply {
+                            node: sides.get(&chat).cloned().map(Box::new),
+                            notice: "Context captured when opened.".into(),
+                        })));
+                    }
+                    Request::Context { chat: _, action } => {
+                        use clackatoo_protocol::{
+                            ContextAction as A, ContextMode as M, ContextRef as R,
+                            ContextReply as P,
+                        };
+                        let response = match action {
+                            A::Search { .. } => P::Candidates {
+                                notice: "Bounded search".into(),
+                                items: vec![clackatoo_protocol::ContextCandidate {
+                                    kind: clackatoo_protocol::ContextKind::File,
+                                    label: "src/auth.rs".into(),
+                                    detail: "Unsaved source".into(),
+                                    source: R::File {
+                                        path: "src/auth.rs".into(),
+                                        lines: None,
+                                    },
+                                }],
+                                more: false,
+                            },
+                            A::Preview(selection) => {
+                                P::Snapshot(context_snapshot(selection.source, selection.mode))
+                            }
+                            A::Read { .. } => P::Snapshot(context_snapshot(
+                                R::File {
+                                    path: "src/auth.rs".into(),
+                                    lines: Some((1, 3)),
+                                },
+                                M::Contents,
+                            )),
+                        };
+                        reply(&ServerMessage::Response(Response::Context(response)));
+                    }
                     Request::Chat { terminal, action } => {
                         eprintln!("{action:?}");
                         let node = nodes.entry(terminal).or_insert_with(|| node(terminal));
-                        if matches!(&action, ChatAction::Submit{text,..} if text=="reject") {
+                        if matches!(&action, ChatAction::Submit{text,..}|ChatAction::SubmitContext{text,..} if text=="reject")
+                        {
                             reply(&ServerMessage::Response(Response::Error(
                                 Error::NoSuchTerminal(terminal),
                             )));
                             continue;
                         }
                         match action {
-                            ChatAction::Submit { text, images, .. } => {
+                            ChatAction::Submit { text, images, .. }
+                            | ChatAction::SubmitContext { text, images, .. } => {
                                 if text == "delayed" {
                                     std::thread::sleep(std::time::Duration::from_millis(350));
                                 }
                                 node.delivery.queued.push(QueuedMessage {
+                                    context_count: 0,
                                     id: 20,
                                     text,
                                     images: u8::try_from(images.len()).unwrap(),
