@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.11.38 (2026-11-11)
+
+### Features
+
+- **term:** secret regions move to OSC 46373, off systemd's 3008 (CLACKA-242) (71c8cfc2)
+- a line shown as it is shows its pictures too (CLACKA-242) (19fae974)
+- **daemon:** a daemon relaying masks another machine's lines for each of its own clients (CLACKA-242) (0e8d9862)
+- masks over :connect, documented; protocol 153 RELAY_HINTS (CLACKA-242) (bd7ac811)
+- add shared skills, specialists, code outlines, context and side questions (72fd8ca8)
+
+### Fixes
+
+- **daemon:** phones get HIDE only through a relay too; Relay is the user's to say; Masked refuses anything but lines; a relay forgets what it showed as the terminal there renumbers (CLACKA-242) (59ce6c5e)
+- **daemon:** restore host skill catalogues when upgrades stop agents (ee2e03f2)
+
 ## 2026.11.37 (2026-11-10)
 
 ### Features
