@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.40 (2026-11-11)
+
+### Features
+
+- **mcp:** share managed servers while preserving live agent upgrades (1bd060c7)
+
 ## 2026.11.39 (2026-11-11)
 
 Publication canceled before downloads were released: CI found an agent
