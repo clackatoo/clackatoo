@@ -4786,8 +4786,8 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
         node.settings.iter().any(|setting| setting.value == "auto")
     });
     // The agent's two, and the chat's own for clackatoo's tools and the
-    // browser, and how many subagents may work at once.
-    assert_eq!(node.settings.len(), 5);
+    // browser, how many subagents may work at once, and its Specialist.
+    assert_eq!(node.settings.len(), 6);
     assert_eq!(
         last_words(&ask(&mut client, chat, "settings")),
         "auto haiku\n"
@@ -4972,6 +4972,7 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
             "clackatoo.tools",
             "clackatoo.browser",
             "clackatoo.subagents",
+            "clackatoo.specialist",
         ]
     );
     assert_eq!(
@@ -14298,7 +14299,7 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
         resume: None,
     };
     let allowed = serde_json::json!(["mcp__clackatoo"]);
-    let disallowed = serde_json::json!(["Agent", "Task"]);
+    let disallowed = serde_json::json!(["Skill", "Agent", "Task"]);
     // Asked for its background tasks, it's asked for its subagents' words
     // too, as AIR's adapter keeps them otherwise.
     let forward = true;
@@ -14308,12 +14309,16 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
 
     let with = start_new_chat(&mut client, new(AgentTools::Ask, true));
     let meta = session_meta(&mut client, with);
+    assert_eq!(meta["claudeCode"]["options"]["allowedTools"], allowed);
     assert_eq!(
-        meta,
-        serde_json::json!({ "claudeCode": { "options": {
-            "allowedTools": allowed, "forwardSubagentText": forward,
-        }, "emitRawSDKMessages": raw } })
+        meta["claudeCode"]["options"]["disallowedTools"],
+        serde_json::json!(["Skill"])
     );
+    assert_eq!(
+        meta["claudeCode"]["options"]["forwardSubagentText"],
+        forward
+    );
+    assert_eq!(meta["claudeCode"]["emitRawSDKMessages"], raw);
 
     let without = start_new_chat(&mut client, new(AgentTools::Ask, false));
     let meta = session_meta(&mut client, without);
@@ -14322,17 +14327,26 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
 
     // With clackatoo's tools off too, it's still taken away.
     let bare = start_new_chat(&mut client, new(AgentTools::Off, false));
+    let meta = session_meta(&mut client, bare);
+    assert!(meta["claudeCode"]["options"]["allowedTools"].is_null());
+    assert_eq!(meta["claudeCode"]["options"]["disallowedTools"], disallowed);
     assert_eq!(
-        session_meta(&mut client, bare),
-        serde_json::json!({ "claudeCode": { "options": {
-            "disallowedTools": disallowed, "forwardSubagentText": forward,
-        }, "emitRawSDKMessages": raw } })
+        meta["claudeCode"]["options"]["forwardSubagentText"],
+        forward
     );
+    assert_eq!(meta["claudeCode"]["emitRawSDKMessages"], raw);
     let plain = start_new_chat(&mut client, new(AgentTools::Off, true));
+    let meta = session_meta(&mut client, plain);
+    assert!(meta["claudeCode"]["options"]["allowedTools"].is_null());
     assert_eq!(
-        session_meta(&mut client, plain),
-        serde_json::json!({ "claudeCode": { "options": { "forwardSubagentText": forward }, "emitRawSDKMessages": raw } })
+        meta["claudeCode"]["options"]["disallowedTools"],
+        serde_json::json!(["Skill"])
     );
+    assert_eq!(
+        meta["claudeCode"]["options"]["forwardSubagentText"],
+        forward
+    );
+    assert_eq!(meta["claudeCode"]["emitRawSDKMessages"], raw);
 
     // The session opened again, as after the agent stops, is opened the
     // same way.
@@ -14427,6 +14441,12 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
             "board_claim",
             "board_release",
             "board_archive",
+            "read_context",
+            "file_outline",
+            "search_symbols",
+            "repo_map",
+            "list_skills",
+            "load_skill",
             "native_snapshot",
             "native_click",
             "native_type",
@@ -18874,7 +18894,7 @@ fn a_chat_without_claude_codes_task_tool_stays_without_it_wherever_it_moves() {
         model: None,
         resume: None,
     };
-    let disallowed = serde_json::json!(["Agent", "Task"]);
+    let disallowed = serde_json::json!(["Skill", "Agent", "Task"]);
     // Started with Codex, it opens a new session with Claude Code without
     // the Task tool.
     let chat = start_new_chat(&mut client, new("codex"));
