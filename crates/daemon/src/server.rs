@@ -1684,6 +1684,10 @@ impl Daemon {
                 );
             }
             daemon.add_chat(chat);
+            // Host catalogues are rebuilt even when the old provider was
+            // stopped: its skills and specialist selector remain available
+            // before the user opens another session.
+            daemon.refresh_chat_skills(id);
         }
         // Notices a build before handed over without the chats they say
         // finished, once every chat is back to say what each is.
