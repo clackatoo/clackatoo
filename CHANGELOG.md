@@ -2,6 +2,9 @@
 
 ## 2026.11.39 (2026-11-11)
 
+Publication canceled before downloads were released: CI found an agent
+upgrade regression. The corrected MCP feature ships in 2026.11.40.
+
 ### Features
 
 - **mcp:** manage shared servers, credentials and provider isolation (1e3b31b5)

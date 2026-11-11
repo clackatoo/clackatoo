@@ -493,15 +493,18 @@ pub(crate) fn declaration_kind(files: bool, tasks: bool) -> &'static str {
 
 /// A fingerprint of `capabilities`, the same in every build that declares
 /// the same: FNV-1a over its JSON, in hex.
-/// The per-process plugin choice is compared separately on adoption; it
-/// does not change the ACP capabilities this build supports.
+/// Per-process provider policies and adapter identity are checked
+/// separately on adoption; they do not change the ACP capabilities this
+/// build supports.
 pub(crate) fn declaration_hash(capabilities: &Value) -> String {
     let mut capabilities = capabilities.clone();
     if let Some(meta) = capabilities
         .pointer_mut("/_meta/clackatoo")
         .and_then(Value::as_object_mut)
     {
-        meta.remove("native_plugins");
+        for key in ["native_plugins", "native_mcp", "agent", "mcp_control"] {
+            meta.remove(key);
+        }
     }
     let hash = (capabilities.to_string().bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
@@ -1935,6 +1938,13 @@ mod shared_skill_tests {
         let original = client_capabilities(true, true);
         let mut permitted = original.clone();
         permitted["_meta"]["clackatoo"]["native_plugins"] = json!(true);
+        permitted["_meta"]["clackatoo"]["native_mcp"] = json!(false);
+        permitted["_meta"]["clackatoo"]["agent"] = json!("claude");
+        permitted["_meta"]["clackatoo"]["mcp_control"] = json!(true);
+        assert_eq!(declaration_hash(&original), declaration_hash(&permitted));
+        permitted["_meta"]["clackatoo"]["native_mcp"] = json!(true);
+        permitted["_meta"]["clackatoo"]["agent"] = json!("codex");
+        permitted["_meta"]["clackatoo"]["mcp_control"] = json!(false);
         assert_eq!(declaration_hash(&original), declaration_hash(&permitted));
     }
 }
