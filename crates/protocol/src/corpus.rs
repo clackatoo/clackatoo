@@ -4979,63 +4979,63 @@ fn agent_task(kind: crate::AgentTaskKind, state: crate::AgentTaskState) -> crate
 )]
 fn context_samples() -> Vec<Sample> {
     use crate::{
-        ContextAction as A, ContextCandidate, ContextKind as K, ContextMode as M, ContextRef as R,
-        ContextReply as P, ContextSelection as S, ContextSnapshot,
+        ContextAction, ContextCandidate, ContextKind, ContextMode, ContextRef, ContextReply,
+        ContextSelection, ContextSnapshot,
     };
     let refs = [
-        R::File {
+        ContextRef::File {
             path: "src/main.rs".into(),
             lines: Some((3, 8)),
         },
-        R::Symbol {
+        ContextRef::Symbol {
             path: "src/main.rs".into(),
             name: "main".into(),
             lines: (3, 8),
             signature: true,
         },
-        R::Diagnostics {
+        ContextRef::Diagnostics {
             path: Some("src/main.rs".into()),
         },
-        R::Command {
+        ContextRef::Command {
             terminal: TerminalId(2),
             line: 14,
         },
-        R::Terminal {
+        ContextRef::Terminal {
             terminal: TerminalId(2),
             first: 3,
             last: 8,
         },
-        R::Change {
+        ContextRef::Change {
             chat: TerminalId(3),
             path: "src/main.rs".into(),
             hunk: 7,
         },
-        R::Chat {
+        ContextRef::Chat {
             chat: TerminalId(3),
             first: 1,
             last: 2,
             requests: true,
         },
-        R::Board {
+        ContextRef::Board {
             board: "work".into(),
             entry: 5,
         },
-        R::Project { path: "src".into() },
-        R::Retained {
+        ContextRef::Project { path: "src".into() },
+        ContextRef::Retained {
             id: "a".repeat(64),
             grant: "b".repeat(64),
         },
-        R::Owned {
+        ContextRef::Owned {
             machine: MachineId([4; 16]),
-            source: Box::new(R::File {
+            source: Box::new(ContextRef::File {
                 path: "a".into(),
                 lines: None,
             }),
         },
     ];
-    let selection = S {
+    let selection = ContextSelection {
         source: refs[0].clone(),
-        mode: M::Contents,
+        mode: ContextMode::Contents,
         expected: Some("revision".into()),
     };
     let snapshot = ContextSnapshot {
@@ -5044,7 +5044,7 @@ fn context_samples() -> Vec<Sample> {
         source: refs[0].clone(),
         label: "Main source".into(),
         location: "file:///src/main.rs#L3-L8".into(),
-        mode: M::Contents,
+        mode: ContextMode::Contents,
         text: "fn main() {}".into(),
         bytes: 12,
         revision: "revision".into(),
@@ -5062,49 +5062,49 @@ fn context_samples() -> Vec<Sample> {
     let mut samples = refs
         .iter()
         .map(|source| {
-            request(A::Preview(S {
+            request(ContextAction::Preview(ContextSelection {
                 source: source.clone(),
                 ..selection.clone()
             }))
         })
         .collect::<Vec<_>>();
     for kind in [
-        K::All,
-        K::File,
-        K::Symbol,
-        K::Diagnostics,
-        K::Command,
-        K::Change,
-        K::Chat,
-        K::Board,
-        K::Project,
+        ContextKind::All,
+        ContextKind::File,
+        ContextKind::Symbol,
+        ContextKind::Diagnostics,
+        ContextKind::Command,
+        ContextKind::Change,
+        ContextKind::Chat,
+        ContextKind::Board,
+        ContextKind::Project,
     ] {
-        samples.push(request(A::Search {
+        samples.push(request(ContextAction::Search {
             kind,
             query: "auth".into(),
             offset: 100,
         }));
     }
-    samples.push(request(A::Read {
+    samples.push(request(ContextAction::Read {
         turn: 3,
         id: snapshot.id.clone(),
     }));
-    samples.push(request(A::Preview(S {
-        mode: M::Reference,
+    samples.push(request(ContextAction::Preview(ContextSelection {
+        mode: ContextMode::Reference,
         ..selection.clone()
     })));
-    samples.push(reply(P::Snapshot(snapshot.clone())));
-    samples.push(reply(P::Candidates {
+    samples.push(reply(ContextReply::Snapshot(snapshot.clone())));
+    samples.push(reply(ContextReply::Candidates {
         notice: "Bounded search".into(),
         items: vec![ContextCandidate {
-            kind: K::Symbol,
+            kind: ContextKind::Symbol,
             label: "main".into(),
             detail: "src/main.rs".into(),
             source: refs[1].clone(),
         }],
         more: true,
     }));
-    samples.push(reply(P::Draft {
+    samples.push(reply(ContextReply::Draft {
         text: "draft".into(),
         context: vec![selection.clone()],
     }));
