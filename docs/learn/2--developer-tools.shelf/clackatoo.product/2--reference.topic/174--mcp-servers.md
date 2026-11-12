@@ -143,7 +143,10 @@ The bundled Claude adapter uses strict MCP configuration. The bundled Codex
 adapter disables servers from its native configuration layers before adding
 Clackatoo's selection, and disables its app connector feature in managed-only
 sessions. Older unverified Claude/Codex adapters are refused in managed-only
-mode; install the current bundled adapter or explicitly allow native MCP.
+mode. Where clackatoo can install the bundled adapter, the chat offers it, with
+an Install button, and a chat already running an older one starts again on the
+bundled adapter once it's there; otherwise the chat says to let clackatoo run
+its own adapter or to allow native MCP.
 Other custom adapters receive the managed selection, but their native MCP
 suppression is not verified; the chat warns about this limitation. Native
 plugin controls remain a separate setting.

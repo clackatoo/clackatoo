@@ -231,6 +231,9 @@ pub(crate) struct Refused {
     /// Codex's adapter says (`thread_active_writer`): it's still there,
     /// so no new one is made in its place.
     pub(crate) in_use: bool,
+    /// The adapter can't keep the provider's own MCP servers out of the
+    /// session, and they're off: it was never asked for it.
+    pub(crate) mcp: bool,
 }
 
 /// How the agent answered a message.
@@ -1209,19 +1212,7 @@ impl Agent {
             r.pointer("/_meta/clackatoo/managedMcp")
                 .and_then(Value::as_bool)
                 == Some(true)
-                || matches!(
-                    (
-                        r.pointer("/agentInfo/name").and_then(Value::as_str),
-                        r.pointer("/agentInfo/version").and_then(Value::as_str)
-                    ),
-                    (
-                        Some("@agentclientprotocol/claude-agent-acp"),
-                        Some("0.98.0")
-                    ) | (
-                        Some("@agentclientprotocol/codex-acp"),
-                        Some("2.2.2+clackatoo.2")
-                    )
-                )
+                || pinned_mcp_control(r)
         }));
         self.can_close = result.as_ref().is_ok_and(|result| {
             result
@@ -1257,7 +1248,12 @@ impl Agent {
                     .and_then(Value::as_u64)
                     .and_then(|id| self.answered_request(id))
                 {
-                    self.answered(pending,Err(RpcError{code:-32600,message:"This adapter cannot disable provider-managed MCP servers. Install the current bundled adapter, or allow provider-managed MCP in Settings and upgrade the daemon.".into(),data:None}),incoming);
+                    let refused = RpcError {
+                        code: -32600,
+                        message: "This adapter cannot disable provider-managed MCP servers.".into(),
+                        data: Some(json!({ "reason": MCP_REFUSED })),
+                    };
+                    self.answered(pending, Err(refused), incoming);
                 }
                 continue;
             }
@@ -1293,6 +1289,7 @@ impl Agent {
             return;
         }
         if let Pending::Session { .. } | Pending::Probe = pending {
+            let uncontrolled = !self.managed_mcp_control();
             // A resumed session's ID is the one asked for, which the
             // answer leaves out: the chat keeps it.
             let result = result
@@ -1309,6 +1306,12 @@ impl Agent {
                     in_use: (error.data.as_ref())
                         .and_then(|data| data.get("reason"))
                         .is_some_and(|reason| reason == "thread_active_writer"),
+                    // Said by the daemon, of an adapter that can't: one
+                    // that can is never taken to, whatever it says.
+                    mcp: uncontrolled
+                        && (error.data.as_ref())
+                            .and_then(|data| data.get("reason"))
+                            .is_some_and(|reason| reason == MCP_REFUSED),
                     message: error.message,
                 });
             incoming.push(match pending {
@@ -2435,6 +2438,37 @@ fn forks_at_messages(result: &Value) -> bool {
             Some("2.2.2" | "2.2.2+clackatoo.1" | "2.2.2+clackatoo.2")
         )
     )
+}
+
+/// Why a session the daemon never asked for is refused, as the answer it
+/// makes up says: the adapter can't keep the provider's own MCP servers
+/// out, and they're off.
+const MCP_REFUSED: &str = "clackatoo_mcp_policy";
+
+/// Whether the adapter that answered `initialize` with `result` is one
+/// clackatoo pins whose sessions it can keep the provider's own MCP
+/// servers out of: Claude Code's at the version pinned, and Codex's as
+/// clackatoo patches it at the patch level pinned. Earlier patch levels
+/// lack that patch. Tied to the pins, so a new one is never locked out.
+fn pinned_mcp_control(result: &Value) -> bool {
+    let (Some(package), Some(version)) = (
+        result.pointer("/agentInfo/name").and_then(Value::as_str),
+        result.pointer("/agentInfo/version").and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    keeps_mcp_out(package, version)
+}
+
+/// Whether the adapter `package` at `version` is one pinned that keeps
+/// the provider's own MCP servers out (see [`pinned_mcp_control`]).
+pub(crate) fn keeps_mcp_out(package: &str, version: &str) -> bool {
+    ["claude", "codex"].into_iter().any(|name| {
+        crate::agents::known(name).is_some_and(|known| {
+            known.package().rsplit_once('@').map(|(package, _)| package) == Some(package)
+                && known.version == version
+        })
+    })
 }
 
 fn safe_steering(result: &Value) -> bool {

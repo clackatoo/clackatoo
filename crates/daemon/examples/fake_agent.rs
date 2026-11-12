@@ -153,7 +153,8 @@
 //! `--replay-gap MS`, between its pieces, going on with what else it's
 //! asked meanwhile. With `--notices-wait FILE`, an absolute path, it
 //! answers a notice from clackatoo, `echo:` and what it says, only once
-//! FILE is there, reading on meanwhile.
+//! FILE is there, reading on meanwhile. With `--no-managed-mcp`, it says
+//! it can't keep its own MCP servers out, as upstream's adapters can't.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -1012,7 +1013,7 @@ impl Fake {
                     },
                 },
                 "agentInfo": if std::env::args().any(|a| a == "--codex-steering") { json!({ "name": "@agentclientprotocol/codex-acp", "version": "2.2.2+clackatoo.1" }) } else if std::env::args().any(|a| a == "--steering") { json!({ "name": "@agentclientprotocol/claude-agent-acp", "version": "0.98.0" }) } else { json!({ "name": "fake-agent", "version": "0" }) },
-                "_meta": { "clackatoo":{"managedMcp":true}, "steering": { "supported": std::env::args().any(|a| a == "--steering" || a == "--codex-steering") } },
+                "_meta": { "clackatoo":{"managedMcp":!std::env::args().any(|a| a == "--no-managed-mcp")}, "steering": { "supported": std::env::args().any(|a| a == "--steering" || a == "--codex-steering") } },
                 "authMethods": [],
             }),
         );

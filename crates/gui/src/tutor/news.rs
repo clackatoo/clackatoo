@@ -1637,6 +1637,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Shared MCP servers in Settings, with private credentials and browser sign-in",
     },
+    News {
+        id: "adapter-patch-upgrades",
+        date: "2026-11-12",
+        lesson: "agents",
+        what: "Codex's adapter updates from the one installed, offline; a chat offers an install rather than fail on MCP",
+    },
 ];
 
 impl News {

@@ -5228,9 +5228,19 @@ fn script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 }
 
+/// With Codex's own MCP servers allowed: upstream's adapter, as `PATH`
+/// and `npx` give, can't keep them out, so it's offered to install
+/// otherwise (see `server/chats.rs`).
 #[test]
 fn a_known_agent_on_path_or_through_npx_runs_and_suggests_its_install_once() {
-    let daemon = installing_agents();
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        script(&bin.join("npm"), "exit 1");
+        config.agents.dir = Some(dir.join("agents"));
+        config.agents.path = Some(bin.into());
+        config.agents.configured = configured("daemon.mcp.codex = \"allow\"");
+    });
     let bin = daemon.dir.path().join("bin");
     let fake = fake_agent();
     // npx, as the old builds ran agents: it's asked for the version pinned.

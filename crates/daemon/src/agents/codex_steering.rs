@@ -23,8 +23,20 @@ pub(super) fn program(dir: &Path) -> PathBuf {
     dir.join(DIST).join("clackatoo.js")
 }
 
+/// The bundle npm installed, which the backport is made from.
+pub(super) fn original(dir: &Path) -> PathBuf {
+    dir.join(DIST).join("index.js")
+}
+
+/// What [`install`] writes: the prepared program, and where it's staged.
+pub(super) fn outputs(dir: &Path) -> [PathBuf; 2] {
+    let program = program(dir);
+    let staged = program.with_extension("js.new");
+    [program, staged]
+}
+
 pub(super) fn install(dir: &Path) -> io::Result<()> {
-    let original = fs::read_to_string(dir.join(DIST).join("index.js"))?;
+    let original = fs::read_to_string(original(dir))?;
     let digest = ring::digest::digest(&ring::digest::SHA256, original.as_bytes());
     let mut hex = String::with_capacity(64);
     for byte in digest.as_ref() {
@@ -36,8 +48,7 @@ pub(super) fn install(dir: &Path) -> io::Result<()> {
         ));
     }
     let prepared = patch(&original)?;
-    let destination = program(dir);
-    let staged = destination.with_extension("js.new");
+    let [destination, staged] = outputs(dir);
     fs::write(&staged, prepared)?;
     fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
     fs::rename(staged, destination)

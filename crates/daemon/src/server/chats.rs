@@ -80,6 +80,12 @@ pub(super) struct Agents {
     installing: HashMap<String, Vec<TerminalId>>,
     /// The agents a chat has suggested installing, to suggest it once.
     suggested: HashSet<String>,
+    /// Those of [`installing`](Self::installing) being brought up from an
+    /// earlier patch level, rather than installed with npm.
+    upgrading: HashSet<String>,
+    /// The agents that couldn't be brought up from an earlier patch
+    /// level: they're offered to install with npm instead.
+    unupgradable: HashSet<String>,
     /// Installs that have ended, put here by their threads.
     ended: Arc<Mutex<Vec<Ended>>>,
     /// Each agent's settings, by its name, as its sessions last gave
@@ -326,7 +332,9 @@ impl Daemon {
             Start::Ready { command, .. } => self
                 .start_agent(spec, command)
                 .map_err(|err| err.to_string()),
-            Start::Install(known) => Err(format!("{} isn't installed", known.title)),
+            Start::Upgrade(known) | Start::Install(known) => {
+                Err(format!("{} isn't installed", known.title))
+            }
             Start::Unavailable(why) => Err(why),
         }
     }
@@ -671,10 +679,7 @@ impl Daemon {
                 .get(&agent)
                 .is_some_and(|slot| slot.agent.started() && !slot.agent.managed_mcp_control())
         {
-            if let Some(chat) = self.chat(id) {
-                chat.failed_to_connect("This adapter cannot disable provider-managed MCP servers. Install Clackatoo's current bundled adapter, or allow provider-managed MCP in Settings and upgrade the daemon.");
-            }
-            self.collect_damage(id);
+            self.mcp_refused(id, agent, name);
             return false;
         }
         if !self.config.agents.configured.native_mcp(name)
@@ -686,6 +691,61 @@ impl Daemon {
         true
     }
 
+    /// Agent `agent`, called `name`, can't keep the provider's own MCP
+    /// servers out of the session of the chat in `id`, and they're off: an
+    /// adapter upstream's, as `npx` or `PATH` give, or an earlier patch
+    /// level's, as one kept through an upgrade runs. If what clackatoo would
+    /// start now differs, as it's been installed since, or can be, it's
+    /// started in its place, or offered to install, or brought up to date;
+    /// with every chat that waits on it asking again. Else the chat hears
+    /// what to change.
+    fn mcp_refused(&mut self, id: TerminalId, agent: AgentId, name: &str) {
+        let running = (self.agents.running.get(&agent)).map(|slot| slot.command.clone());
+        let start = (self.config.agents.find(name)).map(|spec| self.start_for(&spec));
+        let again = match start {
+            Ok(Start::Ready { command, suggest }) if running.as_ref() == Some(&command) => suggest,
+            Ok(Start::Ready { .. } | Start::Upgrade(_) | Start::Install(_)) => {
+                log::info!(
+                    "chat {id}: starting {name} again, from an adapter that can keep its MCP servers out"
+                );
+                if !self.restart_agent(agent, name).contains(&id) {
+                    self.connect(id);
+                }
+                self.collect_damage(id);
+                return;
+            }
+            Ok(Start::Unavailable(_)) | Err(_) => None,
+        };
+        log::info!("chat {id}: {name} can't keep its own MCP servers out");
+        let title = self.agent_spec(name).title;
+        let dir = self.config.agents.dir.clone().unwrap_or_default();
+        let Some(chat) = self.chat(id) else { return };
+        match again {
+            // Run from PATH, at another version than the one pinned.
+            Some(known) => chat.offer_install(&format!(
+                "{title}'s adapter here can't keep its own MCP servers out of the chat, as \
+                 Settings asks. Install the one clackatoo runs ({}, about {}, in {})? Or allow \
+                 {title}'s provider-managed MCP servers in Settings, then restart the daemon.",
+                known.package(),
+                known.size,
+                agents::install_dir(&dir, known).display()
+            )),
+            None => chat.failed_to_connect(&format!(
+                "this adapter can't keep its own MCP servers out of the chat, as Settings asks. \
+                 Let clackatoo run its own, which needs npm and no command for {name} in \
+                 daemon/init.lua, or allow {title}'s provider-managed MCP servers in Settings, \
+                 then restart the daemon."
+            )),
+        }
+        self.collect_damage(id);
+    }
+
+    /// What it takes to start `spec`, as the config says, but never
+    /// bringing up an earlier patch level again once that's failed.
+    fn start_for(&self, spec: &AgentSpec) -> Start {
+        (self.config.agents).starting(spec, !self.agents.unupgradable.contains(&spec.name))
+    }
+
     fn start_agent_for(&mut self, id: TerminalId, name: &str) -> Option<AgentId> {
         let spec = match self.config.agents.find(name) {
             Ok(spec) => spec,
@@ -694,7 +754,7 @@ impl Daemon {
                 return None;
             }
         };
-        match self.config.agents.start(&spec) {
+        match self.start_for(&spec) {
             Start::Ready { command, suggest } => match self.start_agent(spec, command) {
                 Ok(agent) => {
                     if let Some(known) = suggest
@@ -718,6 +778,17 @@ impl Daemon {
                     None
                 }
             },
+            // The user agreed to install it once: it's brought up to date
+            // without asking again, and the chat waits for that.
+            Start::Upgrade(known) => {
+                self.chat(id)?.installing();
+                if let Some(waiting) = self.agents.installing.get_mut(name) {
+                    waiting.push(id);
+                } else {
+                    self.spawn_install(name.to_owned(), known, vec![id], true);
+                }
+                None
+            }
             Start::Install(known) => {
                 if let Some(waiting) = self.agents.installing.get_mut(name) {
                     // Another chat asked for it already.
@@ -1709,6 +1780,9 @@ impl Daemon {
                 self.note_branches(terminal);
                 self.keep_soon();
             }
+            // The agent can't keep its own MCP servers out: the session
+            // the chat had is kept, for one that can.
+            Err(refused) if refused.mcp => self.mcp_refused(terminal, agent, name),
             // The session is open in another of the agent's clients: it's
             // still there, so no new one is made in its place.
             Err(refused) if refused.in_use => {
@@ -2199,7 +2273,7 @@ impl Daemon {
             let agent = if let Some(agent) = self.agents.named(&name) {
                 agent
             } else {
-                let Start::Ready { command, .. } = self.config.agents.start(&spec) else {
+                let Start::Ready { command, .. } = self.start_for(&spec) else {
                     continue;
                 };
                 match self.start_agent(spec, command) {
@@ -2429,16 +2503,21 @@ impl Daemon {
             return;
         }
         log::info!("chat {id}: starting {name} again, as it's slow to open a session");
+        self.restart_agent(agent, &name);
+    }
+
+    /// Stops agent `agent`, called `name`, firmly, for a new one to start
+    /// in its place: each chat with it hears, and those that must ask for
+    /// a session now do, of the new process. Returns those.
+    fn restart_agent(&mut self, agent: AgentId, name: &str) -> Vec<TerminalId> {
         self.kill_agent(agent);
         // Those waiting for it to go ask the new one below, as those
         // waiting for a session from it do.
-        self.take_held(&name);
+        self.take_held(name);
         // Asked for its models, it's asked again when the menu next opens.
-        if self.agents.learning.remove(&name).is_some() {
+        if self.agents.learning.remove(name).is_some() {
             self.offer_providers(None);
         }
-        // Each chat with it hears, and those that must ask for a session
-        // now do, of the new process.
         let mut chats = Vec::new();
         for (&chat_id, slot) in &mut self.terminals {
             if let Some(chat) = slot.terminal.chat()
@@ -2447,13 +2526,16 @@ impl Daemon {
                 chats.push((chat_id, chat.agent_restarted()));
             }
         }
+        let mut asked = Vec::new();
         for (chat, ask) in chats {
             self.agents.opening.remove(&chat);
             if ask {
                 self.connect(chat);
+                asked.push(chat);
             }
             self.collect_damage(chat);
         }
+        asked
     }
 
     /// The session the chat `terminal` let go with the agent `name` has
@@ -2709,11 +2791,37 @@ impl Daemon {
         else {
             return self.connect(id);
         };
-        let Some(dir) = self.config.agents.dir.clone() else {
+        if self.config.agents.dir.is_none() {
             return self.connect(id);
+        }
+        self.spawn_install(name, known, vec![id], false);
+    }
+
+    /// Installs `known`, called `name`, for the chats in `waiting`, on a
+    /// thread of its own, as it takes a while: with npm, or, if `upgrade`,
+    /// from an earlier patch level (see [`agents::upgrade`]).
+    fn spawn_install(
+        &mut self,
+        name: String,
+        known: &'static agents::Known,
+        waiting: Vec<TerminalId>,
+        upgrade: bool,
+    ) {
+        let Some(dir) = self.config.agents.dir.clone() else {
+            return;
         };
-        log::info!("installing {name}");
-        self.agents.installing.insert(name.clone(), vec![id]);
+        log::info!(
+            "installing {name}{}",
+            if upgrade {
+                " from an earlier patch level"
+            } else {
+                ""
+            }
+        );
+        self.agents.installing.insert(name.clone(), waiting);
+        if upgrade {
+            self.agents.upgrading.insert(name.clone());
+        }
         // What running agents were started from stays, as does what
         // the daemon's config names.
         let keep: Vec<PathBuf> = (self.agents.running.values())
@@ -2726,7 +2834,11 @@ impl Daemon {
         let spawned = std::thread::Builder::new()
             .name("agent install".into())
             .spawn(move || {
-                let outcome = agents::install(&dir, known, &keep);
+                let outcome = if upgrade {
+                    agents::upgrade(&dir, known, &keep)
+                } else {
+                    agents::install(&dir, known, &keep)
+                };
                 (ended.lock().unwrap_or_else(PoisonError::into_inner)).push((name, outcome));
                 if let Err(err) = waker.wake() {
                     log::warn!("waking the event loop for an install failed: {err}");
@@ -2756,6 +2868,19 @@ impl Daemon {
         for (name, outcome) in ended {
             log::info!("installing {name}: {outcome:?}");
             let waiting = self.agents.installing.remove(&name).unwrap_or_default();
+            // Not brought up to date: it's offered to install as any other,
+            // or run as it can be.
+            if self.agents.upgrading.remove(&name)
+                && let Err(why) = &outcome
+            {
+                log::warn!("{why}");
+                self.agents.unupgradable.insert(name.clone());
+                for id in waiting {
+                    self.connect(id);
+                    self.collect_damage(id);
+                }
+                continue;
+            }
             // Chats offered it meanwhile needn't be asked again.
             let offered: Vec<TerminalId> = (self.terminals.iter_mut())
                 .filter_map(|(&id, slot)| {
@@ -2898,6 +3023,7 @@ mod tests {
     use super::*;
     use crate::server::agent_files::tests::daemon_with_chat;
     use crate::server::stopping::tests::example;
+    use clackatoo_protocol::ChatState;
 
     /// A chat going on with a session waits for what was left of its
     /// agent's last process to go, which is ended firmly, before a new one
@@ -3117,6 +3243,245 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(again > 0);
+        daemon.stop_agents(&[]);
+    }
+
+    /// A daemon in `dir`, as [`daemon_with_chat`] makes, installing known
+    /// agents in its `agents`, and finding programs only in its `bin`,
+    /// with a Codex chat in it that has a message to send. Returns it,
+    /// and that chat.
+    fn codex_daemon(dir: &Path) -> (Daemon, TerminalId) {
+        let (mut daemon, _) = daemon_with_chat(dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        daemon.config.agents.dir = Some(dir.join("agents"));
+        daemon.config.agents.path = Some(dir.join("bin").into());
+        let id = TerminalId(2);
+        let spec = daemon.config.agents.find("codex").unwrap();
+        let mut chat = HostedChat::new(
+            id,
+            clackatoo_protocol::Size::new(40, 10).unwrap(),
+            dir.display().to_string(),
+            &spec,
+            clackatoo_protocol::AgentTools::Ask,
+            true,
+            false,
+        );
+        chat.act(clackatoo_protocol::ChatAction::Send("hi".into()));
+        daemon.add_chat(chat);
+        (daemon, id)
+    }
+
+    /// Writes a shell script that does `body` at `path`, ready to run.
+    fn script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Runs the fake agent with `args`, as a script does.
+    fn fake(args: &str) -> String {
+        format!("exec {} {args}", example("fake_agent").display())
+    }
+
+    /// Where Codex is installed in `dir`'s agents, at the patch level
+    /// pinned.
+    fn codex_program(dir: &Path) -> PathBuf {
+        let codex = agents::known("codex").unwrap();
+        codex.installed_program(&agents::install_dir(&dir.join("agents"), codex))
+    }
+
+    /// Does what the daemon's loop does with agents and installs until
+    /// `done`, for ten seconds at most.
+    fn run_until(daemon: &mut Daemon, done: impl Fn(&mut Daemon) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(daemon) {
+            daemon.take_skills();
+            daemon.take_agent_installs();
+            let agents: Vec<_> = daemon.agents.running.keys().copied().collect();
+            for agent in agents {
+                daemon.flush_agent(agent);
+                daemon.read_agent(agent, Reading::Look);
+                daemon.read_agent_errors(agent);
+            }
+            daemon.read_agents_unread();
+            if Instant::now() > deadline {
+                let states: Vec<_> = (daemon.terminals.iter_mut())
+                    .filter_map(|(id, slot)| {
+                        Some((*id, slot.terminal.chat()?.node().state.clone()))
+                    })
+                    .collect();
+                let started: Vec<_> = (daemon.agents.running.values())
+                    .map(|slot| (slot.command.clone(), slot.agent.started()))
+                    .collect();
+                panic!("it never happened: {states:?} {started:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Starts upstream's Codex adapter, as `npx` ran it, or an earlier
+    /// patch level, with `args`, which can't keep its own MCP servers out,
+    /// and waits for it to start.
+    fn start_stock_codex(daemon: &mut Daemon, args: &str) -> AgentId {
+        let spec = daemon.config.agents.find("codex").unwrap();
+        let mut command: Vec<OsString> = vec![example("fake_agent").into()];
+        command.extend(args.split(' ').map(OsString::from));
+        let agent = daemon.start_agent(spec, command).unwrap();
+        run_until(daemon, |daemon| {
+            daemon.agents.running[&agent].agent.started()
+        });
+        assert!(!daemon.agents.running[&agent].agent.managed_mcp_control());
+        agent
+    }
+
+    /// What the chat in `id` runs Codex from, once its session is open.
+    fn connected_from(daemon: &mut Daemon, id: TerminalId) -> OsString {
+        run_until(daemon, |daemon| daemon.chat(id).unwrap().is_connected());
+        let agent = daemon.agents.named("codex").unwrap();
+        daemon.agents.running[&agent].command[0].clone()
+    }
+
+    /// Jack's case: Codex ran through `npx`, as upstream's adapter, which
+    /// can't keep its own MCP servers out; installed since, a chat asking
+    /// for a session gets one from a new agent run from the install, not
+    /// a failure from the old one.
+    #[test]
+    fn upstreams_adapter_still_running_gives_way_to_the_one_installed_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = codex_daemon(dir.path());
+        let stock = start_stock_codex(&mut daemon, "--codex --no-managed-mcp");
+        script(&codex_program(dir.path()), &fake("--codex"));
+        daemon.connect(id);
+        assert_eq!(
+            connected_from(&mut daemon, id),
+            codex_program(dir.path()).into_os_string()
+        );
+        assert!(!daemon.agents.running.contains_key(&stock));
+        daemon.stop_agents(&[]);
+    }
+
+    /// An agent carried on through the daemon's upgrade from a build that
+    /// let it run, here an earlier patch level of Codex's adapter, which
+    /// can't keep its own MCP servers out, isn't taken over: the next
+    /// session comes from the adapter as this build has it.
+    #[test]
+    fn an_earlier_patch_level_kept_through_an_upgrade_isnt_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = codex_daemon(dir.path());
+        let kept = start_stock_codex(&mut daemon, "--codex-steering --no-managed-mcp");
+        let mut fds = crate::handover::Fds::default();
+        let mut live = daemon.hand_over_agents(&[kept], &[], &mut fds);
+        assert_eq!(live.agents.len(), 1);
+        drop(daemon);
+        let next = dir.path().join("next");
+        std::fs::create_dir_all(&next).unwrap();
+        let (mut next_daemon, id) = codex_daemon(&next);
+        assert!(next_daemon.resume_agents(&mut live, &mut fds).is_empty());
+        assert!(next_daemon.agents.running.is_empty());
+        script(&codex_program(&next), &fake("--codex"));
+        next_daemon.connect(id);
+        assert_eq!(
+            connected_from(&mut next_daemon, id),
+            codex_program(&next).into_os_string()
+        );
+        next_daemon.stop_agents(&[]);
+    }
+
+    /// An earlier patch level installed is brought up to the one pinned
+    /// as the chat asks, with no npm there to fetch anything, the chat
+    /// waiting meanwhile; then its session opens.
+    #[test]
+    fn an_earlier_patch_level_is_brought_up_and_the_chat_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = codex_daemon(dir.path());
+        let agents_dir = dir.path().join("agents");
+        let earlier = agents_dir.join("codex-2.2.2+clackatoo.1");
+        script(
+            &earlier.join("codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js"),
+            "exit 1",
+        );
+        script(
+            &earlier
+                .join("codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/clackatoo.js"),
+            &fake("--codex-steering --no-managed-mcp"),
+        );
+        crate::agents::tests::prepare_in(&agents_dir, format!("#!/bin/sh\n{}\n", fake("--codex")));
+        daemon.connect(id);
+        assert!(daemon.agents.installing.contains_key("codex"));
+        assert!(daemon.agents.running.is_empty(), "it waits");
+        assert_eq!(
+            connected_from(&mut daemon, id),
+            codex_program(dir.path()).into_os_string()
+        );
+        assert!(!dir.path().join("bin/npm").exists());
+        daemon.stop_agents(&[]);
+    }
+
+    /// An earlier patch level whose bundle isn't the one pinned isn't
+    /// brought up: the chat is offered to install Codex, as any chat with
+    /// an agent not installed is, and isn't brought up again.
+    #[test]
+    fn an_earlier_patch_level_that_fails_its_check_is_offered_to_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = codex_daemon(dir.path());
+        script(&dir.path().join("bin/npm"), "exit 1");
+        let earlier = dir.path().join("agents/codex-2.2.2+clackatoo.1");
+        script(
+            &earlier.join("codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js"),
+            "changed",
+        );
+        daemon.connect(id);
+        run_until(&mut daemon, |daemon| {
+            daemon.chat(id).unwrap().offering_install()
+        });
+        assert!(daemon.agents.unupgradable.contains("codex"));
+        assert!(daemon.agents.installing.is_empty());
+        assert!(daemon.agents.running.is_empty());
+        assert!(!codex_program(dir.path()).exists());
+    }
+
+    /// Codex through `npx` alone, which runs upstream's adapter, can't keep
+    /// its own MCP servers out: the chat is offered the install, which can,
+    /// rather than failing once the adapter has started.
+    #[test]
+    fn codex_through_npx_alone_is_offered_to_install_not_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = codex_daemon(dir.path());
+        script(&dir.path().join("bin/npm"), "exit 1");
+        script(
+            &dir.path().join("bin/npx"),
+            &fake("--codex --no-managed-mcp"),
+        );
+        daemon.connect(id);
+        let chat = daemon.chat(id).unwrap();
+        assert!(chat.offering_install());
+        assert!(!matches!(chat.node().state, ChatState::Failed(_)));
+        assert!(daemon.agents.running.is_empty());
+    }
+
+    /// Without npm, nothing can be offered: the adapter that can't keep its
+    /// own MCP servers out runs, and the chat hears what to change.
+    #[test]
+    fn codex_that_cant_be_installed_says_what_to_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = codex_daemon(dir.path());
+        script(
+            &dir.path().join("bin/npx"),
+            &fake("--codex --no-managed-mcp"),
+        );
+        daemon.connect(id);
+        run_until(&mut daemon, |daemon| {
+            matches!(daemon.chat(id).unwrap().node().state, ChatState::Failed(_))
+        });
+        let ChatState::Failed(why) = &daemon.chat(id).unwrap().node().state else {
+            unreachable!()
+        };
+        assert!(
+            why.contains("provider-managed MCP servers in Settings"),
+            "{why}"
+        );
+        assert!(why.contains("needs npm"), "{why}");
         daemon.stop_agents(&[]);
     }
 }

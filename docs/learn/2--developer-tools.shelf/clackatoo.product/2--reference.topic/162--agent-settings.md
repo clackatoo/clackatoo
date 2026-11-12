@@ -222,7 +222,14 @@ work offline: Claude Code's takes about 620 MB and Codex's about 450 MB, each
 with its own copy of the agent, installed from a lock file so nothing it
 depends on can change. With none of the three, the chat asks to install it
 before it can start. A new build that moves to a newer adapter asks again, and
-installing it removes the older ones nothing is running from. An agent, and
+installing it removes the older ones nothing is running from. A build that
+only patches Codex's adapter anew, as `2.2.2+clackatoo.2` does
+`2.2.2+clackatoo.1`, asks nothing: the chat says it's installing while the
+daemon prepares the new one from the one installed, fetching nothing, and
+offers the usual install only if that one isn't the bundle pinned. With
+provider-managed MCP servers off, as they are by default, Codex never runs from
+`PATH` or `npx`, whose adapter can't keep them out: the chat offers to install
+it instead. An agent, and
 every command it runs, gets only the absolute directories of the daemon's
 `PATH`: an empty or relative one, such as `.`, `bin` or `node_modules/.bin`,
 or a `~/bin` written literally, would find a program in whatever folder it

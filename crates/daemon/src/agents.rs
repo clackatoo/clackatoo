@@ -8,10 +8,17 @@
 //!
 //! 1. Where clackatoo installed it: `agents/<name>-<version>` beside the
 //!    language packs, which `npm ci` fills from the lockfile kept here
-//!    for that version, so nothing it depends on can drift.
+//!    for that version, so nothing it depends on can drift. An adapter
+//!    clackatoo patches, at a new patch level of the same upstream
+//!    version (`+clackatoo.N`), is prepared from the earlier one there,
+//!    unasked, as its install was agreed to (see [`upgrade`]).
 //! 2. On `PATH`, as `claude-agent-acp` or `codex-acp`.
 //! 3. Through `npx`, at the same version, as clackatoo ran them before it
 //!    installed them, so chats started then carry on.
+//!
+//! An adapter clackatoo patches isn't run from 2 or 3 while the
+//! provider's own MCP servers are kept out, as upstream's can't: it's
+//! offered to install instead, if it can be.
 //!
 //! Run from 2 or 3, a chat offers once to install it, without waiting
 //! for the answer: run from where it's installed, it starts in 140 ms
@@ -285,6 +292,10 @@ pub(crate) enum Start {
         command: Vec<OsString>,
         suggest: Option<&'static Known>,
     },
+    /// An earlier patch level of its adapter is installed: it's prepared
+    /// again at this one, from that, fetching nothing, as the user agreed
+    /// to install it already (see [`upgrade`]).
+    Upgrade(&'static Known),
     /// Its adapter needs installing first, which clackatoo can do.
     Install(&'static Known),
     /// It can't be started: why, and what to do about it.
@@ -379,9 +390,46 @@ impl Configured {
 impl Known {
     /// The prepared entry point. Codex's backport lives beside the original
     /// bundle; a partial install cannot accidentally enable native steering.
-    fn installed_program(&self, dir: &Path) -> PathBuf {
+    pub(crate) fn installed_program(&self, dir: &Path) -> PathBuf {
         if self.name == "codex" {
             codex_steering::program(dir)
+        } else {
+            self.adapter.installed_program(dir)
+        }
+    }
+
+    /// Whether clackatoo patches its adapter as it installs it, its
+    /// version saying how (`+clackatoo.N`): upstream's, as on `PATH` or
+    /// through `npx`, lacks what that adds.
+    pub(crate) fn patched(&self) -> bool {
+        self.version.contains("+clackatoo.")
+    }
+
+    /// Prepares the adapter npm installed in `dir`, checking what it
+    /// patches is what was pinned; for most, there's nothing to.
+    fn prepare(&self, dir: &Path) -> std::io::Result<()> {
+        if self.name == "codex" {
+            codex_steering::install(dir)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// What [`prepare`](Self::prepare) writes in `dir`, which an upgrade
+    /// writes afresh rather than taking from an earlier patch level.
+    fn prepared(&self, dir: &Path) -> Vec<PathBuf> {
+        if self.name == "codex" {
+            codex_steering::outputs(dir).to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// What [`prepare`](Self::prepare) reads in `dir`: npm's install of
+    /// it, as an earlier patch level has it too.
+    fn original(&self, dir: &Path) -> PathBuf {
+        if self.name == "codex" {
+            codex_steering::original(dir)
         } else {
             self.adapter.installed_program(dir)
         }
@@ -504,7 +552,7 @@ impl AgentConfig {
         let spec = self.find(name)?;
         match self.start(&spec) {
             Start::Ready { command, .. } => Ok(command),
-            Start::Install(known) => Err(format!(
+            Start::Upgrade(known) | Start::Install(known) => Err(format!(
                 "{} isn't installed: open a chat with it to install it",
                 known.package()
             )),
@@ -513,8 +561,16 @@ impl AgentConfig {
     }
 
     /// What it takes to start `spec`: for a known agent, the first of
-    /// its install, its adapter on `PATH`, and `npx` that's there.
+    /// its install, an earlier patch level of it to upgrade, its adapter
+    /// on `PATH`, and `npx` that's there.
     pub(crate) fn start(&self, spec: &AgentSpec) -> Start {
+        self.starting(spec, true)
+    }
+
+    /// What it takes to start `spec`, as [`start`](Self::start) says, but
+    /// never upgrading an earlier patch level if `upgrades` is `false`: one
+    /// that couldn't be.
+    pub(crate) fn starting(&self, spec: &AgentSpec, upgrades: bool) -> Start {
         let known = match &spec.launch {
             Launch::Command(command) if command.is_empty() => {
                 return Start::Unavailable(format!("{} has no command", spec.title));
@@ -539,6 +595,12 @@ impl AgentConfig {
                 suggest: None,
             };
         }
+        if upgrades
+            && let Some(dir) = self.dir.as_deref()
+            && earlier_patch(dir, known).is_some()
+        {
+            return Start::Upgrade(known);
+        }
         let npm = !known.package().is_empty();
         let installable = self.dir.is_some()
             && if npm {
@@ -547,6 +609,12 @@ impl AgentConfig {
                 known.adapter.installable()
             };
         let suggest = installable.then_some(known);
+        // An adapter clackatoo patches is upstream's on `PATH` or through
+        // `npx`, which can't keep the provider's own MCP servers out: with
+        // those off, it's offered to install, rather than run to fail.
+        if installable && known.patched() && !self.configured.native_mcp(known.name) {
+            return Start::Install(known);
+        }
         if let Some(program) = self.program(known.adapter.program) {
             return Start::Ready {
                 command: std::iter::once(program.into_os_string())
@@ -836,10 +904,130 @@ pub(crate) fn install(dir: &Path, known: &Known, keep: &[PathBuf]) -> Result<(),
             .adapter
             .install(&installed)
             .map_err(|err| failed(&err))?;
-        if known.name == "codex" {
-            codex_steering::install(&installed).map_err(|err| failed(&err))?;
+        known.prepare(&installed).map_err(|err| failed(&err))?;
+    }
+    remove_others(dir, known, &installed, keep);
+    Ok(())
+}
+
+/// The directory in `dir` of the latest of `known`'s earlier patch levels
+/// at the same upstream version, as `codex-2.2.2+clackatoo.1` is of
+/// `2.2.2+clackatoo.2`, with npm's install of it whole, if there is one:
+/// a build patching the adapter anew prepares it from that (see
+/// [`upgrade`]).
+pub(crate) fn earlier_patch(dir: &Path, known: &Known) -> Option<PathBuf> {
+    let (upstream, level) = known.version.split_once("+clackatoo.")?;
+    let level: u32 = level.parse().ok()?;
+    let prefix = format!("{}-{upstream}+clackatoo.", known.name);
+    (fs::read_dir(dir).into_iter().flatten().flatten())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let earlier: u32 = name.to_str()?.strip_prefix(&prefix)?.parse().ok()?;
+            (earlier < level).then(|| (earlier, entry.path()))
+        })
+        .filter(|(_, path)| known.original(path).is_file())
+        .max_by_key(|&(earlier, _)| earlier)
+        .map(|(_, path)| path)
+}
+
+/// Prepares `known`'s adapter at its patch level from an earlier one in
+/// `dir` (see [`earlier_patch`]), with nothing fetched: npm's install of
+/// it is linked into a directory beside it, the patch made there, checking
+/// what it patches is what was pinned, and that put in place at once.
+/// Then removes other versions as [`install`] does, keeping those in
+/// `keep` and those running. Takes a while: it's for a thread of its own.
+///
+/// # Errors
+///
+/// If there's no earlier patch level, or it can't be prepared, as when
+/// it isn't what was pinned: it's then installed as any other.
+pub(crate) fn upgrade(dir: &Path, known: &Known, keep: &[PathBuf]) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(program) = tests::prepared_in(dir) {
+        return upgrade_with(dir, known, keep, |dir| {
+            let path = known.installed_program(dir);
+            fs::write(&path, program)?;
+            fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        });
+    }
+    upgrade_with(dir, known, keep, |dir| known.prepare(dir))
+}
+
+/// As [`upgrade`] does, preparing it with `prepare`.
+fn upgrade_with(
+    dir: &Path,
+    known: &Known,
+    keep: &[PathBuf],
+    prepare: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let failed = |err: &dyn std::fmt::Display| {
+        format!(
+            "{}'s adapter couldn't be brought up to date: {err}",
+            known.title
+        )
+    };
+    let _locked = clackatoo_syntax::servers::lock(dir).map_err(|err| failed(&err))?;
+    let installed = install_dir(dir, known);
+    if known.installed_program(&installed).is_file() {
+        log::info!("{} was installed meanwhile", known.title);
+    } else {
+        let from = earlier_patch(dir, known)
+            .ok_or_else(|| failed(&"no earlier version of it is installed"))?;
+        log::info!("preparing {} from {}", installed.display(), from.display());
+        // Left by an upgrade cut off before it finished: none is under
+        // way, as this one holds the lock.
+        let staged = dir.join(format!(".{}-{}", known.name, known.version));
+        remove_all(&staged).map_err(|err| failed(&err))?;
+        let skip = known.prepared(&from);
+        let prepared = link_tree(&from, &staged, &skip).and_then(|()| prepare(&staged));
+        if let Err(err) = prepared {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(failed(&err));
+        }
+        // What an install cut off left there, with no program.
+        remove_all(&installed).map_err(|err| failed(&err))?;
+        fs::rename(&staged, &installed).map_err(|err| failed(&err))?;
+    }
+    remove_others(dir, known, &installed, keep);
+    Ok(())
+}
+
+/// Removes `path`, and all in it, if it's there.
+fn remove_all(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// Makes `to` as `from` is, but for the files in `skip`: each file a hard
+/// link to `from`'s, or a copy where it can't be one, and each symbolic
+/// link the same. Nothing writes an installed adapter's files in place,
+/// so the two share them safely; anything else, as a FIFO, is left out.
+fn link_tree(from: &Path, to: &Path, skip: &[PathBuf]) -> std::io::Result<()> {
+    fs::create_dir(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        if skip.contains(&source) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            link_tree(&source, &target, skip)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
+        } else if kind.is_file() && fs::hard_link(&source, &target).is_err() {
+            fs::copy(&source, &target)?;
         }
     }
+    fs::set_permissions(to, fs::metadata(from)?.permissions())
+}
+
+/// Removes `known`'s other versions in `dir` than `installed`: all but
+/// those a process, of this daemon or another, runs from, and those in
+/// `keep`, which the config names.
+fn remove_others(dir: &Path, known: &Known, installed: &Path, keep: &[PathBuf]) {
     let prefix = format!("{}-", known.name);
     let others = (fs::read_dir(dir).into_iter().flatten().flatten())
         .filter(|other| {
@@ -852,7 +1040,7 @@ pub(crate) fn install(dir: &Path, known: &Known, keep: &[PathBuf]) -> Result<(),
         .filter(|path| *path != installed && !keep.iter().any(|kept| kept.starts_with(path)))
         .collect::<Vec<_>>();
     if others.is_empty() {
-        return Ok(());
+        return;
     }
     let running = running_from();
     for path in others {
@@ -865,7 +1053,6 @@ pub(crate) fn install(dir: &Path, known: &Known, keep: &[PathBuf]) -> Result<(),
             log::warn!("{} couldn't be removed: {err}", path.display());
         }
     }
-    Ok(())
 }
 
 /// What every process this user can see runs: its executable, and its
@@ -900,8 +1087,28 @@ fn is_program(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The agents directories whose upgrades tests prepare themselves,
+    /// with the program each writes: a made-up bundle never passes the
+    /// pinned one's check.
+    static PREPARED: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Has upgrades in `dir` write `program` as the prepared adapter,
+    /// rather than patch the bundle, for this test.
+    pub(crate) fn prepare_in(dir: &Path, program: String) {
+        PREPARED.lock().unwrap().push((dir.to_owned(), program));
+    }
+
+    pub(super) fn prepared_in(dir: &Path) -> Option<String> {
+        let prepared = PREPARED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (prepared.iter())
+            .find(|(each, _)| each == dir)
+            .map(|(_, program)| program.clone())
+    }
 
     /// The agents `text`, the daemon's config, adds, or what's wrong with
     /// it, if anything is.
@@ -1159,9 +1366,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (agents, bin) = (dir.path().join("agents"), dir.path().join("bin"));
         fs::create_dir_all(&bin).unwrap();
+        // With its own MCP servers allowed, which upstream's adapter
+        // can't keep out (see `upstreams_codex_is_offered_to_install_when_mcp_is_kept_out`).
         let config = AgentConfig {
             dir: Some(agents.clone()),
             path: Some(bin.clone().into()),
+            configured: configured("daemon.mcp.codex = \"allow\""),
             ..AgentConfig::default()
         };
         let codex = known("codex").unwrap();
@@ -1341,5 +1551,220 @@ url = "https://mcp.sentry.dev/mcp"
             "It may be waiting on something it starts with each session, such as an MCP server \
              that needs a login."
         );
+    }
+
+    /// Codex's adapter on `PATH` or through `npx` is upstream's, which
+    /// can't keep its own MCP servers out: with those off, as they are
+    /// unless the config allows them, it's offered to install rather than
+    /// run to fail. Claude Code's through `npx` is at the version pinned,
+    /// which can, so it's run as before.
+    #[test]
+    fn upstreams_codex_is_offered_to_install_when_mcp_is_kept_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let config = AgentConfig {
+            dir: Some(dir.path().join("agents")),
+            path: Some(bin.clone().into()),
+            ..AgentConfig::default()
+        };
+        let codex = known("codex").unwrap();
+        let spec = config.find("codex").unwrap();
+        program(&bin.join("npx"));
+        program(&bin.join("codex-acp"));
+        // No npm: nothing to offer, so it runs as it can, and says why
+        // it can't go on (see `server/chats.rs`).
+        assert!(matches!(
+            config.start(&spec),
+            Start::Ready { suggest: None, .. }
+        ));
+        program(&bin.join("npm"));
+        assert_eq!(config.start(&spec), Start::Install(codex));
+        let claude = config.find("claude").unwrap();
+        let Start::Ready { command, suggest } = config.start(&claude) else {
+            panic!("Claude Code's pinned adapter keeps them out");
+        };
+        assert!(command.contains(&"@agentclientprotocol/claude-agent-acp@0.98.0".into()));
+        assert_eq!(suggest, known("claude"));
+        assert!(!known("claude").unwrap().patched());
+        assert!(codex.patched());
+    }
+
+    /// The `+clackatoo.N` directories of `name` at `upstream` in `dir`
+    /// for each level in `levels`, with npm's install of it whole.
+    fn earlier(dir: &Path, known: &Known, levels: &[&str]) -> Vec<PathBuf> {
+        let upstream = known.version.split('+').next().unwrap();
+        (levels.iter())
+            .map(|level| {
+                let path = dir.join(format!("{}-{upstream}+clackatoo.{level}", known.name));
+                let original = known.original(&path);
+                fs::create_dir_all(original.parent().unwrap()).unwrap();
+                fs::write(&original, "bundle").unwrap();
+                path
+            })
+            .collect()
+    }
+
+    /// Only an earlier patch level of the same upstream version, installed
+    /// whole, is brought up: the latest of those.
+    #[test]
+    fn only_a_whole_earlier_patch_level_is_brought_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = known("codex").unwrap();
+        assert_eq!(earlier_patch(dir.path(), codex), None);
+        let (_, level) = codex.version.split_once("+clackatoo.").unwrap();
+        let level: u32 = level.parse().unwrap();
+        // The same level, a later one, another upstream version, and one
+        // npm never finished.
+        earlier(
+            dir.path(),
+            codex,
+            &[&level.to_string(), &(level + 1).to_string()],
+        );
+        fs::create_dir_all(dir.path().join("codex-2.2.1+clackatoo.1/codex-acp")).unwrap();
+        fs::create_dir_all(dir.path().join("codex-2.2.2+clackatoo.0")).unwrap();
+        assert_eq!(earlier_patch(dir.path(), codex), None);
+        let older = earlier(dir.path(), codex, &["0", &(level - 1).to_string()]);
+        assert_eq!(earlier_patch(dir.path(), codex), Some(older[1].clone()));
+        // Nor any agent clackatoo doesn't patch.
+        assert_eq!(earlier_patch(dir.path(), known("claude").unwrap()), None);
+    }
+
+    /// An earlier patch level is linked into place at the one pinned,
+    /// with nothing fetched: npm's files are shared, its links kept, what
+    /// the patch wrote there written afresh, and nothing left beside it.
+    /// The earlier one stays while something runs from it, as an agent
+    /// carried through the daemon's upgrade does.
+    #[test]
+    fn an_earlier_patch_level_is_brought_up_without_npm() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (agents, bin) = (dir.path().join("agents"), dir.path().join("bin"));
+        fs::create_dir_all(&bin).unwrap();
+        let config = AgentConfig {
+            dir: Some(agents.clone()),
+            path: Some(bin.into()),
+            ..AgentConfig::default()
+        };
+        let codex = known("codex").unwrap();
+        let spec = config.find("codex").unwrap();
+        let from = earlier(&agents, codex, &["1"]).remove(0);
+        let [old_program, old_staged] = codex_steering::outputs(&from);
+        program(&old_program);
+        fs::write(&old_staged, "half written").unwrap();
+        let link = from.join("codex-acp/node_modules/.bin/codex-acp");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../@agentclientprotocol/codex-acp/dist/index.js", &link)
+            .unwrap();
+        // Nor npm nor npx: it's brought up all the same.
+        assert_eq!(config.start(&spec), Start::Upgrade(codex));
+        assert_eq!(
+            config.starting(&spec, false),
+            Start::Unavailable(
+                "Codex's adapter is installed with npm, which isn't here: install Node.js, \
+                 then send a message to try again, or give codex a command in the daemon's \
+                 config, daemon/init.lua"
+                    .into()
+            )
+        );
+        // Left by an upgrade cut off.
+        let staged = agents.join(format!(".codex-{}", codex.version));
+        fs::create_dir_all(staged.join("stale")).unwrap();
+        let prepared = |dir: &Path| {
+            assert!(!codex.installed_program(dir).exists(), "not carried over");
+            assert!(
+                !codex_steering::outputs(dir)[1].exists(),
+                "not carried over"
+            );
+            fs::write(codex.installed_program(dir), "prepared")
+        };
+        upgrade_with(&agents, codex, &[from.join("codex-acp")], prepared).unwrap();
+        let installed = install_dir(&agents, codex);
+        let program = codex.installed_program(&installed);
+        assert_eq!(fs::read_to_string(&program).unwrap(), "prepared");
+        let inode = |path: &Path| fs::metadata(path).unwrap().ino();
+        assert_eq!(
+            inode(&codex.original(&installed)),
+            inode(&codex.original(&from))
+        );
+        let link = installed.join("codex-acp/node_modules/.bin/codex-acp");
+        assert_eq!(fs::read_to_string(link).unwrap(), "bundle");
+        assert!(!staged.exists());
+        assert!(from.exists(), "kept, as it's named");
+        assert_eq!(
+            config.start(&spec),
+            Start::Ready {
+                command: vec![program.into()],
+                suggest: None,
+            }
+        );
+        // Done already, it's done no more, and the earlier one goes once
+        // nothing needs it.
+        upgrade_with(&agents, codex, &[], |_| panic!("prepared again")).unwrap();
+        assert!(!from.exists());
+    }
+
+    /// An earlier patch level whose bundle isn't the one pinned leaves
+    /// nothing at the level pinned: Codex is then offered to install, as
+    /// any other agent is.
+    #[test]
+    fn an_earlier_patch_level_that_fails_its_check_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (agents, bin) = (dir.path().join("agents"), dir.path().join("bin"));
+        program(&bin.join("npm"));
+        let config = AgentConfig {
+            dir: Some(agents.clone()),
+            path: Some(bin.into()),
+            ..AgentConfig::default()
+        };
+        let codex = known("codex").unwrap();
+        let spec = config.find("codex").unwrap();
+        let from = earlier(&agents, codex, &["1"]).remove(0);
+        assert_eq!(config.start(&spec), Start::Upgrade(codex));
+        let why = upgrade(&agents, codex, &[]).unwrap_err();
+        assert!(why.contains("differs from the pinned"), "{why}");
+        assert!(!install_dir(&agents, codex).exists());
+        assert!(!agents.join(format!(".codex-{}", codex.version)).exists());
+        assert!(from.exists(), "untouched");
+        assert_eq!(config.starting(&spec, false), Start::Install(codex));
+    }
+
+    /// An earlier patch level of the real bundle pinned, linked from an
+    /// install of it, is brought up to the one pinned.
+    #[test]
+    #[ignore = "needs the pinned installed npm bundle; set CLACKATOO_CODEX_BACKPORT_DIR"]
+    fn bring_up_the_pinned_adapter() {
+        let from =
+            std::env::var_os("CLACKATOO_CODEX_BACKPORT_DIR").expect("adapter install directory");
+        let dir = tempfile::tempdir().unwrap();
+        let codex = known("codex").unwrap();
+        let earlier = dir.path().join("codex-2.2.2+clackatoo.1");
+        link_tree(Path::new(&from), &earlier, &[]).unwrap();
+        upgrade(dir.path(), codex, &[]).unwrap();
+        let program = codex.installed_program(&install_dir(dir.path(), codex));
+        let prepared = fs::read_to_string(program).unwrap();
+        assert!(prepared.contains(&format!("version: \"{}\"", codex.version)));
+        assert!(!earlier.exists());
+    }
+
+    /// The adapters that keep their own MCP servers out are those pinned:
+    /// a new pin is never locked out by a version written down elsewhere.
+    #[test]
+    fn the_pinned_adapters_keep_their_own_mcp_servers_out() {
+        for name in ["claude", "codex"] {
+            let known = known(name).unwrap();
+            let package = known.package().rsplit_once('@').unwrap().0;
+            assert!(
+                crate::agent::keeps_mcp_out(package, known.version),
+                "{name}"
+            );
+        }
+        assert!(!crate::agent::keeps_mcp_out(
+            "@agentclientprotocol/codex-acp",
+            "2.2.2+clackatoo.1"
+        ));
+        assert!(!crate::agent::keeps_mcp_out(
+            "@agentclientprotocol/codex-acp",
+            "2.2.2"
+        ));
     }
 }
