@@ -159,5 +159,6 @@ pub(super) fn words_text(words: &[([f32; 2], String)]) -> impl Iterator<Item = T
         content,
         ink: Ink::Muted,
         font: TextFont::Mono,
+        clip: None,
     })
 }

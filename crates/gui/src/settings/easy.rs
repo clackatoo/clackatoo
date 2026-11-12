@@ -16,7 +16,9 @@
 //! what Easy has, then what only Advanced has, which Enter switches to.
 
 use super::find;
-use super::view::{Card, ControlView, EasyView, Part, Preview, RowView, SectionView, SettingsHit};
+use super::view::{
+    Card, ControlView, EasyView, Part, Preview, RowView, Scrolling, SectionView, SettingsHit,
+};
 use super::{
     Bound, Editing, Entry as AdvancedEntry, Facts, FontPicker, History, Mode, Outcome, Set,
     SettingsMenu, bindings, short_place, shown_value, typed_value,
@@ -32,6 +34,7 @@ use clackatoo_protocol::Color;
 
 /// Where Easy is, and what its search goes by.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(super) struct Easy {
     /// The page picked, by its place among [`Page::ALL`].
     page: usize,
@@ -39,10 +42,14 @@ pub(super) struct Easy {
     on_side: bool,
     /// The row the keys are on.
     focus: usize,
-    /// The first part of the page shown, as the window last drew it, and
-    /// whether to bring the row focused into view.
-    top: usize,
+    /// How far down the page is to be scrolled, in pixels, and as far
+    /// as it can be, as the window last laid it out; whether to bring the
+    /// row focused into view; and whether to go there at once, as a new
+    /// page or search starts at its top.
+    scroll: f32,
+    most: f32,
     reveal: bool,
+    jump: bool,
     /// The keys moved last, not the mouse: what they're on is shown.
     keys: bool,
     /// A slider being dragged: its row, and the value it's at.
@@ -97,8 +104,10 @@ impl Easy {
             page: 0,
             on_side: false,
             focus: 0,
-            top: 0,
+            scroll: 0.0,
+            most: 0.0,
             reveal: false,
+            jump: false,
             keys: false,
             sliding: None,
             items,
@@ -111,7 +120,7 @@ impl Easy {
     pub(super) fn retyped(&mut self, query: &str) {
         self.ranking.set_query(query, &self.items);
         self.focus = 0;
-        self.top = 0;
+        self.start_at_top();
     }
 
     /// Typing stopped, keeping what's found: the keys go to its rows.
@@ -127,17 +136,18 @@ impl Easy {
         self.reveal = true;
     }
 
-    /// The wheel turned `by` rows' worth.
-    pub(super) fn scroll(&mut self, by: isize) -> Outcome {
-        self.top = self.top.saturating_add_signed(by);
-        self.reveal = false;
-        Outcome::Changed
+    /// The page starts again at its top, at once.
+    fn start_at_top(&mut self) {
+        self.scroll = 0.0;
+        self.jump = true;
     }
 
-    /// The page as the window last drew it: from its part `top`.
-    pub(super) fn drawn(&mut self, top: usize) {
-        self.top = top;
+    /// The wheel turned `by` pixels' worth, down for more than none: where
+    /// the page is to be scrolled to now.
+    pub(super) fn wheel(&mut self, by: f32) -> f32 {
+        self.scroll = (self.scroll + by).clamp(0.0, self.most);
         self.reveal = false;
+        self.scroll
     }
 
     pub(super) fn page(&self) -> Page {
@@ -158,7 +168,7 @@ impl SettingsMenu {
             self.easy.page = Page::ALL.iter().position(|p| *p == page).unwrap_or(0);
         }
         self.easy.focus = row;
-        self.easy.top = 0;
+        self.easy.start_at_top();
         self.easy.on_side = false;
         self.easy.keyed();
     }
@@ -349,7 +359,7 @@ impl SettingsMenu {
                 }
                 self.easy.page = (self.easy.page + 1) % Page::ALL.len();
                 self.easy.focus = 0;
-                self.easy.top = 0;
+                self.easy.start_at_top();
             }
             (false, true) => self.easy.focus += 1,
             (false, false) if self.easy.focus == 0 => self.easy.on_side = true,
@@ -377,7 +387,7 @@ impl SettingsMenu {
         self.typing = false;
         self.easy.page = page.min(Page::ALL.len() - 1);
         self.easy.focus = 0;
-        self.easy.top = 0;
+        self.easy.start_at_top();
         Outcome::Changed
     }
 
@@ -940,12 +950,32 @@ impl SettingsMenu {
         self.said_saved = Some((said, warning));
     }
 
-    /// The page as the window last drew it, from its part `top`. Returns
-    /// whether that changes what it shows.
-    pub(crate) fn easy_drawn(&mut self, top: usize) -> bool {
-        let changed = self.easy.top != top || self.easy.reveal;
-        self.easy.drawn(top);
-        changed
+    /// The page as the window laid it out, `scrolling` so: where it's to
+    /// be scrolled to now, as far as it goes, and the row focused brought
+    /// into view if the keys moved; and whether to go there at once.
+    pub(crate) fn easy_drawn(&mut self, scrolling: Scrolling) -> (f32, bool) {
+        let editing = self.mcp_editing();
+        let easy = &mut self.easy;
+        easy.most = scrolling.most();
+        easy.scroll = if easy.reveal || editing {
+            scrolling.revealing(easy.scroll)
+        } else {
+            easy.scroll.clamp(0.0, easy.most)
+        };
+        easy.reveal = false;
+        (easy.scroll, std::mem::take(&mut easy.jump))
+    }
+
+    /// Whether the wheel scrolls Easy's page, by pixels, rather than
+    /// moving what's picked, as in Advanced and the font picker.
+    pub(crate) fn easy_page_scrolls(&self) -> bool {
+        self.mode == Mode::Easy && !matches!(self.editing, Some(Editing::Font(_)))
+    }
+
+    /// The wheel turned over Easy's page `by` pixels' worth, down for
+    /// more than none: where it's to be scrolled to now.
+    pub(crate) fn easy_wheel(&mut self, by: f32) -> f32 {
+        self.easy.wheel(by)
     }
 
     /// What Easy draws.
@@ -1084,8 +1114,7 @@ impl SettingsMenu {
                 .then(|| page.note().map(|note| (note, page == Page::Keys)))
                 .flatten(),
             focus: (self.easy.keys && !self.easy.on_side && found > 0).then_some(self.easy.focus),
-            top: self.easy.top,
-            reveal: self.easy.reveal || self.mcp_editing(),
+            scroll: self.easy.scroll,
             footer,
             warning,
             fonts,

@@ -4,6 +4,8 @@
 //! itself). `:mappersist` binds keys and saves them, as the menu's keys
 //! section does.
 
+use std::time::Instant;
+
 use clackatoo_protocol::{
     ConfigChange, DaemonSettings, FileLocation, OpenFile, OptionSaved, PaneTerminal, Request,
     Response, Side, TerminalId, wire,
@@ -15,7 +17,7 @@ use crate::input::KeyPress;
 use crate::options::persist::Change;
 use crate::options::settings_lua::Mapping;
 use crate::options::{Case, Scope, SetBy};
-use crate::settings::view::{EasyView, SettingsHit};
+use crate::settings::view::{EasyView, Laid, SettingsHit};
 use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, Set, SettingsMenu};
 
 /// The most characters the bar is given of what the daemon's config
@@ -82,6 +84,7 @@ impl Desk {
     /// Opens the settings menu, with `query` typed to search for.
     pub(super) fn open_settings(&mut self, query: &str) {
         self.close_finder();
+        self.settings_scrolled_to_top();
         if let Some(shown) = self.shown {
             self.close_editor_panel(shown.pane);
         }
@@ -483,12 +486,24 @@ impl Desk {
         }
     }
 
-    /// Easy's page was drawn from its part `top`, as it scrolled.
-    pub(crate) fn settings_drawn(&mut self, top: usize) {
+    /// Easy's page was laid out again, `scrolling` so: it goes on to where
+    /// it's to be scrolled now, smoothly if `smoothscroll`, or at once to a
+    /// new page's top.
+    pub(crate) fn settings_drawn(&mut self, laid: &Laid) {
+        let smooth = self.options.smoothscroll;
         if let Some(menu) = &mut self.settings
-            && menu.easy_drawn(top)
+            && let Some(scrolling) = laid.scrolling()
         {
-            self.settings_changed();
+            let (to, jump) = menu.easy_drawn(scrolling);
+            let smooth = smooth && !jump;
+            (self.settings_scroll.page).to(f64::from(to), smooth, Instant::now());
+        }
+        // The font picker's list, from where it was if it was open.
+        match laid.fonts_top() {
+            Some(top) => {
+                self.settings_scroll.rows_from(true, top, smooth);
+            }
+            None => self.settings_scroll.fonts = None,
         }
     }
 
@@ -558,9 +573,28 @@ impl Desk {
         preview: Option<(usize, usize)>,
     ) -> Option<FinderView> {
         if self.settings_mode_shown() != Some(Mode::Advanced) {
+            self.settings_scroll.list = None;
             return None;
         }
-        self.looking_at_settings(|menu, facts, _| menu.view(facts, list, preview))
+        // Drawn from where its list has scrolled to, as it scrolls.
+        let mut scroll = std::mem::take(&mut self.settings_scroll);
+        let smooth = self.options.smoothscroll;
+        let mut shown = [false; 2];
+        let view = self.looking_at_settings(|menu, facts, _| {
+            menu.view(facts, list, preview, &mut |fonts, top| {
+                shown[usize::from(fonts)] = true;
+                scroll.rows_from(fonts, top, smooth)
+            })
+        });
+        // A list not shown starts where it's next shown, at once.
+        if !shown[0] {
+            scroll.list = None;
+        }
+        if !shown[1] {
+            scroll.fonts = None;
+        }
+        self.settings_scroll = scroll;
+        view
     }
 
     /// Whether the settings menu is open.

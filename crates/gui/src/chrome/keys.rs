@@ -168,6 +168,7 @@ impl KeysPanel {
             content,
             ink,
             font: TextFont::Mono,
+            clip: None,
         };
         painted.over_texts.push(text(&self.title, Ink::Bold));
         for row in &self.rows {

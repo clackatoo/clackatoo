@@ -386,7 +386,7 @@ short name, as in Vim, which works everywhere the long one does.
 
 | Option | Short | Is | Starts |
 |---|---|---|---|
-| `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct; keyboard motions and jumps stay immediate. | on |
+| `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes, and all scrolling in the settings menu. Trackpad pixels stay direct; keyboard motions and jumps in panes stay immediate. | on |
 | `whichkeydelay` | `wkd` | How long, up to 5000 milliseconds, keys that start others, as <kbd>Space</kbd> does, wait before a panel lists what can come next, so keys typed quickly never flash it. Keys held with <kbd>Ctrl</kbd> or <kbd>Alt</kbd>, as <kbd>Ctrl</kbd>+<kbd>B</kbd>, show it at once; 0 shows it at once for every key. | 400 |
 | `ime` | `ime` | Type through the desktop's [input method](~clackatoo/reference/typing#typing), as Chinese, Japanese and Korean are typed and as an emoji picker sends its emoji, while keys type text. Off, keys go straight to the pane, in case the input method gets in the way. | on |
 | `explorerwidth` | `ew` | How wide a [file explorer](~clackatoo/reference/explorer) opens, in columns: 0 is 30, or a quarter of the tab if that's narrower; otherwise from 10 to 200. | 0 |
@@ -562,6 +562,13 @@ in either mode: a control that set several options undoes them together.
 The **Keys** page lists the keys for what's done most, such as a new tab or a
 split: **Record…** records more keys for one, as Advanced's keys section does.
 Every key, in every mode, is in Advanced.
+
+A page longer than the menu scrolls, by the wheel, a touchpad, or the keys
+moving to a row out of view, a bar at its right saying where you are; so do
+Advanced's list and the font picker. With `smoothscroll` on, as it starts,
+they glide there, as panes do; off, they jump. A touchpad's own motion is
+always followed as it comes. Rows part way out of view are cut off at the
+page's edge, and a click goes to what's drawn where it lands.
 
 Easy leaves out what few change: `numberwidth`, `showbreak`, `shiftwidth`,
 `startofline`, `tildeop`, `inccommand`, `hintpattern`, `completedelay`,

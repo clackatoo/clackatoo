@@ -927,11 +927,14 @@ impl App {
                             &mut measure,
                         ));
                         self.settings_laid = Some((key, Rc::clone(&laid)));
-                        self.desk.settings_drawn(laid.top);
+                        self.desk.settings_drawn(&laid);
                         laid
                     }),
                 };
                 chrome.settings = laid;
+                // Drawn scrolled as far as it's got, without laying it out
+                // again.
+                chrome.settings_scroll = self.desk.settings_scrolled();
             }
             Some(crate::settings::Mode::Advanced) => {
                 chrome.place_advanced_settings(sizes, &mut measure);
@@ -2388,6 +2391,8 @@ impl App {
         let Some(cell_height) = self.frame.as_ref().map(|frame| frame.fonts.cell.height) else {
             return;
         };
+        #[allow(clippy::cast_precision_loss)]
+        let line = cell_height as f32;
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y) * WHEEL_LINES,
             MouseScrollDelta::PixelDelta(position) => position.y / f64::from(cell_height),
@@ -2404,6 +2409,23 @@ impl App {
             return;
         };
         let over_finder = self.hit(point).raised();
+        // Easy's page scrolls by pixels, as panes do, a line a line of
+        // its text.
+        if self.picker.is_none()
+            && over_finder
+            && self.desk.settings_open()
+            && let Some(redraw) = self.desk.settings_smooth_wheel(
+                lines,
+                matches!(delta, MouseScrollDelta::PixelDelta(_)),
+                line,
+            )
+        {
+            self.wheel_remainder = 0.0;
+            if redraw {
+                self.request_redraw();
+            }
+            return;
+        }
         if self.picker.is_none()
             && !over_finder
             && let Some(redraw) = self.desk.smooth_wheel(

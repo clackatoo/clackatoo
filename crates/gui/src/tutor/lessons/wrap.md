@@ -100,7 +100,7 @@ settings advanced
 
 ## Back to Easy
 
-`m` switches back to Easy. There, `j` and `k` move between rows, Tab from control to control, `}` and `{` between pages, and `h` and `l` step a value. A row your `init.lua` sets is greyed, with the line that sets it, which Enter opens.
+`m` switches back to Easy. There, `j` and `k` move between rows, Tab from control to control, `}` and `{` between pages, and `h` and `l` step a value. A row your `init.lua` sets is greyed, with the line that sets it, which Enter opens. A page longer than the menu scrolls with the wheel or as the keys move, gliding there while `smoothscroll` is on.
 
 ```check
 settings easy

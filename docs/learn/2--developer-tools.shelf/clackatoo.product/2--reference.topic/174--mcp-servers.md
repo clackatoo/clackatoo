@@ -99,6 +99,19 @@ the SDK and are bound to this server's configuration source and OAuth client.
 generation, preventing a late callback or refresh from restoring forgotten
 credentials. It does not revoke tokens at the remote service.
 
+A server that needs a login has a gold **Sign in** button on its row of the
+server list, beside **Manage**: a click, or <kbd>Enter</kbd> with the keys on
+it (`l` and `h` move between a row's buttons), starts the same sign-in. The
+row says **Signing in…** while the browser is open, then **Signed in**, or
+why it failed, with **Sign in** to try again. When a chat's agent can't use a
+managed server because it needs a login, whichever agent it is, the chat
+shows an **MCP sign in** shelf above its box with the same button and the
+same states, in every window showing the chat. Signing in reconnects the
+server's live connections; an agent that already gave up on the server uses
+it from its next session. Only the user signs in: an agent with access to
+the window, a phone and the web are refused, as they are for the rest of MCP
+Servers.
+
 For a remote daemon, complete sign-in in your local browser. If the final
 localhost redirect cannot reach the daemon, copy the complete callback URL
 from the browser's address bar into **Complete remote sign-in**. That field is

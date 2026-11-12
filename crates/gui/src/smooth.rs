@@ -1,5 +1,7 @@
 //! A bounded wheel gesture. Values are relative to the view, not document
 //! coordinates, so even very long terminal histories retain subpixel precision.
+//! A view laid out whole, as the settings menu's, uses it as its offset
+//! instead: `position` is where it's drawn, going to where it's to be.
 use std::time::{Duration, Instant};
 
 const DURATION: Duration = Duration::from_millis(120);
@@ -28,6 +30,27 @@ impl Motion {
             self.position = self.target;
             self.animation = None;
         }
+    }
+
+    /// Goes on to `target`, a place rather than a distance, from where
+    /// it's drawn now: in time if `smooth`, or else at once.
+    pub(crate) fn to(&mut self, target: f64, smooth: bool, now: Instant) {
+        self.advance(now);
+        if (target - self.target).abs() < 0.000_001 {
+            return;
+        }
+        self.target = target;
+        if smooth {
+            self.animation = Some((self.position, now));
+        } else {
+            self.position = target;
+            self.animation = None;
+        }
+    }
+
+    /// Whether it's still on its way.
+    pub(crate) fn animating(&self) -> bool {
+        self.animation.is_some()
     }
 
     pub(crate) fn advance(&mut self, now: Instant) {
@@ -83,6 +106,24 @@ mod tests {
         motion.advance(now + DURATION * 2);
         assert!((motion.position - (before - 3.0)).abs() < 0.000_001);
         assert!(motion.wakes().is_none());
+    }
+
+    #[test]
+    fn going_to_a_place_animates_there_or_jumps_and_retargets_from_where_it_is() {
+        let now = Instant::now();
+        let mut offset = Motion::default();
+        offset.to(100.0, true, now);
+        assert!(offset.animating() && offset.wakes().is_some());
+        offset.advance(now + DURATION / 2);
+        let halfway = offset.position;
+        assert!(halfway > 0.0 && halfway < 100.0);
+        // Somewhere else: from where it's drawn, not from where it started.
+        offset.to(40.0, true, now + DURATION / 2);
+        assert!((offset.position - halfway).abs() < 0.000_001);
+        offset.advance(now + DURATION * 2);
+        assert!((offset.position - 40.0).abs() < 0.000_001 && !offset.animating());
+        offset.to(10.0, false, now);
+        assert!((offset.position - 10.0).abs() < 0.000_001 && offset.wakes().is_none());
     }
 
     #[test]

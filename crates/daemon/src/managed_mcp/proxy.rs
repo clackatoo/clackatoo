@@ -494,6 +494,8 @@ pub(crate) fn failure_state(why: &str) -> McpState {
     let lower = why.to_ascii_lowercase();
     if [
         "authentication",
+        // An HTTP server's 401, as the MCP client says it.
+        "auth required",
         "unauthorized",
         "401",
         "oauth",

@@ -1025,7 +1025,12 @@ impl SettingsMenu {
             Some(Editing::Font(fonts)) => (fonts.picker)
                 .go(by, fonts.ranking.len())
                 .outcome(|| Outcome::Changed),
-            _ if self.mode == Mode::Easy => self.easy.scroll(by),
+            _ if self.mode == Mode::Easy => {
+                // A row's worth a line, about, as the window's wheel goes.
+                #[allow(clippy::cast_precision_loss)]
+                self.easy.wheel(by as f32 * 24.0);
+                Outcome::Changed
+            }
             _ => self.go(by),
         }
     }
@@ -1544,20 +1549,28 @@ impl SettingsMenu {
 
     /// What to draw, for a list `rows` rows tall and `cols` cells wide,
     /// and a preview of so many lines and cells, if there's room for one.
+    ///
+    /// The list is drawn from where `from` says, of whether it's the font
+    /// picker's and the row it's to start at, as it scrolls smoothly.
     pub(crate) fn view(
         &mut self,
         facts: &Facts,
         (rows, cols): (usize, usize),
         preview: Option<(usize, usize)>,
+        from: &mut dyn FnMut(bool, usize) -> f64,
     ) -> FinderView {
         let picked = self.picked();
         let side = self.side(picked.as_ref(), rows, cols);
         let cols = cols.saturating_sub(side.cells()).max(1);
         if let Some(Editing::Font(fonts)) = &mut self.editing {
-            return fonts.view(&facts.store.font, side, (rows, cols), preview);
+            return fonts.view(&facts.store.font, side, (rows, cols), preview, &mut |top| {
+                from(true, top)
+            });
         }
         let len = self.ranking.len();
-        let range = self.picker.shown(rows, len);
+        let (range, shift) = self
+            .picker
+            .shown_scrolled(rows, len, |top| from(false, top));
         let shown: Vec<Row> = range
             .filter_map(|rank| self.row(rank, facts, cols))
             .collect();
@@ -1588,6 +1601,7 @@ impl SettingsMenu {
             count,
             selected: self.picker.shown_selected(len),
             rows: shown,
+            shift,
             preview,
             empty: Some("No setting matches".into()),
         }
@@ -1779,7 +1793,9 @@ impl FontPicker {
     }
 
     /// The families shown in a list `rows` long and `cols` cells wide,
-    /// `font` being the one in use.
+    /// `font` being the one in use: drawn from where `from` says, as it
+    /// scrolls, or with no `from`, with as many again above and below,
+    /// for Easy to draw scrolling from where it was.
     fn shown(
         families: &[String],
         picker: &mut Picker,
@@ -1787,9 +1803,14 @@ impl FontPicker {
         ranking: &mut Ranking,
         font: &str,
         (rows, cols): (usize, usize),
-    ) -> Vec<Row> {
+        from: Option<&mut dyn FnMut(usize) -> f64>,
+    ) -> (Vec<Row>, f32) {
         let len = ranking.len();
-        (picker.shown(rows, len))
+        let (range, shift) = match from {
+            Some(from) => picker.shown_scrolled(rows, len, from),
+            None => (picker.shown_around(rows, len).0, 0.0),
+        };
+        let rows = range
             .filter_map(|rank| {
                 let index = ranking.get(rank)?;
                 let text = items.get(index);
@@ -1815,19 +1836,21 @@ impl FontPicker {
                     .collect();
                 Some(fit(text, &inks, cols, false))
             })
-            .collect()
+            .collect();
+        (rows, shift)
     }
 
     /// What Easy draws of it, below the button of row `row`, `font` being
     /// the one in use.
     fn easy_view(&mut self, font: &str, row: usize) -> view::FontsView {
-        let rows = Self::shown(
+        let (rows, _) = Self::shown(
             &self.families,
             &mut self.picker,
             &self.items,
             &mut self.ranking,
             font,
             (view::FONT_ROWS, 60),
+            None,
         );
         view::FontsView {
             row,
@@ -1843,6 +1866,8 @@ impl FontPicker {
             },
             rows,
             selected: self.picker.shown_selected(self.ranking.len()),
+            first: self.picker.drawn(),
+            top: self.picker.top(),
         }
     }
 
@@ -1855,6 +1880,7 @@ impl FontPicker {
         side: SideView,
         (rows, cols): (usize, usize),
         preview: Option<(usize, usize)>,
+        from: &mut dyn FnMut(usize) -> f64,
     ) -> FinderView {
         let Self {
             installed,
@@ -1865,9 +1891,18 @@ impl FontPicker {
             ranking,
         } = self;
         let len = ranking.len();
-        let shown = Self::shown(families, picker, items, ranking, font, (rows, cols));
+        let (shown, shift) = Self::shown(
+            families,
+            picker,
+            items,
+            ranking,
+            font,
+            (rows, cols),
+            Some(from),
+        );
         let waiting = installed.is_none();
         FinderView {
+            shift,
             title: "Font",
             side: Some(side),
             place: Some(

@@ -45,10 +45,10 @@ pub(crate) struct EasyView {
     pub(crate) note: Option<(&'static str, bool)>,
     /// The row the keys are on, counting the rows of every section.
     pub(crate) focus: Option<usize>,
-    /// The first of the page's parts shown (see [`Laid::top`]), and
-    /// whether the row focused is to be brought into view.
-    pub(crate) top: usize,
-    pub(crate) reveal: bool,
+    /// How far down the page is scrolled, in pixels, where the font
+    /// picker opens below its row; the page itself is drawn scrolled by
+    /// the window, without laying it out again.
+    pub(crate) scroll: f32,
     /// What was saved last, or what went wrong, along the foot.
     pub(crate) footer: String,
     pub(crate) warning: bool,
@@ -157,6 +157,11 @@ pub(crate) struct FontsView {
     pub(crate) listing: &'static str,
     pub(crate) rows: Vec<Row>,
     pub(crate) selected: Option<usize>,
+    /// Which font of all `rows` starts at, and which the picker's to show
+    /// first: there are as many again above and below, laid out to draw
+    /// it scrolling there from where it was.
+    pub(crate) first: usize,
+    pub(crate) top: usize,
 }
 
 /// How many fonts the picker shows at once.
@@ -213,6 +218,112 @@ pub(crate) struct Sizes {
     pub(crate) mono_em: f32,
 }
 
+/// Easy's page, laid out whole from its top, at the top of its room: the
+/// window draws it scrolled, cut off at the room's ends, as smoothly as
+/// it scrolls, and clicks go where it's drawn.
+#[derive(Clone, Debug)]
+struct Page {
+    room: Rect,
+    /// How tall all of it is.
+    total: f32,
+    /// The row focused, from the page's top to its foot, its heading
+    /// too if it's the first under it.
+    focus: Option<(f32, f32)>,
+    /// How far right of the room the scroll bar is, how wide, and how
+    /// short its thumb may get.
+    bar: (f32, f32, f32),
+    /// Where the page's own are among the [`Laid`]'s, cut off a little
+    /// outside the room.
+    region: Region,
+    /// Where the font picker is over the page, and where what it draws
+    /// starts among the fills, texts and hovers: what's under it isn't
+    /// drawn, as text and icons are drawn over everything else.
+    covered: Option<(Rect, [usize; 3])>,
+}
+
+/// What a [`Laid`] holds of each kind, by place: fills, texts, hits and
+/// hovers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    Fill,
+    Text,
+    Hit,
+    Hover,
+}
+
+/// Where what's drawn scrolled is among a [`Laid`]'s, and what it's cut
+/// off outside.
+#[derive(Clone, Debug, Default)]
+struct Region {
+    clip: [f32; 4],
+    fills: std::ops::Range<usize>,
+    texts: std::ops::Range<usize>,
+    hits: std::ops::Range<usize>,
+    hovers: std::ops::Range<usize>,
+}
+
+impl Region {
+    fn holds(&self, item: Item, index: usize) -> bool {
+        match item {
+            Item::Fill => &self.fills,
+            Item::Text => &self.texts,
+            Item::Hit => &self.hits,
+            Item::Hover => &self.hovers,
+        }
+        .contains(&index)
+    }
+}
+
+/// The font picker's list, laid out with as many fonts again above and
+/// below as it shows, drawn scrolled from where it was to where it's
+/// to be.
+#[derive(Clone, Debug)]
+struct FontRows {
+    region: Region,
+    row_height: f32,
+    /// Which font of all the first laid out is, the first to be shown,
+    /// and the last that can be shown first.
+    first: usize,
+    top: usize,
+    last: usize,
+}
+
+/// Where Easy's page and font picker are drawn scrolled to, as they
+/// scroll smoothly: the page in pixels from its top, the picker by the
+/// font of all it's drawn from, part way between two.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Scrolled {
+    pub(crate) page: f32,
+    pub(crate) fonts: f64,
+}
+
+/// What the window needs to scroll Easy's page: how tall its room is, how
+/// tall the page, and where the row focused is on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Scrolling {
+    pub(crate) room: f32,
+    pub(crate) total: f32,
+    pub(crate) focus: Option<(f32, f32)>,
+}
+
+impl Scrolling {
+    /// How far the page can be scrolled.
+    pub(crate) fn most(&self) -> f32 {
+        (self.total - self.room).max(0.0)
+    }
+
+    /// Where the page is to be scrolled to from `at` to show the row
+    /// focused, as little as shows it, its top first if it can't all.
+    pub(crate) fn revealing(&self, at: f32) -> f32 {
+        let at = at.clamp(0.0, self.most());
+        match self.focus {
+            Some((top, _)) if top < at => top,
+            Some((top, bottom)) if bottom > at + self.room => (bottom - self.room).min(top),
+            _ => at,
+        }
+    }
+}
+
 /// Text laid out: where it goes, and how big it is.
 #[derive(Clone, Debug)]
 struct Placed {
@@ -235,9 +346,10 @@ pub(crate) struct Laid {
     hovers: Vec<(SettingsHit, Fill)>,
     /// Each slider's track, by its row.
     sliders: Vec<(u16, Rect)>,
-    /// The first part of the page shown, kept as the page scrolls: the
-    /// sample, a heading, a row or the note at its foot, in order.
-    pub(crate) top: usize,
+    /// The page, laid out whole, which is drawn scrolled, and the font
+    /// picker's list.
+    page: Option<Page>,
+    fonts: Option<FontRows>,
     /// Whether it's all of Easy, rather than Advanced's header.
     modal: bool,
     /// The menu's whole panel, in either mode: off it, a click closes it.
@@ -258,19 +370,65 @@ impl Laid {
     }
 
     /// What `point` is over, if it's over the panel; or for Easy, which
-    /// dims the panes, anywhere.
-    pub(crate) fn hit(&self, point: [f32; 2]) -> Option<SettingsHit> {
+    /// dims the panes, anywhere: with its page and font picker drawn
+    /// scrolled to `at`, what's drawn there.
+    pub(crate) fn hit(&self, point: [f32; 2], at: Scrolled) -> Option<SettingsHit> {
         if !self.panel.contains(point) {
             return None;
         }
-        let hit = (self.hits.iter().rev())
-            .find(|(rect, _)| rect.contains(point))
-            .map_or(SettingsHit::Panel, |&(_, hit)| hit);
+        let over = |index: usize, rect: &Rect| match self.moved(Item::Hit, index, at) {
+            Some((by, [_, top, _, height])) => {
+                point[1] >= top
+                    && point[1] < top + height
+                    && Rect {
+                        y: rect.y - by,
+                        ..*rect
+                    }
+                    .contains(point)
+            }
+            None => rect.contains(point),
+        };
+        let hit = (self.hits.iter().enumerate().rev())
+            .find(|(index, (rect, _))| over(*index, rect))
+            .map_or(SettingsHit::Panel, |(_, &(_, hit))| hit);
         Some(match hit {
             SettingsHit::Control(row, Part::Slider(_)) => {
                 SettingsHit::Control(row, Part::Slider(self.slide(row, point[0]).unwrap_or(0)))
             }
             hit => hit,
+        })
+    }
+
+    /// How far up item `index` of its kind is drawn, scrolled to `at`,
+    /// and what it's cut off outside, if it's the page's or the font
+    /// picker's list's.
+    fn moved(&self, item: Item, index: usize, at: Scrolled) -> Option<(f32, [f32; 4])> {
+        if let Some(page) = &self.page
+            && page.region.holds(item, index)
+        {
+            return Some((at.page, page.region.clip));
+        }
+        let fonts = self.fonts.as_ref()?;
+        fonts.region.holds(item, index).then(|| {
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let rows =
+                (at.fonts.clamp(fonts.first as f64, fonts.last as f64) - fonts.top as f64) as f32;
+            (rows * fonts.row_height, fonts.region.clip)
+        })
+    }
+
+    /// The font the font picker is to show first, if it's open in Easy.
+    pub(crate) fn fonts_top(&self) -> Option<usize> {
+        self.fonts.as_ref().map(|fonts| fonts.top)
+    }
+
+    /// What the window needs to scroll Easy's page, if it's Easy.
+    pub(crate) fn scrolling(&self) -> Option<Scrolling> {
+        let page = self.page.as_ref()?;
+        Some(Scrolling {
+            room: page.room.height,
+            total: page.total,
+            focus: page.focus,
         })
     }
 
@@ -288,9 +446,37 @@ impl Laid {
     }
 
     /// Adds what it draws to `painted`, over the panes, with what's under
-    /// the mouse, `hover`, picked out.
-    pub(crate) fn paint<'a>(&'a self, hover: Option<SettingsHit>, painted: &mut Painted<'a>) {
-        painted.over.extend_from_slice(&self.fills);
+    /// the mouse, `hover`, picked out, and its page and font picker drawn
+    /// scrolled to `at`.
+    pub(crate) fn paint<'a>(
+        &'a self,
+        hover: Option<SettingsHit>,
+        at: Scrolled,
+        painted: &mut Painted<'a>,
+    ) {
+        // Under the font picker, if it's open, before what it draws.
+        let covered = |rect: [f32; 4], index: usize, from: usize| {
+            (self.page.as_ref())
+                .and_then(|page| page.covered)
+                .is_some_and(|(over, starts)| index < starts[from] && overlaps(over, rect))
+        };
+        let moved = |item: Item, index: usize, fill: &Fill| match self.moved(item, index, at) {
+            Some((by, _)) => Fill {
+                rect: [fill.rect[0], fill.rect[1] - by, fill.rect[2], fill.rect[3]],
+                ..*fill
+            },
+            None => *fill,
+        };
+        for (index, fill) in self.fills.iter().enumerate() {
+            let fill = moved(Item::Fill, index, fill);
+            if fill.icon.is_some() && covered(fill.rect, index, 0) {
+                continue;
+            }
+            painted.over.push(fill);
+            if (self.page.as_ref()).is_some_and(|page| index + 1 == page.region.fills.end) {
+                self.paint_bar(at.page, painted);
+            }
+        }
         // A slider's hover goes by its row, wherever along it the mouse is.
         let hover = hover.map(|hit| match hit {
             SettingsHit::Control(row, Part::Slider(_)) => {
@@ -299,20 +485,67 @@ impl Laid {
             hit => hit,
         });
         if let Some(hover) = hover {
-            painted.over.extend(
-                (self.hovers.iter())
-                    .filter(|(hit, _)| *hit == hover)
-                    .map(|(_, fill)| *fill),
-            );
+            for (index, (hit, fill)) in self.hovers.iter().enumerate() {
+                let fill = moved(Item::Hover, index, fill);
+                if *hit == hover && !covered(fill.rect, index, 2) {
+                    painted.over.push(fill);
+                }
+            }
         }
-        painted
-            .over_texts
-            .extend(self.texts.iter().map(|text| Text {
-                origin: text.origin,
+        for (index, text) in self.texts.iter().enumerate() {
+            let (origin, clip) = match self.moved(Item::Text, index, at) {
+                Some((by, clip)) => {
+                    let origin = [text.origin[0], text.origin[1] - by];
+                    let [_, top, _, height] = clip;
+                    // Only what's in its room, or part way in.
+                    if origin[1] + text.size[1] <= top || origin[1] >= top + height {
+                        continue;
+                    }
+                    (origin, Some(clip))
+                }
+                None => (text.origin, None),
+            };
+            let rect = [origin[0], origin[1], text.size[0], text.size[1]];
+            if covered(rect, index, 1) {
+                continue;
+            }
+            painted.over_texts.push(Text {
+                origin,
                 content: &text.content,
                 ink: text.ink,
                 font: text.font,
-            }));
+                clip,
+            });
+        }
+    }
+
+    /// The bar down the page's right, if it's longer than the room,
+    /// saying how much is above and below, the page scrolled `scroll`.
+    fn paint_bar(&self, scroll: f32, painted: &mut Painted<'_>) {
+        let Some(page) = &self.page else { return };
+        let room = page.room;
+        if page.total <= room.height + 0.5 {
+            return;
+        }
+        let (gap, width, shortest) = page.bar;
+        let track = Rect {
+            x: room.right() + gap,
+            width,
+            ..room
+        };
+        let thumb_height = (track.height * room.height / page.total).max(shortest);
+        let along = (scroll / (page.total - room.height)).clamp(0.0, 1.0);
+        let thumb_y = track.y + (track.height - thumb_height) * along;
+        painted.over.push(Fill::rounded(
+            track.to_array(),
+            Paint::CardEdge,
+            width / 2.0,
+        ));
+        painted.over.push(Fill::rounded(
+            [track.x, thumb_y.round(), width, thumb_height.round()],
+            Paint::Track,
+            width / 2.0,
+        ));
     }
 }
 
@@ -1050,62 +1283,35 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
             },
         )
         .collect();
-    // The last part shown from `top`, and whether all from it fit.
-    let last_shown = |top: usize| -> usize {
-        let mut used = 0.0;
-        let mut last = top;
-        // The part at the top, and a heading's first row, are drawn even if
-        // taller than all the room, cut off at its foot.
-        let must = match blocks.get(top) {
-            Some(Block::Heading(_)) => top + 1,
-            _ => top,
-        };
-        for at in top..blocks.len() {
-            let gap = if at == top { 0.0 } else { gaps[at] };
-            if used + gap + heights[at] > room.height && at > must {
-                break;
-            }
-            used += gap + heights[at];
-            last = at;
+    // Where each part starts, from the page's top, and how tall it all
+    // is: the page is laid out whole, once, and drawn scrolled.
+    let mut starts = Vec::with_capacity(blocks.len());
+    let mut total = 0.0;
+    for (at, height) in heights.iter().enumerate() {
+        if at > 0 {
+            total += gaps[at];
         }
-        last
-    };
-    // A heading isn't drawn without a row under it.
-    let last_shown = |top: usize| -> usize {
-        let last = last_shown(top);
-        if last > top && last + 1 < blocks.len() && matches!(blocks[last], Block::Heading(_)) {
-            last - 1
-        } else {
-            last
-        }
-    };
-    let most = (0..blocks.len())
-        .find(|&top| last_shown(top) + 1 >= blocks.len())
-        .unwrap_or(0);
-    let mut top = view.top.min(most);
-    if view.reveal
-        && let Some(focus) = view.focus
-        && let Some(at) = blocks
-            .iter()
-            .position(|block| matches!(block, Block::Row(_, row) if *row == focus))
-    {
-        if at < top {
-            // With its heading, if it's the first under it.
-            top = if at > 0 && matches!(blocks[at - 1], Block::Heading(_)) {
+        starts.push(total);
+        total += height;
+    }
+    // The row focused, with its heading if it's the first under it, for
+    // the keys to bring into view.
+    let focus = view
+        .focus
+        .and_then(|focus| {
+            (blocks.iter()).position(|block| matches!(block, Block::Row(_, row) if *row == focus))
+        })
+        .map(|at| {
+            let from = if at > 0 && matches!(blocks[at - 1], Block::Heading(_)) {
                 at - 1
             } else {
                 at
             };
-        }
-        while top < at && last_shown(top) < at {
-            top += 1;
-        }
-    }
-    lay.laid.top = top;
+            (starts[from], starts[at] + heights[at])
+        });
 
-    // Draw from `top`, each section's rows in a card.
+    // Each section's rows in a card.
     let mut y = room.y;
-    let last = last_shown(top);
     let mut card: Option<(f32, usize)> = None;
     let card_paint = |lay: &mut Lay<'_>, from: f32, to: f32| {
         lay.laid.fills.push(
@@ -1121,25 +1327,19 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     // rows' are laid out into a list of their own and added after.
     let mut row_fills: Vec<Fill> = Vec::new();
     let mut card_fills: Vec<Fill> = Vec::new();
-    // What the page draws, to cut off at its foot: a part taller than all
-    // the room there is is drawn as far as the room goes.
+    // What the page draws, which is drawn scrolled and cut off at the
+    // room's ends.
     let (fills_from, texts_from, hits_from, hovers_from) = (
         lay.laid.fills.len(),
         lay.laid.texts.len(),
         lay.laid.hits.len(),
         lay.laid.hovers.len(),
     );
-    let shown = if blocks.is_empty() {
-        0..0
-    } else {
-        top..last + 1
-    };
-    for at in shown {
-        if at > top {
+    for (at, &block) in blocks.iter().enumerate() {
+        if at > 0 {
             y += gaps[at];
         }
         let height = heights[at];
-        let block = blocks[at];
         // A card ends where its section's rows do.
         if let Some((from, section)) = card
             && !matches!(block, Block::Row(each, _) if each == section)
@@ -1202,12 +1402,11 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     }
     lay.laid.fills.extend(card_fills);
     lay.laid.fills.extend(row_fills);
-    let bottom = room.bottom();
     let clip = [
         room.x - lay.u(8.0),
         room.y - lay.u(8.0),
         room.width + lay.u(16.0),
-        bottom - room.y + lay.u(8.0),
+        room.height + lay.u(8.0),
     ];
     for fill in &mut lay.laid.fills[fills_from..] {
         *fill = fill.clipped(clip);
@@ -1215,50 +1414,22 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
     for (_, fill) in &mut lay.laid.hovers[hovers_from..] {
         *fill = fill.clipped(clip);
     }
-    let texts = lay.laid.texts.split_off(texts_from);
-    (lay.laid.texts).extend(
-        texts
-            .into_iter()
-            .filter(|text| text.origin[1] + text.size[1] <= bottom),
-    );
-    let hits = lay.laid.hits.split_off(hits_from);
-    (lay.laid.hits).extend(hits.into_iter().filter_map(|(rect, hit)| {
-        let height = rect.height.min(bottom - rect.y);
-        (height > 0.0).then_some((Rect { height, ..rect }, hit))
-    }));
-    // A bar down the page's right, if it's longer than the room, saying
-    // how much is above and below.
-    if !blocks.is_empty() && (top > 0 || last + 1 < blocks.len()) {
-        let total: f32 = heights
-            .iter()
-            .zip(&gaps)
-            .map(|(height, gap)| height + gap)
-            .sum();
-        let before: f32 = (heights[..top].iter().zip(&gaps[..top]))
-            .map(|(height, gap)| height + gap)
-            .sum();
-        let shown = y - room.y;
-        let track = Rect {
-            x: room.right() + lay.u(14.0),
-            width: lay.u(4.0),
-            ..room
-        };
-        let thumb_height = (track.height * shown / total.max(1.0)).max(lay.u(24.0));
-        let thumb_y =
-            track.y + (track.height - thumb_height) * (before / (total - shown).max(1.0)).min(1.0);
-        lay.fill(Fill::rounded(
-            track.to_array(),
-            Paint::CardEdge,
-            track.width / 2.0,
-        ));
-        lay.fill(Fill::rounded(
-            [track.x, thumb_y.round(), track.width, thumb_height.round()],
-            Paint::Track,
-            track.width / 2.0,
-        ));
-    }
+    lay.laid.page = Some(Page {
+        room,
+        total,
+        focus,
+        bar: (lay.u(14.0), lay.u(4.0), lay.u(24.0)),
+        region: Region {
+            clip,
+            fills: fills_from..lay.laid.fills.len(),
+            texts: texts_from..lay.laid.texts.len(),
+            hits: hits_from..lay.laid.hits.len(),
+            hovers: hovers_from..lay.laid.hovers.len(),
+        },
+        covered: None,
+    });
     if let Some(fonts) = &view.fonts {
-        lay_fonts(lay, fonts, room);
+        lay_fonts(lay, fonts, room, view.scroll);
     }
 }
 
@@ -1969,6 +2140,11 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
     }
 }
 
+/// Whether `rect`, left, top, width and height, overlaps `over`.
+fn overlaps(over: Rect, [x, y, w, h]: [f32; 4]) -> bool {
+    !(x + w <= over.x || x >= over.right() || y + h <= over.y || y >= over.bottom())
+}
+
 /// Where each of `buttons` side by side goes, from `rect`'s left and
 /// as tall as a button, centred in it.
 fn button_rects(lay: &mut Lay<'_>, buttons: &[(&str, bool)], rect: Rect) -> Vec<Rect> {
@@ -2129,10 +2305,15 @@ fn lay_preview(lay: &mut Lay<'_>, preview: &Preview, rect: Rect) {
     clippy::too_many_lines,
     reason = "where it goes, then its line, then its fonts"
 )]
-fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect) {
+fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect, scroll: f32) {
     let row = u16::try_from(fonts.row).unwrap_or(u16::MAX);
+    // Its row's button, where the page scrolled shows it.
     let anchor = (lay.laid.hits.iter())
         .find(|(_, hit)| *hit == SettingsHit::Control(row, Part::Whole))
+        .map(|(rect, _)| Rect {
+            y: rect.y - scroll,
+            ..*rect
+        })
         .map_or(
             Rect {
                 x: room.right() - lay.u(360.0),
@@ -2140,7 +2321,7 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect) {
                 width: lay.u(360.0),
                 height: 0.0,
             },
-            |(rect, _)| *rect,
+            |rect| rect,
         );
     let cell = lay.geometry.metrics.cell;
     let row_height = (cell[1] + lay.u(8.0)).round();
@@ -2166,15 +2347,18 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect) {
         width,
         height,
     };
-    // What's under it isn't drawn: text can't be cut off, and icons are
-    // drawn with the text, over everything else.
-    let clear = |[x, y, w, h]: [f32; 4]| {
-        x + w <= rect.x || x >= rect.right() || y + h <= rect.y || y >= rect.bottom()
-    };
-    (lay.laid.texts)
-        .retain(|text| clear([text.origin[0], text.origin[1], text.size[0], text.size[1]]));
-    (lay.laid.fills).retain(|fill| fill.icon.is_none() || clear(fill.rect));
-    (lay.laid.hovers).retain(|(_, fill)| clear(fill.rect));
+    // What's under it isn't drawn, as it's drawn (see [`Laid::paint`]):
+    // icons are drawn with the text, over everything else.
+    if let Some(page) = &mut lay.laid.page {
+        page.covered = Some((
+            rect,
+            [
+                lay.laid.fills.len(),
+                lay.laid.texts.len(),
+                lay.laid.hovers.len(),
+            ],
+        ));
+    }
     let (radius, padding) = (lay.u(10.0), lay.geometry.metrics.padding);
     push_shadow(&mut lay.laid.fills, rect, radius, padding);
     lay.fill(
@@ -2206,7 +2390,21 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect) {
         [rect.x, rect.y + head, rect.width, lay.geometry.edge],
         Paint::PaletteEdge,
     ));
-    let mut y = rect.y + head + lay.u(5.0);
+    // The fonts round those shown, from the first shown, cut off at the
+    // list's ends as it's drawn scrolling from where it was.
+    let list = rect.y + head + lay.geometry.edge;
+    #[allow(clippy::cast_precision_loss)]
+    let foot = rect.y + head + lay.u(5.0) + FONT_ROWS as f32 * row_height;
+    let clip = [rect.x, list, rect.width, foot - list];
+    let (fills_from, texts_from, hits_from, hovers_from) = (
+        lay.laid.fills.len(),
+        lay.laid.texts.len(),
+        lay.laid.hits.len(),
+        lay.laid.hovers.len(),
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let mut y =
+        rect.y + head + lay.u(5.0) - (fonts.top.saturating_sub(fonts.first)) as f32 * row_height;
     for (at, row) in fonts.rows.iter().enumerate() {
         let line = Rect {
             x: rect.x + lay.u(5.0),
@@ -2240,6 +2438,27 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect) {
         lay.hit(line, hit);
         y += row_height;
     }
+    for fill in &mut lay.laid.fills[fills_from..] {
+        *fill = fill.clipped(clip);
+    }
+    for (_, fill) in &mut lay.laid.hovers[hovers_from..] {
+        *fill = fill.clipped(clip);
+    }
+    lay.laid.fonts = Some(FontRows {
+        region: Region {
+            clip,
+            fills: fills_from..lay.laid.fills.len(),
+            texts: texts_from..lay.laid.texts.len(),
+            hits: hits_from..lay.laid.hits.len(),
+            hovers: hovers_from..lay.laid.hovers.len(),
+        },
+        row_height,
+        first: fonts.first,
+        top: fonts.top,
+        last: (fonts.first + fonts.rows.len())
+            .saturating_sub(FONT_ROWS)
+            .max(fonts.first),
+    });
 }
 
 #[cfg(test)]
@@ -2272,8 +2491,7 @@ mod tests {
             }],
             note: None,
             focus: None,
-            top: 0,
-            reveal: false,
+            scroll: 0.0,
             footer: String::new(),
             warning: false,
             fonts: None,
@@ -2297,13 +2515,13 @@ mod tests {
         let (row, track) = laid.sliders[0];
         let middle = [track.x + track.width / 2.0, track.y + track.height / 2.0];
         assert_eq!(
-            laid.hit(middle),
+            laid.hit(middle, Scrolled::default()),
             Some(SettingsHit::Control(row, Part::Slider(500)))
         );
         // Dragged past its end, it's at its end.
         assert_eq!(laid.sliding_at(track.right() + 100.0), Some(1000));
         // Off the panel is the chrome's to say (see `Chrome::hit`).
-        assert_eq!(laid.hit([2.0, 2.0]), None);
+        assert_eq!(laid.hit([2.0, 2.0], Scrolled::default()), None);
         // Every word drawn is within the panel.
         let panel = panel(&geometry);
         assert!(laid.texts.iter().all(|text| panel.contains(text.origin)));
@@ -2426,19 +2644,100 @@ mod tests {
         let laid = laid_out(&view, [1280, 500]);
         // The page's room ends a little above the panel's foot.
         let foot = panel(&geometry).bottom() - 44.0 - 12.0;
-        let words: Vec<&Placed> = (laid.texts.iter())
+        let mut painted = Painted::default();
+        laid.paint(None, Scrolled::default(), &mut painted);
+        let words: Vec<&Text<'_>> = (painted.over_texts.iter())
             .filter(|text| text.content.starts_with("word"))
             .collect();
         assert!(!words.is_empty());
-        assert!(
-            words
-                .iter()
-                .all(|text| text.origin[1] + text.size[1] <= foot)
+        // Drawn as far as the foot, cut off there, and none past it.
+        assert!(words.iter().all(|text| {
+            let [_, top, _, height] = text.clip.expect("cut off at the room's ends");
+            text.origin[1] < foot && (top + height - foot).abs() < 0.5
+        }));
+        // Nor clicked past it.
+        let x = panel(&geometry).x + panel(&geometry).width / 2.0;
+        assert_eq!(
+            laid.hit([x, foot + 2.0], Scrolled::default()),
+            Some(SettingsHit::Panel)
         );
-        assert!(
-            (laid.hits.iter())
-                .filter(|(_, hit)| matches!(hit, SettingsHit::Row(_) | SettingsHit::Control(..)))
-                .all(|(rect, _)| rect.bottom() <= foot)
-        );
+        assert!(matches!(
+            laid.hit([x, foot - 20.0], Scrolled::default()),
+            Some(SettingsHit::Row(0) | SettingsHit::Control(0, _))
+        ));
+    }
+
+    #[test]
+    fn the_font_picker_is_drawn_scrolling_and_clicks_go_to_the_font_drawn() {
+        let row = |name: &str| Row {
+            text: name.into(),
+            runs: vec![(name.len(), Ink::Plain)],
+        };
+        let mut view = page_of(RowView {
+            label: "Font".into(),
+            help: String::new(),
+            notes: Vec::new(),
+            lock: None,
+            control: ControlView::Font("Mono".into()),
+        });
+        // Fonts 5 to 34 laid out, 15 to be shown first.
+        view.fonts = Some(FontsView {
+            row: 0,
+            query: String::new(),
+            count: "30 / 30".into(),
+            listing: "monospace fonts",
+            rows: (5..35).map(|at| row(&format!("font {at}"))).collect(),
+            selected: Some(10),
+            first: 5,
+            top: 15,
+        });
+        let laid = laid_out(&view, [1280, 800]);
+        assert_eq!(laid.fonts_top(), Some(15));
+        let drawn = |at: f64| {
+            let mut painted = Painted::default();
+            let at = Scrolled {
+                page: 0.0,
+                fonts: at,
+            };
+            laid.paint(None, at, &mut painted);
+            (painted.over_texts.iter())
+                .filter(|text| text.content.starts_with("font "))
+                .map(|text| (text.content.to_owned(), text.origin[1], text.clip))
+                .collect::<Vec<_>>()
+        };
+        // There: font 15 first, cut off nowhere it's shown.
+        let there = drawn(15.0);
+        assert_eq!(there[0].0, "font 15");
+        assert_eq!(there.len(), FONT_ROWS);
+        // Half a row back, on its way: font 14 part way in at the top.
+        let between = drawn(14.5);
+        assert_eq!(between[0].0, "font 14");
+        let [_, top, _, _] = between[0].2.expect("cut off at the list's ends");
+        assert!(between[0].1 < top, "part way out at the top");
+        // A click on what's drawn there is on that font.
+        let at = Scrolled {
+            page: 0.0,
+            fonts: 14.5,
+        };
+        let point = [
+            panel(&Geometry::new([1280, 800], METRICS)).x + 700.0,
+            there[1].1 + 4.0,
+        ];
+        let hit = laid.hit(point, at);
+        let index = |at: f64| match laid.hit(
+            point,
+            Scrolled {
+                page: 0.0,
+                fonts: at,
+            },
+        ) {
+            Some(SettingsHit::Font(index)) => usize::from(index),
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(hit, Some(SettingsHit::Font(_))), "{hit:?}");
+        // As first drawn there, the 16th; half a row back, more of the
+        // 15th shows there, by index among those laid out.
+        assert_eq!(index(15.0), 11);
+        assert_eq!(index(14.5), 10);
     }
 }

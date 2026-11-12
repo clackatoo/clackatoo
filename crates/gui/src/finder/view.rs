@@ -13,7 +13,7 @@ use crate::layout::Rect;
 use crate::render::{Fill, Ink, Paint, Text, TextFont};
 
 /// What the finder shows, for a panel of some size.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FinderView {
     /// What it lists, such as "Files".
     pub(crate) title: &'static str,
@@ -25,6 +25,10 @@ pub(crate) struct FinderView {
     pub(crate) count: String,
     /// The things shown, best first.
     pub(crate) rows: Vec<Row>,
+    /// How far up the list is drawn, in rows, while it scrolls smoothly
+    /// between two: its first row is drawn that much cut off at the top,
+    /// and one more shown at the foot.
+    pub(crate) shift: f32,
     /// Which of them is picked.
     pub(crate) selected: Option<usize>,
     pub(crate) preview: Option<PreviewView>,
@@ -411,11 +415,24 @@ impl Layout {
         if point[0] < self.list.x + side * self.cell_width {
             return None;
         }
-        self.row_at(point, view.rows.len())
+        // Where the list is drawn, part way between rows as it scrolls.
+        let shifted = [point[0], point[1] + view.shift * self.row_height];
+        if !self.list.contains(point) {
+            return None;
+        }
+        let list = Rect {
+            height: self.list.height + self.row_height,
+            ..self.list
+        };
+        Self { list, ..*self }.row_at(shifted, view.rows.len())
     }
 
     /// The panel's rectangles and text, showing `view`.
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::too_many_lines,
+        reason = "the prompt, the side, the list and the preview in turn"
+    )]
     pub(crate) fn paint<'a>(
         &self,
         view: &'a FinderView,
@@ -442,6 +459,7 @@ impl Layout {
                 content: view.title,
                 ink: Ink::Muted,
                 font: TextFont::Ui,
+                clip: None,
             });
             x += self.title_width + 2.0 * padding;
             painted.over_texts.push(Text {
@@ -449,6 +467,7 @@ impl Layout {
                 content: &view.query,
                 ink: Ink::Plain,
                 font: TextFont::Mono,
+                clip: None,
             });
             let mut right = self.prompt.x + self.prompt.width - 2.0 * padding;
             for (text, gap) in [(&view.count, 0.0)]
@@ -461,6 +480,7 @@ impl Layout {
                     content: text,
                     ink: Ink::Muted,
                     font: TextFont::Mono,
+                    clip: None,
                 });
             }
             painted.over.push(Fill::solid(
@@ -479,17 +499,22 @@ impl Layout {
             Some(side) => self.paint_side(side, geometry, painted),
             None => self.list,
         };
+        // Cut off at its ends while it scrolls part way between rows.
+        let clip = (view.shift > 0.0).then_some(list.to_array());
         for (index, row) in view.rows.iter().enumerate() {
-            let y = list.y + index as f32 * self.row_height;
+            let y = list.y + (index as f32 - view.shift) * self.row_height;
             if view.selected == Some(index) {
-                painted.over.push(Fill::rounded(
+                let fill = Fill::rounded(
                     [list.x, y, list.width, self.row_height],
                     Paint::Chosen,
                     (1.5 * padding).round(),
-                ));
+                );
+                painted
+                    .over
+                    .push(clip.map_or(fill, |clip| fill.clipped(clip)));
             }
             let origin = [list.x + 2.0 * padding, (y + padding / 2.0).round()];
-            push_row(row, origin, cell_width, painted);
+            push_row(row, origin, cell_width, clip, painted);
         }
         // Nothing listed says why, in the middle of where the list goes,
         // and the preview, which has nothing to show either.
@@ -507,6 +532,7 @@ impl Layout {
                 content: empty,
                 ink: Ink::Muted,
                 font: TextFont::Mono,
+                clip: None,
             });
         }
 
@@ -526,7 +552,7 @@ impl Layout {
                 ));
             }
             let origin = [area.x + 2.0 * padding, (y + padding / 2.0).round()];
-            push_row(row, origin, cell_width, painted);
+            push_row(row, origin, cell_width, None, painted);
         }
     }
 }
@@ -556,7 +582,7 @@ impl Layout {
                 ));
             }
             let origin = [list.x + 2.0 * padding, (y + padding / 2.0).round()];
-            push_row(row, origin, self.cell_width, painted);
+            push_row(row, origin, self.cell_width, None, painted);
         }
         painted.over.push(Fill::solid(
             [list.x + width, list.y, geometry.edge, list.height],
@@ -568,15 +594,23 @@ impl Layout {
     }
 }
 
-/// Adds `row`'s runs as text from `origin`, a cell per character.
+/// Adds `row`'s runs as text from `origin`, a cell per character, cut off
+/// outside `clip` if it's given.
 #[allow(clippy::cast_precision_loss)]
-fn push_row<'a>(row: &'a Row, origin: [f32; 2], cell_width: f32, painted: &mut Painted<'a>) {
+fn push_row<'a>(
+    row: &'a Row,
+    origin: [f32; 2],
+    cell_width: f32,
+    clip: Option<[f32; 4]>,
+    painted: &mut Painted<'a>,
+) {
     for (text, ink, cells) in row.runs() {
         painted.over_texts.push(Text {
             origin: [(origin[0] + cells as f32 * cell_width).round(), origin[1]],
             content: text,
             ink,
             font: TextFont::Mono,
+            clip,
         });
     }
 }
@@ -621,6 +655,35 @@ mod tests {
         let [x, y] = [layout.list.x + 5.0, layout.list.y + 1.0];
         assert_eq!(layout.row_at([x, y], 3), Some(0));
         assert_eq!(layout.row_at([x, y + layout.row_height], 3), Some(1));
+        // Scrolled half a row up, as the list is drawn part way.
+        let mut view = FinderView {
+            title: "Files",
+            place: None,
+            query: String::new(),
+            count: String::new(),
+            rows: vec![
+                Row {
+                    text: "a".into(),
+                    runs: vec![(1, Ink::Plain)]
+                };
+                4
+            ],
+            shift: 0.5,
+            selected: None,
+            preview: None,
+            empty: None,
+            side: None,
+        };
+        assert_eq!(layout.view_row_at([x, y], &view), Some(0));
+        assert_eq!(
+            layout.view_row_at([x, y + layout.row_height / 2.0], &view),
+            Some(1)
+        );
+        view.shift = 0.0;
+        assert_eq!(
+            layout.view_row_at([x, y + layout.row_height / 2.0], &view),
+            Some(0)
+        );
         assert_eq!(
             layout.row_at([x, y + 3.0 * layout.row_height], 3),
             None,
@@ -661,6 +724,7 @@ mod tests {
         let layout = Layout::new(&geometry);
         let why = "Nothing matches ‘zz’";
         let mut view = FinderView {
+            shift: 0.0,
             side: None,
             title: "Files",
             place: None,

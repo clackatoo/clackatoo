@@ -341,6 +341,8 @@ pub(crate) struct Desk {
     /// written the config.
     pub(crate) controlled: bool,
     scrolling: HashMap<PaneId, scrolling::Gesture>,
+    /// Where the settings menu's views are drawn scrolled to.
+    settings_scroll: scrolling::SettingsScroll,
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
     /// The background tab whose screen the list of them last asked for,
@@ -3341,6 +3343,7 @@ mod tests {
     mod scrolling;
     mod settings;
     mod settings_menu;
+    mod settings_scroll;
     mod shared;
     mod shortcuts;
     mod sign_in;

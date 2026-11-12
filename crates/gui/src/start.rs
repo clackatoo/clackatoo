@@ -627,6 +627,7 @@ impl StartPage {
             let _ = write!(count, " · b lists {left_out} {branches}");
         }
         FinderView {
+            shift: 0.0,
             side: None,
             title: "Agent",
             place: self

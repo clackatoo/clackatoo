@@ -1643,6 +1643,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Codex's adapter updates from the one installed, offline; a chat offers an install rather than fail on MCP",
     },
+    News {
+        id: "mcp-sign-in",
+        date: "2026-11-12",
+        lesson: "agents",
+        what: "A Sign in button for MCP servers that need a login, in Settings' list and in the chats that need them",
+    },
+    News {
+        id: "settings-smoothscroll",
+        date: "2026-11-12",
+        lesson: "wrap",
+        what: "Settings scrolls smoothly, as panes do: Easy's pages, Advanced's list and the font picker",
+    },
 ];
 
 impl News {

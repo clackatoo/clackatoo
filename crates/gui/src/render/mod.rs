@@ -340,6 +340,9 @@ pub(crate) struct Text<'a> {
     pub(crate) content: &'a str,
     pub(crate) ink: Ink,
     pub(crate) font: TextFont,
+    /// What it's cut off outside, if anything: left, top, width and
+    /// height, as a list scrolled part way shows a line cut.
+    pub(crate) clip: Option<[f32; 4]>,
 }
 
 /// How text of the window's own is drawn.
@@ -1520,8 +1523,19 @@ impl Renderer {
     /// Adds a line of the window's own text. Drawn after the grid's
     /// glyphs, so it sits on top of them: these glyphs go to a list of
     /// their own, drawn last.
-    #[allow(clippy::cast_precision_loss)]
     fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
+        let from = self.text_glyphs.len();
+        self.push_glyphs_of(text, fonts);
+        if let Some(clip) = text.clip {
+            for glyph in &mut self.text_glyphs[from..] {
+                glyph.clip = clip_box(clip);
+            }
+        }
+    }
+
+    /// The glyphs of [`Renderer::push_text`]'s text.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_glyphs_of(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
         let bold = matches!(text.ink, Ink::OnColor | Ink::Bold | Ink::Key);

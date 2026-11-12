@@ -1,0 +1,40 @@
+# Easy's page scrolled part way down, as the wheel and keys scroll it
+# smoothly, cut off at its room's ends; and a managed server needing a
+# sign in, with its Sign in button in the server list.
+size 1280x700
+file .agents/mcp.json <<END
+{"servers":{"docs":{"url":"http://127.0.0.1:47613/mcp"}}}
+END
+file unauthorized.py <<END
+import http.server
+class Refuse(http.server.BaseHTTPRequestHandler):
+    def refuse(self):
+        self.send_response(401, "Unauthorized")
+        self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+    do_GET = do_POST = do_DELETE = refuse
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", 47613), Refuse).serve_forever()
+END
+# A server that refuses everyone who hasn't signed in.
+shell python3 unauthorized.py
+keys <C-;>:Settings<CR>
+wait-for Appearance
+scroll 800 450 -4
+shot easy-scrolled
+keys }}}}}}}}
+wait-for Add MCP server
+# The server's details: approve its definition, then test it, which the
+# server refuses for want of a login.
+keys G<CR>
+wait-for Server definition
+keys ggjjjjjjjjjjjj<CR>
+wait-for Approved
+keys ggjjjjjjj<CR>
+sleep 2000
+keys gg<CR>
+keys G
+wait-for Needs sign in
+shot mcp-sign-in

@@ -1,5 +1,8 @@
 //! Wheel motion belongs to a pane, never to wherever the pointer happens to
 //! be on the next frame. Grid panes draw one extra row while between rows.
+//! The settings menu scrolls through the same motion: Easy's page by
+//! pixels, Advanced's list and the font picker by rows, each drawn where
+//! its motion is, and only animated while `smoothscroll` is on.
 use std::time::Instant;
 
 use super::{Desk, Modifiers, PaneId, TerminalId};
@@ -11,6 +14,47 @@ enum Kind {
     Rows,
     Chat(TerminalId),
     Markdown,
+}
+
+/// Where the settings menu's views are drawn scrolled to, going on to
+/// where they're to be: Easy's page, in pixels from its top, and the row
+/// Advanced's list starts at, and the font picker's, with a fraction while
+/// between rows, once each is shown. Advanced and the picker are drawn
+/// from their motions as they're shown each frame; Easy's page, laid out
+/// once, is drawn moved.
+#[derive(Debug, Default)]
+pub(super) struct SettingsScroll {
+    pub(super) page: Motion,
+    pub(super) list: Option<Motion>,
+    pub(super) fonts: Option<Motion>,
+}
+
+impl SettingsScroll {
+    fn motions(&mut self) -> impl Iterator<Item = &mut Motion> {
+        std::iter::once(&mut self.page)
+            .chain(self.list.iter_mut())
+            .chain(self.fonts.iter_mut())
+    }
+
+    /// Where a list, the font picker's if `fonts`, that's to start at row
+    /// `top` is drawn from now: going there in time if `smooth`, from
+    /// where it was drawn; or there at once, if it wasn't shown before.
+    #[allow(clippy::cast_precision_loss)]
+    pub(super) fn rows_from(&mut self, fonts: bool, top: usize, smooth: bool) -> f64 {
+        let motion = if fonts {
+            &mut self.fonts
+        } else {
+            &mut self.list
+        };
+        let now = Instant::now();
+        let motion = motion.get_or_insert_with(|| {
+            let mut motion = Motion::default();
+            motion.to(top as f64, false, now);
+            motion
+        });
+        motion.to(top as f64, smooth, now);
+        motion.position
+    }
 }
 
 #[derive(Debug)]
@@ -122,16 +166,27 @@ impl Desk {
     }
 
     pub(crate) fn scroll_wakes(&self) -> Option<Instant> {
-        self.scrolling
-            .values()
-            .filter_map(|gesture| gesture.motion.wakes())
+        let settings = &self.settings_scroll;
+        (self.scrolling.values().map(|gesture| &gesture.motion))
+            .chain([&settings.page])
+            .chain(settings.list.iter())
+            .chain(settings.fonts.iter())
+            .filter_map(Motion::wakes)
             .min()
     }
 
     /// Animation frames do not create application input or network round trips.
     pub(crate) fn tick_scrolling(&mut self, now: Instant) -> bool {
+        // The settings menu's, which are drawn where they are.
+        let mut settings = false;
+        for motion in self.settings_scroll.motions() {
+            if motion.animating() {
+                motion.advance(now);
+                settings = true;
+            }
+        }
         if self.scrolling.is_empty() {
-            return false;
+            return settings;
         }
         let visible = self.placement();
         let panes: Vec<_> = self.scrolling.keys().copied().collect();
@@ -216,7 +271,52 @@ impl Desk {
                 self.scrolling.insert(pane, gesture);
             }
         }
-        changed
+        changed | settings
+    }
+
+    /// The wheel turned `lines` over the settings menu, up for more than
+    /// none, `precise` if a touchpad's pixels: Easy's page scrolls by
+    /// pixels, `line` a line, smoothly if `smoothscroll` and not precise.
+    /// `None` where it moves what's picked instead, by whole rows.
+    pub(crate) fn settings_smooth_wheel(
+        &mut self,
+        lines: f64,
+        precise: bool,
+        line: f32,
+    ) -> Option<bool> {
+        if !lines.is_finite() || lines == 0.0 {
+            return Some(false);
+        }
+        let menu = self
+            .settings
+            .as_mut()
+            .filter(|menu| menu.easy_page_scrolls())?;
+        #[allow(clippy::cast_possible_truncation)]
+        let to = menu.easy_wheel(-(lines.clamp(-1000.0, 1000.0) as f32) * line);
+        let smooth = self.options.smoothscroll && !precise;
+        let before = self.settings_scroll.page.position;
+        self.settings_scroll
+            .page
+            .to(f64::from(to), smooth, Instant::now());
+        Some(
+            self.settings_scroll.page.animating()
+                || (self.settings_scroll.page.position - before).abs() > f64::EPSILON,
+        )
+    }
+
+    /// Where Easy's page and font picker are drawn scrolled to.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn settings_scrolled(&self) -> crate::settings::view::Scrolled {
+        let settings = &self.settings_scroll;
+        crate::settings::view::Scrolled {
+            page: settings.page.position as f32,
+            fonts: settings.fonts.as_ref().map_or(0.0, |fonts| fonts.position),
+        }
+    }
+
+    /// The settings menu opened, or closed: its views start at their tops.
+    pub(super) fn settings_scrolled_to_top(&mut self) {
+        self.settings_scroll = SettingsScroll::default();
     }
 
     fn scroll_rows(&mut self, pane: PaneId, rows: i64) -> i64 {

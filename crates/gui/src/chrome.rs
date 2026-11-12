@@ -478,6 +478,9 @@ pub(crate) struct Chrome {
     /// window keeps it laid out, or Advanced's header over the finder (see
     /// [`Chrome::place_advanced_settings`]).
     pub(crate) settings: Option<std::rc::Rc<Laid>>,
+    /// How far down Easy's page is drawn scrolled, in pixels, as it
+    /// scrolls smoothly: clicks go where it's drawn.
+    pub(crate) settings_scroll: crate::settings::view::Scrolled,
     /// The cog that opens the settings menu, at the top bar's right, apart
     /// from the window's buttons there; and where its tip goes.
     pub(crate) cog: (Rect, Rect),
@@ -823,6 +826,7 @@ impl Chrome {
             rounded: contents.rounded,
             finder: (contents.finder).map(|view| place_finder(&geometry, view, measure)),
             settings: None,
+            settings_scroll: crate::settings::view::Scrolled::default(),
             cog,
             cog_lit: false,
         }
@@ -878,7 +882,7 @@ impl Chrome {
         }
         if let Some(laid) = &self.settings {
             // Easy's parts, or Advanced's header's.
-            if let Some(hit) = laid.hit(point)
+            if let Some(hit) = laid.hit(point, self.settings_scroll)
                 && (hit != SettingsHit::Panel || laid.modal())
             {
                 return Hit::Settings(hit);
@@ -1080,6 +1084,7 @@ impl Chrome {
                     Ink::Muted
                 },
                 font: TextFont::Mono,
+                clip: None,
             });
         }
         if self.bottom_shown {
@@ -1092,6 +1097,7 @@ impl Chrome {
                     content: mode.text(),
                     ink: Ink::OnColor,
                     font: TextFont::Mono,
+                    clip: None,
                 });
             }
             // On the bar itself, so it's not taken for a tab.
@@ -1101,6 +1107,7 @@ impl Chrome {
                     content: waiting,
                     ink: Ink::Key,
                     font: TextFont::Mono,
+                    clip: None,
                 });
             }
             for item in &self.tabs {
@@ -1122,6 +1129,7 @@ impl Chrome {
                         Ink::Muted
                     },
                     font: TextFont::Mono,
+                    clip: None,
                 });
             }
             for note in &self.notes {
@@ -1130,6 +1138,7 @@ impl Chrome {
                     content: &note.text,
                     ink: note.ink,
                     font: TextFont::Mono,
+                    clip: None,
                 });
             }
         }
@@ -1165,7 +1174,7 @@ impl Chrome {
                 Hit::Settings(hit) => Some(hit),
                 _ => None,
             };
-            laid.paint(hover, &mut painted);
+            laid.paint(hover, self.settings_scroll, &mut painted);
         }
         self.paint_menu(hover, &mut painted);
         painted
@@ -1195,6 +1204,7 @@ impl Chrome {
             content: said,
             ink: Ink::Plain,
             font: TextFont::Ui,
+            clip: None,
         });
     }
 
@@ -1229,6 +1239,7 @@ impl Chrome {
                 content: label,
                 ink: Ink::Plain,
                 font: TextFont::Ui,
+                clip: None,
             });
         }
     }
@@ -1308,6 +1319,7 @@ impl Chrome {
                     content: label,
                     ink: Ink::Muted,
                     font: TextFont::Ui,
+                    clip: None,
                 });
             }
             let text_y = palette_text_y(rect, metrics);
@@ -1331,6 +1343,7 @@ impl Chrome {
                 content: text,
                 ink: Ink::Plain,
                 font: TextFont::Mono,
+                clip: None,
             });
             for (choice, row) in choices.iter().zip(&self.choices) {
                 if choice.picked {
@@ -1353,6 +1366,7 @@ impl Chrome {
                         Ink::Muted
                     },
                     font: TextFont::Ui,
+                    clip: None,
                 });
                 if described {
                     painted.over_texts.push(Text {
@@ -1360,6 +1374,7 @@ impl Chrome {
                         content: &choice.description,
                         ink: Ink::Muted,
                         font: TextFont::Ui,
+                        clip: None,
                     });
                 }
             }
@@ -1389,6 +1404,7 @@ impl Chrome {
                     content: &count.text,
                     ink,
                     font: TextFont::Ui,
+                    clip: None,
                 });
             }
             Bar::Bottom if self.bottom_shown => {
@@ -1403,6 +1419,7 @@ impl Chrome {
                     content: &count.text,
                     ink,
                     font: TextFont::Mono,
+                    clip: None,
                 });
             }
             Bar::Bottom => {}
@@ -1482,6 +1499,7 @@ impl Chrome {
                 content: "×",
                 ink: if hovered { Ink::Plain } else { Ink::Muted },
                 font: TextFont::Ui,
+                clip: None,
             }),
         }
     }
@@ -2002,6 +2020,7 @@ fn paint_raised<'a>(raised: &'a Raised, geometry: &Geometry, painted: &mut Paint
             content: line,
             ink,
             font: TextFont::Mono,
+            clip: None,
         });
     }
 }
@@ -2217,6 +2236,7 @@ fn paint_alert<'a>(text: &'a str, rect: Rect, geometry: &Geometry, painted: &mut
         content: text,
         ink: Ink::Warning,
         font: TextFont::Ui,
+        clip: None,
     });
 }
 
@@ -2250,6 +2270,7 @@ fn paint_grant<'a>(
         content: &badge.text,
         ink: Ink::Subagent,
         font: TextFont::Ui,
+        clip: None,
     });
     // As the window's own close button draws its `×`.
     let revoke = badge.revoke;
@@ -2261,6 +2282,7 @@ fn paint_grant<'a>(
         content: "×",
         ink: Ink::Accent,
         font: TextFont::Ui,
+        clip: None,
     });
 }
 
@@ -2323,6 +2345,7 @@ fn paint_workspace<'a>(
             Ink::Muted
         },
         font: TextFont::Ui,
+        clip: None,
     });
     if let Some((detail, x)) = &item.detail {
         painted.texts.push(Text {
@@ -2330,6 +2353,7 @@ fn paint_workspace<'a>(
             content: detail,
             ink: Ink::Muted,
             font: TextFont::Ui,
+            clip: None,
         });
     }
     // A chat asking stands out, in clackatoo's colour.
@@ -2342,6 +2366,7 @@ fn paint_workspace<'a>(
                 Mark::Working | Mark::Unseen => Ink::Muted,
             },
             font: TextFont::Ui,
+            clip: None,
         });
     }
 }
@@ -2485,6 +2510,7 @@ pub(crate) fn paint_pane_numbers(
             content: number,
             ink: Ink::OnColor,
             font: TextFont::Mono,
+            clip: None,
         });
     }
     (fills, texts)
@@ -2524,6 +2550,7 @@ pub(crate) fn paint_hints<'a>(
             content: left,
             ink: Ink::OnColor,
             font: TextFont::Mono,
+            clip: None,
         });
     }
     (fills, texts)
@@ -2558,6 +2585,7 @@ pub(crate) fn paint_pill<'a>(
         content: far,
         ink: Ink::Plain,
         font: TextFont::Mono,
+        clip: None,
     }];
     if !back.is_empty() {
         texts.push(Text {
@@ -2568,6 +2596,7 @@ pub(crate) fn paint_pill<'a>(
             content: back,
             ink: Ink::Muted,
             font: TextFont::Mono,
+            clip: None,
         });
     }
     (fill, texts)
@@ -2636,6 +2665,7 @@ pub(crate) fn paint_band<'a>(
             content,
             ink: *ink,
             font: TextFont::Mono,
+            clip: None,
         });
         at += cells;
         room -= cells;
@@ -2684,6 +2714,7 @@ pub(crate) fn paint_offer<'a>(
                 content,
                 ink,
                 font: TextFont::Mono,
+                clip: None,
             }
         })
         .collect();
@@ -2787,6 +2818,7 @@ pub(crate) fn paint_panel<'a>(
                 content: &run.text,
                 ink: run.ink,
                 font: TextFont::Mono,
+                clip: None,
             });
             col += cells;
         }

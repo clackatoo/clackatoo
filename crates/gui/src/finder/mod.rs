@@ -965,6 +965,7 @@ impl Finder {
             .collect();
         let preview = preview.and_then(|size| self.preview_view(size));
         FinderView {
+            shift: 0.0,
             side: None,
             title: self.kind.title(),
             place: self.root.as_ref().map(|(_, name)| name.clone()),

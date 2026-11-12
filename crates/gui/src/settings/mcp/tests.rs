@@ -231,3 +231,31 @@ fn a_sign_in_the_daemon_refuses_says_why_on_its_row() {
     );
     assert_eq!(menu.mcp_row(5).notes, [(why.to_owned(), Ink::Warning)]);
 }
+#[test]
+fn a_sign_in_asked_while_the_list_is_read_goes_ahead_of_it() {
+    let mut menu = menu();
+    menu.mcp.entries = vec![McpServerInfo {
+        state: McpState::NeedsLogin,
+        ..server()
+    }];
+    menu.mcp_loading();
+    let Outcome::Mcp { action, id } = menu.mcp_act_part(5, Some(Part::Segment(0))) else {
+        panic!("the poll stopped it")
+    };
+    assert!(
+        action
+            == McpAction::Authenticate {
+                name: "search".into()
+            }
+    );
+    // The poll's answer comes first, and is let go; then the sign in's.
+    menu.mcp_came(id, Ok(McpReply::default()));
+    assert_eq!(menu.mcp.entries.len(), 1, "the poll's answer is let go");
+    let url = Some("https://example.com/authorize".to_owned());
+    let reply = McpReply {
+        login_url: url.clone(),
+        ..McpReply::default()
+    };
+    assert_eq!(menu.mcp_came(id, Ok(reply)), url);
+    assert!(menu.mcp.pending.is_none());
+}

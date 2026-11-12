@@ -105,6 +105,9 @@ pub(crate) struct Picker {
     selected: usize,
     /// The first row shown.
     top: usize,
+    /// The first row drawn, which is `top` but while the list scrolls
+    /// smoothly there (see [`Picker::shown_scrolled`]).
+    drawn: usize,
     /// How many rows the list showed last, for paging.
     rows: usize,
 }
@@ -122,6 +125,7 @@ impl Picker {
             query,
             selected: 0,
             top: 0,
+            drawn: 0,
             rows: 1,
         }
     }
@@ -133,6 +137,16 @@ impl Picker {
     /// The row picked.
     pub(crate) fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// The first row shown, and the first drawn, which is the same but
+    /// while it scrolls smoothly, or for a list laid out round it.
+    pub(crate) fn top(&self) -> usize {
+        self.top
+    }
+
+    pub(crate) fn drawn(&self) -> usize {
+        self.drawn
     }
 
     /// Picks row `row`, which the list scrolls to when it's next shown.
@@ -233,7 +247,7 @@ impl Picker {
     /// Picks the row shown `row` rows down the list, as a click does, if
     /// it's one of the `len` there are; `false` if it's past them.
     pub(crate) fn click(&mut self, row: usize, len: usize) -> bool {
-        let picked = self.top + row;
+        let picked = self.drawn + row;
         if picked >= len {
             return false;
         }
@@ -253,13 +267,51 @@ impl Picker {
         } else if self.selected >= self.top + rows {
             self.top = self.selected + 1 - rows;
         }
+        self.drawn = self.top;
         self.top..len.min(self.top + rows)
     }
 
+    /// The rows to draw, as [`shown`](Self::shown) has them, but from
+    /// where the list is drawn on its way there, `from` of its first row
+    /// shown, as it scrolls smoothly: one more while it's between two,
+    /// and how far into the first it's drawn, in rows.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    pub(crate) fn shown_scrolled(
+        &mut self,
+        rows: usize,
+        len: usize,
+        from: impl FnOnce(usize) -> f64,
+    ) -> (Range<usize>, f32) {
+        let range = self.shown(rows, len);
+        let last = len.saturating_sub(rows.max(1));
+        let at = from(range.start).clamp(0.0, last as f64);
+        let first = (at.floor() as usize).min(last);
+        let into = (at - first as f64) as f32;
+        self.drawn = first;
+        let more = usize::from(into > 0.001);
+        (first..len.min(first + rows.max(1) + more), into)
+    }
+
+    /// The rows to lay out, as [`shown`](Self::shown) has them, with as
+    /// many again above and below, for a list laid out once to be drawn
+    /// scrolling from where it was to them; and the first of them shown.
+    pub(crate) fn shown_around(&mut self, rows: usize, len: usize) -> (Range<usize>, usize) {
+        let range = self.shown(rows, len);
+        let rows = rows.max(1);
+        self.drawn = range.start.saturating_sub(rows);
+        (self.drawn..len.min(range.start + 2 * rows), range.start)
+    }
+
     /// Where the row picked is among those [`shown`](Self::shown) last,
-    /// if there are any.
+    /// if it's among them.
     pub(crate) fn shown_selected(&self, len: usize) -> Option<usize> {
-        (len > 0).then(|| self.selected - self.top)
+        (len > 0)
+            .then(|| self.selected.checked_sub(self.drawn))
+            .flatten()
     }
 }
 
@@ -448,6 +500,32 @@ mod tests {
         // A list no rows tall still shows one.
         picker.go(5, 10);
         assert_eq!(picker.shown(0, 10), 5..6);
+    }
+
+    #[test]
+    fn a_list_scrolling_draws_from_where_it_is_and_a_click_picks_what_is_drawn() {
+        let mut picker = Picker::new(String::new());
+        picker.go(9, 20);
+        // On its way from the top to row 7, a third of the way past row 2.
+        let (drawn, into) = picker.shown_scrolled(3, 20, |top| {
+            assert_eq!(top, 7);
+            2.0 + 1.0 / 3.0
+        });
+        assert_eq!(drawn, 2..6, "one more, at the foot");
+        assert!((into - 1.0 / 3.0).abs() < 0.001);
+        assert_eq!(picker.shown_selected(20), Some(7));
+        assert!(picker.click(1, 20));
+        assert_eq!(picker.selected(), 3);
+        // There, as it was.
+        let (drawn, into) =
+            picker.shown_scrolled(3, 20, |top| f64::from(u32::try_from(top).unwrap()));
+        assert_eq!((drawn, into), (3..6, 0.0));
+        // Laid out round what's shown, for a list drawn moving.
+        picker.go(10, 20);
+        assert_eq!(picker.shown_around(3, 20), (8..17, 11));
+        assert_eq!(picker.shown_selected(20), Some(5));
+        assert!(picker.click(0, 20));
+        assert_eq!(picker.selected(), 8);
     }
 
     #[test]

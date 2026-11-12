@@ -456,3 +456,8 @@ forwarded. Servers stay separate from Clackatoo's built-in tools. Specialists
 can bundle servers and select them with `mcp_servers` in `SPECIALIST.md`.
 Provider-managed MCP is off by default; its global switch and provider
 overrides take effect after a daemon restart or upgrade.
+
+A server that needs a login has a gold **Sign in** button on its row of the
+list: click it, or move to it with `l` and press Enter. When a chat's agent
+can't use a server for want of a login, the chat shows an **MCP sign in**
+shelf above its box with the same button, saying how signing in goes.

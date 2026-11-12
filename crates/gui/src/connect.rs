@@ -390,6 +390,7 @@ impl HostPicker {
         }
         let more = if self.gathering { "…" } else { "" };
         FinderView {
+            shift: 0.0,
             side: None,
             title: "Connect to",
             place: None,

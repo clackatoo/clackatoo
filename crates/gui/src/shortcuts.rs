@@ -166,6 +166,7 @@ impl Help {
         shown.truncate(rows);
         let query = self.query.shown();
         FinderView {
+            shift: 0.0,
             side: None,
             title: self.title,
             place: None,

@@ -25,6 +25,9 @@ pub(super) struct Mcp {
     /// The button the keys are on, of the row of buttons that's this
     /// row of the page's.
     button: (usize, usize),
+    /// Answers to come to polls an action went ahead of, which are let
+    /// go: the daemon answers in turn, and the next poll reads again.
+    skip: usize,
 }
 impl std::fmt::Debug for Mcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -154,6 +157,7 @@ impl Mcp {
             removing: None,
             sign_ins: BTreeMap::new(),
             button: (0, 0),
+            skip: 0,
         }
     }
     fn rows(&self) -> Vec<Row> {
@@ -290,6 +294,10 @@ impl SettingsMenu {
         if id != self.mcp.id {
             return None;
         }
+        if self.mcp.skip > 0 {
+            self.mcp.skip -= 1;
+            return None;
+        }
         let pending = self.mcp.pending.take();
         self.mcp.next_poll = Instant::now() + Duration::from_secs(2);
         // A sign in that never got as far as the browser failed.
@@ -363,8 +371,12 @@ impl SettingsMenu {
         }
     }
     fn mcp_request(&mut self, action: McpAction) -> Outcome {
-        if self.mcp.pending.is_some() {
-            return Outcome::Nothing;
+        // An action goes ahead of a poll, whose answer is let go, rather
+        // than a click or Enter doing nothing while it's read.
+        match &self.mcp.pending {
+            Some(McpAction::List) if !matches!(action, McpAction::List) => self.mcp.skip += 1,
+            Some(_) => return Outcome::Nothing,
+            None => {}
         }
         if let McpAction::Authenticate { name } = &action {
             self.mcp.sign_ins.insert(name.clone(), None);
@@ -456,10 +468,10 @@ impl SettingsMenu {
         let Some(row) = self.mcp.rows().get(at).cloned() else {
             return Outcome::Nothing;
         };
-        if self.mcp.pending.is_some()
-            && !(matches!(row, Row::Back | Row::Cancel | Row::Server(_))
-                || matches!(row, Row::Field(_))
-                    && matches!(self.mcp.pending, Some(McpAction::List)))
+        // While an action's asked, only going back or elsewhere; a poll
+        // stops nothing.
+        if (self.mcp.pending.as_ref()).is_some_and(|p| !matches!(p, McpAction::List))
+            && !matches!(row, Row::Back | Row::Cancel | Row::Server(_))
         {
             return Outcome::Nothing;
         }
