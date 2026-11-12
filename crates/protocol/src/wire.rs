@@ -503,6 +503,12 @@ gates! {
     SIDE_QUESTIONS = 160,
     /// Managed external MCP servers and their private proxy control channel.
     MANAGED_MCP = 161,
+    /// Signing in to managed MCP servers from where they're needed:
+    /// `McpServerInfo`'s `signing_in`, and a chat's servers that need a
+    /// sign in, `ChatNode`'s `mcp_sign_in` and `ChatPatch::McpSignIn`,
+    /// which an older peer is never sent, as it has no button to sign in
+    /// with.
+    MCP_SIGN_IN = 162,
 }
 
 /// The specialist field's gate. Its historical release name remains in
@@ -707,6 +713,7 @@ impl Since for ChatPatch {
             Self::DraftCleared { .. } => PROMPT_BOX,
             Self::Branches(_) => CHAT_BRANCHES,
             Self::Retrying(_) => CHAT_FACTS,
+            Self::McpSignIn(_) => MCP_SIGN_IN,
         }
     }
 }
@@ -1792,7 +1799,7 @@ fn without_subagents_setting(message: &ServerMessage) -> Option<ServerMessage> {
 /// chats, gated as fields are, so it needs nothing here, and `NESTED_WORK`
 /// (117) has its own step after this one (`without_nesting`).
 fn older_chat(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
-    if wire >= CHAT_BRANCHES {
+    if wire >= MCP_SIGN_IN {
         return None;
     }
     without_optional_chat_updates(message, wire).or_else(|| {
@@ -1820,6 +1827,7 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
             || matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
             || matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
             || matches!(patch, Patch::Chat(ChatPatch::ProviderUsage(_)) if wire < PROVIDER_USAGE)
+            || matches!(patch, Patch::Chat(ChatPatch::McpSignIn(_)) if wire < MCP_SIGN_IN)
     };
     if !patches.iter().any(unsupported) {
         return None;
@@ -2271,6 +2279,24 @@ mod tests {
             patches_at(AGENT_COMMANDS, vec![retrying, compacted_item()]).len(),
             1
         );
+    }
+
+    #[test]
+    fn a_peer_before_mcp_sign_in_is_sent_no_servers_to_sign_in_to() {
+        let sign_in = Patch::Chat(ChatPatch::McpSignIn(vec![crate::McpSignIn {
+            server: "docs".into(),
+            state: crate::McpSignInState::Needed,
+        }]));
+        let notice = Patch::Chat(ChatPatch::Notice(Some("slow".into())));
+        assert_eq!(
+            patches_at(MCP_SIGN_IN, vec![sign_in.clone(), notice.clone()]),
+            [sign_in.clone(), notice.clone()]
+        );
+        assert_eq!(
+            patches_at(MANAGED_MCP, vec![sign_in.clone(), notice.clone()]),
+            [notice]
+        );
+        assert!(patches_at(MANAGED_MCP, vec![sign_in]).is_empty());
     }
 
     #[test]

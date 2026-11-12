@@ -6,7 +6,7 @@ use super::{
 use crate::{options::easy::Page, render::Ink, vim::Stroke};
 use clackatoo_protocol::{McpAction, McpImport, McpReply, McpScope, McpServerInfo, McpState};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,12 @@ pub(super) struct Mcp {
     pending: Option<McpAction>,
     next_poll: Instant,
     removing: Option<(String, String)>,
+    /// The servers signed in to from here, each with why it failed, if
+    /// it did: their rows say how it went.
+    sign_ins: BTreeMap<String, Option<String>>,
+    /// The button the keys are on, of the row of buttons that's this
+    /// row of the page's.
+    button: (usize, usize),
 }
 impl std::fmt::Debug for Mcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,6 +152,8 @@ impl Mcp {
             pending: None,
             next_poll: Instant::now(),
             removing: None,
+            sign_ins: BTreeMap::new(),
+            button: (0, 0),
         }
     }
     fn rows(&self) -> Vec<Row> {
@@ -284,6 +292,15 @@ impl SettingsMenu {
         }
         let pending = self.mcp.pending.take();
         self.mcp.next_poll = Instant::now() + Duration::from_secs(2);
+        // A sign in that never got as far as the browser failed.
+        if let Some(McpAction::Authenticate { name }) = &pending {
+            let failed = match &result {
+                Err(why) => Some(why.clone()),
+                Ok(reply) if reply.login_url.is_none() => Some(reply.notice.clone()),
+                Ok(_) => None,
+            };
+            self.mcp.sign_ins.insert(name.clone(), failed);
+        }
         match result {
             Err(why) => {
                 self.mcp.status.clone_from(&why);
@@ -349,6 +366,9 @@ impl SettingsMenu {
         if self.mcp.pending.is_some() {
             return Outcome::Nothing;
         }
+        if let McpAction::Authenticate { name } = &action {
+            self.mcp.sign_ins.insert(name.clone(), None);
+        }
         self.mcp.pending = Some(action.clone());
         self.said = None;
         Outcome::Mcp {
@@ -375,8 +395,13 @@ impl SettingsMenu {
             Row::Refresh=>button("Refresh","Read changed configuration and current connection status.",if pending{"Working…"}else{"Refresh"}),
             Row::Server(name)=>{
                 let server=self.mcp.entries.iter().find(|s|s.name==name).expect("listed server");
-                let mut view=row(server.name.clone(),format!("{} · {} · {} tools",state_name(server.state),server.source,server.tools.len()),ControlView::Button("Manage"));
-                if !server.detail.is_empty(){view.notes.push((server.detail.clone(),if server.state==McpState::Error{Ink::Warning}else{Ink::Muted}));}view
+                let control=match self.sign_in_button(server){
+                    Some(sign_in)=>ControlView::Buttons{buttons:vec![sign_in,("Manage",true)],at:self.mcp_button(at)},
+                    None=>ControlView::Button("Manage"),
+                };
+                let mut view=row(server.name.clone(),format!("{} · {} · {} tools",state_name(server.state),server.source,server.tools.len()),control);
+                if let Some(failed)=self.sign_in_failed(server){view.notes.push((failed,Ink::Warning));}
+                else if !server.detail.is_empty(){view.notes.push((server.detail.clone(),if server.state==McpState::Error{Ink::Warning}else{Ink::Muted}));}view
             },
             Row::Back=>button("Back to servers","Return to the server browser.","Back"),
             Row::Status=>{let server=self.mcp.selected().expect("server detail");row("Connection".into(),server.detail.clone(),ControlView::Field{text:state_name(server.state).into(),editing:false})},
@@ -453,6 +478,17 @@ impl SettingsMenu {
             }
             Row::Refresh => return self.mcp_request(McpAction::List),
             Row::Server(name) => {
+                // Its Sign in button, if it has one, is the first.
+                let sign_in = (self.mcp.entries.iter())
+                    .find(|s| s.name == name)
+                    .and_then(|server| self.sign_in_button(server));
+                match (sign_in, part) {
+                    (Some((_, true)), Some(Part::Segment(0))) => {
+                        return self.mcp_request(McpAction::Authenticate { name });
+                    }
+                    (Some(_), Some(Part::Segment(0))) => return Outcome::Nothing,
+                    _ => {}
+                }
                 self.mcp.view = View::Details(name);
                 self.mcp.removing = None;
             }
@@ -632,6 +668,66 @@ impl SettingsMenu {
         self.specialist_focus(0, None);
         Outcome::Changed
     }
+    /// What server `server`'s Sign in button says, and whether it acts:
+    /// none unless it needs a sign in, or one from here is going or done.
+    fn sign_in_button(&self, server: &McpServerInfo) -> Option<(&'static str, bool)> {
+        let asked = matches!(
+            &self.mcp.pending,
+            Some(McpAction::Authenticate { name }) if *name == server.name
+        );
+        if server.signing_in || asked {
+            Some(("Signing in…", false))
+        } else if server.state == McpState::NeedsLogin {
+            Some(("Sign in", true))
+        } else if self.mcp.sign_ins.get(&server.name) == Some(&None)
+            && matches!(server.state, McpState::Ready | McpState::Connected)
+        {
+            Some(("Signed in", false))
+        } else {
+            None
+        }
+    }
+
+    /// Why signing in to `server` from here failed, if it did and it
+    /// still needs a sign in.
+    fn sign_in_failed(&self, server: &McpServerInfo) -> Option<String> {
+        if server.signing_in || server.state != McpState::NeedsLogin {
+            return None;
+        }
+        match self.mcp.sign_ins.get(&server.name)? {
+            Some(why) if !why.is_empty() => Some(why.clone()),
+            // Failed in the browser, which the daemon says.
+            _ => (!server.detail.is_empty()).then(|| server.detail.clone()),
+        }
+    }
+
+    /// The button the keys are on in row `at`, of a row of buttons.
+    fn mcp_button(&self, at: usize) -> usize {
+        let (row, button) = self.mcp.button;
+        if row == at { button } else { 0 }
+    }
+
+    /// Enter on row `at`: the button the keys are on, of a row of them.
+    pub(super) fn mcp_enter(&mut self, at: usize) -> Outcome {
+        let buttons = matches!(self.mcp_row(at).control, ControlView::Buttons { .. });
+        let part = buttons.then(|| Part::Segment(u8::try_from(self.mcp_button(at)).unwrap_or(0)));
+        self.mcp_act_part(at, part)
+    }
+
+    /// `l` or `h` on row `at`: the keys go to the next of its buttons,
+    /// or the one before.
+    pub(super) fn mcp_step(&mut self, at: usize, by: isize) -> Outcome {
+        let ControlView::Buttons { buttons, .. } = self.mcp_row(at).control else {
+            return Outcome::Nothing;
+        };
+        let button = (self.mcp_button(at).saturating_add_signed(by)).min(buttons.len() - 1);
+        if button == self.mcp_button(at) {
+            return Outcome::Nothing;
+        }
+        self.mcp.button = (at, button);
+        Outcome::Changed
+    }
+
     pub(super) fn mcp_paste(&mut self, text: &str) -> Outcome {
         if self
             .mcp

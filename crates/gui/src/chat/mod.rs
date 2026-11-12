@@ -189,6 +189,9 @@ enum Hit {
     /// where its output goes, which follows it, by the agent's name for
     /// it.
     TaskOutput(String),
+    /// The button that signs in to a managed MCP server the agent can't
+    /// use until the user does, by its name.
+    McpSignIn(String),
     QueuePage(i8),
     /// The heading of the agent's plan's shelf, which opens and folds it.
     Plan,
@@ -532,6 +535,9 @@ pub(crate) struct ChatView {
     /// this chat, so a click opens the task it was on, whichever chat has
     /// the focus and however the shelf moves.
     pub(crate) follows: Vec<String>,
+    /// The managed MCP servers whose Sign in was clicked, by name, for
+    /// the window to sign in to.
+    pub(crate) sign_ins: Vec<String>,
     /// The commands whose output is to be shown in a terminal below the
     /// chat, as their card's button or `go` asked, by their tool calls'
     /// IDs, for the window to take.
@@ -748,6 +754,7 @@ impl ChatView {
             filling: None,
             opened: Vec::new(),
             follows: Vec::new(),
+            sign_ins: Vec::new(),
             outputs: Vec::new(),
             remedies: Vec::new(),
             proposal_laid: None,
@@ -2889,6 +2896,7 @@ impl ChatView {
             Some(Hit::EditQueued(id)) => self.take_back(id, settled),
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
             Some(Hit::TaskOutput(id)) => self.follows.push(id),
+            Some(Hit::McpSignIn(server)) => self.sign_ins.push(server),
             Some(Hit::Output(tool)) => self.outputs.push(tool),
             Some(Hit::Plan) => self.plan_open = !self.plan_open,
             Some(Hit::LiveAgents) => self.live_agents_open = !self.live_agents_open,
@@ -3354,6 +3362,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Retrying(_)
         | ChatPatch::DraftCleared { .. }
         | ChatPatch::Branches(_)
+        | ChatPatch::McpSignIn(_)
         | ChatPatch::History { .. } => None,
     }
 }
@@ -5319,6 +5328,42 @@ mod tests {
         fixtures::read(&mut view, "R");
         fixtures::read(&mut view, "R");
         assert!(view.settle(&mut fonts).actions.is_empty());
+    }
+
+    #[test]
+    fn a_server_needing_a_sign_in_has_a_button_on_a_shelf_that_signs_in() {
+        use clackatoo_protocol::{McpSignIn, McpSignInState};
+        let mut fonts = fonts();
+        let mut view = failed("the agent failed", None);
+        let sign_in = Hit::McpSignIn("docs".into());
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        assert_eq!(drawn_at(&view, &sign_in), None);
+        let with = |view: &mut ChatView, state| {
+            view.node.mcp_sign_in = vec![McpSignIn {
+                server: "docs".into(),
+                state,
+            }];
+        };
+        with(&mut view, McpSignInState::Needed);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        let at = drawn_at(&view, &sign_in).expect("the button is drawn");
+        assert_eq!(view.pointer(at), Pointer::Hand);
+        view.press(at, 1, false);
+        view.settle(&mut fonts);
+        assert_eq!(std::mem::take(&mut view.sign_ins), ["docs"]);
+        // While it signs in, and once it has, there's nothing to click.
+        for state in [McpSignInState::SigningIn, McpSignInState::SignedIn] {
+            with(&mut view, state);
+            view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+            assert_eq!(drawn_at(&view, &sign_in), None);
+        }
+        // Failed, it can be tried again.
+        with(
+            &mut view,
+            McpSignInState::Failed("The browser closed".into()),
+        );
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        assert!(drawn_at(&view, &sign_in).is_some());
     }
 
     /// The middle of where `wanted` was drawn, if it was.

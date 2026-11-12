@@ -94,7 +94,8 @@ pub use context::{
     ContextSelection, ContextSnapshot,
 };
 pub use mcp::{
-    McpAction, McpImport, McpProxyAction, McpReply, McpScope, McpServerInfo, McpState, McpToolInfo,
+    McpAction, McpImport, McpProxyAction, McpReply, McpScope, McpServerInfo, McpSignIn,
+    McpSignInState, McpState, McpToolInfo,
 };
 pub use native::{NativeAccess, NativeAction, NativeReply};
 pub use side::{SideAction, SideReply};
@@ -177,7 +178,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 161;
+pub const PROTOCOL_VERSION: u32 = 162;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

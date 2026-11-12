@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    AgentTools, Error, McpAction, McpProxyAction, McpReply, McpServerInfo, McpState, McpToolInfo,
-    PaneId, Response, TerminalId,
+    AgentTools, Error, McpAction, McpProxyAction, McpReply, McpServerInfo, McpSignInState,
+    McpState, McpToolInfo, PaneId, Response, TerminalId,
 };
 use mio::Token;
 use serde_json::{Value, json};
@@ -181,9 +181,11 @@ impl Daemon {
                 .map(|(key, _)| key.clone())
                 .collect();
             for key in keys {
-                if let Some(login) = self.managed_mcp.logins.remove(&key)
-                    && let Some((waiting, ticket)) = login.waiting
-                {
+                let Some(login) = self.managed_mcp.logins.remove(&key) else {
+                    continue;
+                };
+                self.tell_mcp_sign_in(&key, &login.bound.name, &McpSignInState::Needed);
+                if let Some((waiting, ticket)) = login.waiting {
                     self.hand_answer_with(
                         waiting,
                         ticket,
@@ -432,10 +434,12 @@ impl Daemon {
         detail: &str,
         tools: Vec<McpToolInfo>,
     ) {
+        let binding = grant.bound.binding();
+        let signing_in = self.managed_mcp.logins.contains_key(&binding);
         let status = self
             .managed_mcp
             .statuses
-            .entry((grant.bound.binding(), Some(chat)))
+            .entry((binding, Some(chat)))
             .or_insert_with(|| Status {
                 revision: grant.bound.revision.clone(),
                 cwd: grant.bound.cwd.clone(),
@@ -457,6 +461,21 @@ impl Daemon {
                     description: crate::skills::line(&tool.description, 512),
                 })
                 .collect();
+        }
+        // The chat says what its agent can't use until the user signs in,
+        // with a button to, whichever agent it is.
+        let sign_in = match state {
+            McpState::NeedsLogin if signing_in => Some(Some(McpSignInState::SigningIn)),
+            McpState::NeedsLogin => Some(Some(McpSignInState::Needed)),
+            McpState::Connected => Some(None),
+            _ => None,
+        };
+        if let Some(sign_in) = sign_in
+            && self
+                .chat(chat)
+                .is_some_and(|own| own.set_mcp_sign_in(&grant.bound.name, sign_in))
+        {
+            self.collect_damage(chat);
         }
     }
 
@@ -602,6 +621,7 @@ impl Daemon {
                 server.tools.clone_from(&status.tools);
             }
             if self.managed_mcp.logins.contains_key(&binding) {
+                server.signing_in = true;
                 server.state = McpState::Starting;
                 server.detail="Waiting for browser sign in. For a remote daemon, paste the browser's callback URL here.".into();
             }
@@ -738,11 +758,17 @@ impl Daemon {
                 if let Some(login) = self.managed_mcp.logins.get(&binding) {
                     done.reply.login_url.clone_from(&login.url);
                     done.reply.notice = "Sign in is already in progress.".into();
+                    self.tell_mcp_sign_in(&binding, &bound.name, &McpSignInState::SigningIn);
                 } else if self.managed_mcp.logins.len() >= 8 {
                     done.reply.notice = "Too many MCP sign-ins are in progress.".into();
                 } else {
                     match oauth::start(*bound.clone(), std::sync::Arc::clone(&self.waker)) {
                         Ok(login) => {
+                            self.tell_mcp_sign_in(
+                                &binding,
+                                &bound.name,
+                                &McpSignInState::SigningIn,
+                            );
                             self.managed_mcp.logins.insert(
                                 binding,
                                 Login {
@@ -760,6 +786,21 @@ impl Daemon {
             }
         }
         reply
+    }
+
+    /// Tells each chat that found server `name`, of `binding`, needs a
+    /// sign in how signing in to it goes.
+    fn tell_mcp_sign_in(&mut self, binding: &str, name: &str, state: &McpSignInState) {
+        let chats: Vec<TerminalId> = (self.managed_mcp.statuses.keys())
+            .filter_map(|(id, chat)| chat.filter(|_| id == binding))
+            .collect();
+        for chat in chats {
+            if self.chat(chat).is_some_and(|own| {
+                own.mcp_sign_in(name).is_some() && own.set_mcp_sign_in(name, Some(state.clone()))
+            }) {
+                self.collect_damage(chat);
+            }
+        }
     }
 
     fn take_mcp_logins(&mut self) {
@@ -789,7 +830,23 @@ impl Daemon {
                         let Some(login) = self.managed_mcp.logins.remove(&key) else {
                             break;
                         };
+                        let signed_in = result.is_ok();
                         let (state,detail)=match result{Ok(())=>(McpState::Ready,"Signed in. Reconnect an active connection, or reopen a chat whose provider already gave up connecting.".into()),Err(why)=>(McpState::NeedsLogin,why)};
+                        // Live proxies connect again with the new login.
+                        if signed_in {
+                            let generation =
+                                self.managed_mcp.generations.entry(key.clone()).or_default();
+                            *generation = generation.saturating_add(1);
+                        }
+                        self.tell_mcp_sign_in(
+                            &key,
+                            &login.bound.name,
+                            &if signed_in {
+                                McpSignInState::SignedIn
+                            } else {
+                                McpSignInState::Failed(detail.clone())
+                            },
+                        );
                         self.managed_mcp.statuses.insert(
                             (key.clone(), None),
                             Status {

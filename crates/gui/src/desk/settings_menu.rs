@@ -6,7 +6,7 @@
 
 use clackatoo_protocol::{
     ConfigChange, DaemonSettings, FileLocation, OpenFile, OptionSaved, PaneTerminal, Request,
-    Response, Side, wire,
+    Response, Side, TerminalId, wire,
 };
 
 use super::{Asked, Desk};
@@ -594,14 +594,48 @@ impl Desk {
         }
     }
 
+    /// Signs in to managed MCP server `server`, which chat `chat`'s
+    /// agent can't use until the user does, as Settings' Sign in does:
+    /// the daemon opens the login and tells the chat how it goes.
+    pub(super) fn sign_in_to_mcp(&mut self, chat: TerminalId, server: String) {
+        if self.automating || self.controlled {
+            return self.refuse(MCP_USERS_ONLY.into());
+        }
+        if !self.needs_daemon("signing in to MCP servers", wire::MCP_SIGN_IN) {
+            return;
+        }
+        let Some(pane) = self.chat_pane_shown(chat) else {
+            return self.refuse("the chat isn't in the tab shown".to_owned());
+        };
+        self.request(
+            Request::Mcp {
+                pane: Some(pane),
+                action: clackatoo_protocol::McpAction::Authenticate { name: server },
+            },
+            Asked::ChatMcpSignIn,
+        );
+    }
+
+    /// The daemon answered a chat's sign in: with the login to open in
+    /// the browser, or why there's none. Returns whether to draw.
+    pub(super) fn chat_mcp_signed_in(&mut self, response: Response) -> bool {
+        match response {
+            Response::Mcp(reply) => match reply.login_url {
+                Some(url) => self.open_url(url),
+                None if !reply.notice.is_empty() => self.refuse(reply.notice),
+                None => {}
+            },
+            Response::Error(error) => self.refuse(error.to_string()),
+            _ => return false,
+        }
+        true
+    }
+
     /// Carries out what a key or click did to the menu.
     fn settings_mcp_action(&mut self, action: clackatoo_protocol::McpAction, id: u64) {
         if self.automating || self.controlled {
             if let Some(menu) = &mut self.settings {
-                menu.mcp_came(
-                    id,
-                    Err("Only the user may configure MCP servers or store credentials.".into()),
-                );
+                menu.mcp_came(id, Err(MCP_USERS_ONLY.into()));
             }
         } else {
             self.request(
@@ -835,3 +869,7 @@ impl Desk {
         ));
     }
 }
+
+/// Why an agent with native access to the window can't use MCP Settings,
+/// nor sign in to a server.
+const MCP_USERS_ONLY: &str = "Only the user may configure MCP servers or store credentials.";

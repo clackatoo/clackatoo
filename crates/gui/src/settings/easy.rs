@@ -462,7 +462,7 @@ impl SettingsMenu {
             Some(Shown::Entry(entry)) => self.activate(entry, None, facts, history),
             Some(Shown::Skill(at)) => self.open_skill(at),
             Some(Shown::Specialist(at)) => self.specialist_act(at),
-            Some(Shown::Mcp(at)) => self.mcp_act(at),
+            Some(Shown::Mcp(at)) => self.mcp_enter(at),
         }
     }
 
@@ -570,6 +570,7 @@ impl SettingsMenu {
                 }
                 self.easy_step_entry(entry, by, false, facts, history)
             }
+            Some(Shown::Mcp(at)) => self.mcp_step(at, by),
             _ => Outcome::Nothing,
         }
     }

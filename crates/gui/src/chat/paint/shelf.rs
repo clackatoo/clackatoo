@@ -1,7 +1,8 @@
 //! A shelf above the box a message is typed in: a raised card with a
 //! heading line, then a line for each thing it lists, each with a button
-//! at its end if it has one. What the agent runs in the background and
-//! its plan are drawn as shelves, stacked up from the box.
+//! at its end if it has one. What the agent runs in the background, its
+//! plan and the MCP servers to sign in to are drawn as shelves, stacked
+//! up from the box.
 
 use super::{BoxFrame, Canvas, ChatView, Fill, Hit, Measures, Paint, Tone};
 
@@ -25,6 +26,9 @@ pub(super) struct ShelfRow {
     /// What a click on the rest of the line does, if anything: it's lit
     /// while the mouse is over it.
     pub(super) open: Option<Hit>,
+    /// A button at the line's end with words on it, and what a click on
+    /// it does: gold if it does something, quiet if not.
+    pub(super) button: Option<(String, Option<Hit>)>,
 }
 
 /// The height of a shelf's line, its heading's, and the pad above and
@@ -90,8 +94,19 @@ impl ChatView {
                 ));
             }
             let button = m.em(1.8);
+            let label = (line.button.as_ref()).map(|(label, hit)| {
+                let tone = if hit.is_some() {
+                    Tone::Accent
+                } else {
+                    Tone::Muted
+                };
+                self.short_label(canvas.fonts, small, label, inner_width / 2.0, tone)
+            });
+            let pill = label.as_ref().map_or(0.0, |label| label.width + m.em(1.4));
             let text_width = if line.stop.is_some() {
                 (inner_width - button - m.em(0.5)).max(0.0)
+            } else if label.is_some() {
+                (inner_width - pill - m.em(0.5)).max(0.0)
             } else {
                 inner_width
             };
@@ -120,9 +135,54 @@ impl ChatView {
                 ];
                 self.draw_stop_button(canvas, m, frame, rect, hit);
             }
+            if let (Some(label), Some((_, hit))) = (label, line.button) {
+                let height = m.em(1.45);
+                let rect = [
+                    inner_left + inner_width - pill,
+                    top + (row - height) / 2.0,
+                    pill,
+                    height,
+                ];
+                self.draw_text_button(canvas, small, frame, rect, label, hit);
+            }
             top += row;
         }
         panel + gap
+    }
+
+    /// Draws a button with `label` on it in `rect`, as Settings draws
+    /// one: gold if a click on it does something, `hit`, quiet if not.
+    fn draw_text_button(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        rect: [f32; 4],
+        label: super::Laid,
+        hit: Option<Hit>,
+    ) {
+        let radius = rect[3] / 2.0;
+        canvas.fill(match hit {
+            Some(_) => {
+                Fill::rounded(rect, Paint::AccentFaint, radius).bordered(1.0, Paint::AccentEdge)
+            }
+            None => Fill::rounded(rect, Paint::Clear, radius).bordered(1.0, Paint::RaisedEdge),
+        });
+        if let Some(hit) = hit {
+            if (self.mouse).is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p)) {
+                canvas.fill(Fill::rounded(rect, Paint::ChatHover, radius));
+            }
+            self.hits.push((hit, frame.place.in_pane(rect)));
+        }
+        let x = rect[0] + (rect[2] - label.width) / 2.0;
+        super::draw_laid(
+            canvas,
+            m,
+            &label,
+            [x, rect[1] + (rect[3] - label.height) / 2.0],
+            label.width,
+        );
+        self.keep_label(label);
     }
 
     /// Draws a button that stops something, in `rect`: the square the

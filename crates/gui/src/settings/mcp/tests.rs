@@ -20,7 +20,7 @@ fn menu() -> SettingsMenu {
     )
 }
 fn server() -> McpServerInfo {
-    McpServerInfo {name:"search".into(),settings:json!({"command":"search-server","args":["--stdio"],"env":{"KEY":{"secret":"search-key"}},"enabled":true,"timeout_seconds":30}).to_string(),source:"Project".into(),path:"/project/.agents/mcp.json".into(),revision:"saved-revision".into(),editable:true,scope:McpScope::Project,trusted:false,enabled:true,state:McpState::Disconnected,detail:String::new(),tools:Vec::new()}
+    McpServerInfo {name:"search".into(),settings:json!({"command":"search-server","args":["--stdio"],"env":{"KEY":{"secret":"search-key"}},"enabled":true,"timeout_seconds":30}).to_string(),source:"Project".into(),path:"/project/.agents/mcp.json".into(),revision:"saved-revision".into(),editable:true,scope:McpScope::Project,trusted:false,enabled:true,state:McpState::Disconnected,detail:String::new(),tools:Vec::new(),signing_in:false}
 }
 #[test]
 fn polling_preserves_a_unicode_draft_and_stale_window_responses_are_ignored() {
@@ -128,4 +128,106 @@ fn provider_import_requires_selection_and_keeps_unsupported_entries_unselected()
         panic!("import not requested")
     };
     assert_eq!(names, ["supported"]);
+}
+#[test]
+fn a_server_needing_a_login_has_a_sign_in_button_that_says_how_it_goes() {
+    let mut menu = menu();
+    let locked = McpServerInfo {
+        name: "docs".into(),
+        state: McpState::NeedsLogin,
+        ..server()
+    };
+    menu.mcp.entries = vec![server(), locked.clone()];
+    // The list's five buttons, then the servers, by name.
+    let (fine, at) = (5, 6);
+    assert_eq!(menu.mcp_row(fine).control, ControlView::Button("Manage"));
+    let buttons = |menu: &SettingsMenu| match menu.mcp_row(at).control {
+        ControlView::Buttons { buttons, at } => (buttons, at),
+        other => panic!("not buttons: {other:?}"),
+    };
+    assert_eq!(
+        buttons(&menu),
+        (vec![("Sign in", true), ("Manage", true)], 0)
+    );
+    // Its button, clicked or with Enter, signs in, as Login does.
+    let Outcome::Mcp { action, id } = menu.mcp_act_part(at, Some(Part::Segment(0))) else {
+        panic!("no sign in")
+    };
+    assert!(
+        action
+            == McpAction::Authenticate {
+                name: "docs".into()
+            }
+    );
+    assert_eq!(buttons(&menu).0[0], ("Signing in…", false));
+    menu.mcp_came(
+        id,
+        Ok(McpReply {
+            login_url: Some("https://example.com/authorize".into()),
+            ..McpReply::default()
+        }),
+    );
+    menu.mcp.entries[1].signing_in = true;
+    assert_eq!(buttons(&menu).0[0], ("Signing in…", false));
+    assert_eq!(
+        menu.mcp_act_part(at, Some(Part::Segment(0))),
+        Outcome::Nothing
+    );
+    // Then what came of it: failed, and why, so it can be tried again...
+    menu.mcp.entries[1] = McpServerInfo {
+        detail: "The browser closed".into(),
+        ..locked.clone()
+    };
+    assert_eq!(buttons(&menu).0[0], ("Sign in", true));
+    assert_eq!(
+        menu.mcp_row(at).notes,
+        [("The browser closed".to_owned(), Ink::Warning)]
+    );
+    let Outcome::Mcp { id, .. } = menu.mcp_enter(at) else {
+        panic!("Enter doesn't sign in")
+    };
+    let url = Some("https://example.com/authorize".to_owned());
+    assert_eq!(
+        menu.mcp_came(
+            id,
+            Ok(McpReply {
+                login_url: url.clone(),
+                ..McpReply::default()
+            })
+        ),
+        url
+    );
+    // ...or signed in.
+    menu.mcp.entries[1].state = McpState::Ready;
+    menu.mcp.entries[1].detail.clear();
+    assert_eq!(buttons(&menu).0[0], ("Signed in", false));
+    assert!(menu.mcp_row(at).notes.is_empty());
+    // `l` takes the keys to Manage, which Enter opens.
+    menu.mcp.entries[1].state = McpState::NeedsLogin;
+    assert_eq!(menu.mcp_step(at, 1), Outcome::Changed);
+    assert_eq!(buttons(&menu).1, 1);
+    assert_eq!(menu.mcp_step(at, 1), Outcome::Nothing);
+    assert_eq!(menu.mcp_enter(at), Outcome::Changed);
+    assert_eq!(menu.mcp_title(), "MCP · docs");
+}
+#[test]
+fn a_sign_in_the_daemon_refuses_says_why_on_its_row() {
+    let mut menu = menu();
+    menu.mcp.entries = vec![McpServerInfo {
+        state: McpState::NeedsLogin,
+        ..server()
+    }];
+    let Outcome::Mcp { id, .. } = menu.mcp_act_part(5, Some(Part::Segment(0))) else {
+        panic!("no sign in")
+    };
+    let why = "Sign in is available for HTTP servers";
+    menu.mcp_came(
+        id,
+        Ok(McpReply {
+            servers: menu.mcp.entries.clone(),
+            notice: why.into(),
+            ..McpReply::default()
+        }),
+    );
+    assert_eq!(menu.mcp_row(5).notes, [(why.to_owned(), Ink::Warning)]);
 }

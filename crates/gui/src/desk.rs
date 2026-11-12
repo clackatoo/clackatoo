@@ -130,6 +130,8 @@ enum Asked {
     /// The shared skill catalogue for Settings.
     SettingsSkills,
     SettingsMcp(u64),
+    /// A sign in to a managed MCP server a chat's agent needs.
+    ChatMcpSignIn,
     Work,
     SettingsSpecialists,
     SettingsSpecialistSaved(clackatoo_protocol::SpecialistDefinition),
@@ -1988,6 +1990,7 @@ impl Desk {
             Some(Asker::Window(Asked::Work)) => self.work_answered(response),
             Some(Asker::Window(Asked::SettingsSkills)) => self.settings_skills(response),
             Some(Asker::Window(Asked::SettingsMcp(id))) => self.settings_mcp(id, response),
+            Some(Asker::Window(Asked::ChatMcpSignIn)) => self.chat_mcp_signed_in(response),
             Some(Asker::Window(Asked::SettingsSpecialists)) => self.settings_specialists(response),
             Some(Asker::Window(Asked::SettingsSpecialistSaved(edit))) => {
                 self.settings_specialist_saved(&edit, response)
@@ -3340,6 +3343,7 @@ mod tests {
     mod settings_menu;
     mod shared;
     mod shortcuts;
+    mod sign_in;
     mod subagents;
     mod tasks;
     mod trust;

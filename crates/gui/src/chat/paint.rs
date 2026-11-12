@@ -24,6 +24,7 @@ mod queue;
 mod select;
 mod shelf;
 mod side;
+mod sign_in;
 mod slash;
 mod switcher;
 mod tables;
@@ -1582,7 +1583,8 @@ impl ChatView {
         let agents = self.draw_live_agents(&mut canvas, m, &frame, queued);
         let tasks = self.draw_tasks(&mut canvas, m, &frame, queued + agents);
         let plan = self.draw_plan(&mut canvas, m, &frame, queued + agents + tasks);
-        height + footer + queued + agents + tasks + plan
+        let sign_in = self.draw_sign_in(&mut canvas, m, &frame, queued + agents + tasks + plan);
+        height + footer + queued + agents + tasks + plan + sign_in
     }
 
     /// One draft thumbnail and its remove button, above the image pass.

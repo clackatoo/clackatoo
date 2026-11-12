@@ -1593,6 +1593,7 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
         | ChatPatch::Plan(_)
         | ChatPatch::Commands(_)
         | ChatPatch::Retrying(_)
+        | ChatPatch::McpSignIn(_)
         | ChatPatch::DraftCleared { .. } => dirty.footer = true,
     }
 }

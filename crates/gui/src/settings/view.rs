@@ -127,6 +127,12 @@ pub(crate) enum ControlView {
     Open,
     /// An explicit draft action.
     Button(&'static str),
+    /// Buttons side by side, each its label and whether it acts, gold if
+    /// it does; the keys on button `at`.
+    Buttons {
+        buttons: Vec<(&'static str, bool)>,
+        at: usize,
+    },
     /// Wrapped instructions, edited within the draft.
     Paragraph { text: String, editing: bool },
 }
@@ -1419,6 +1425,13 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
             lay.width(label, HELP, Ink::Accent) + lay.u(28.0),
             lay.u(28.0),
         ],
+        ControlView::Buttons { buttons, .. } => {
+            let rects = button_rects(lay, buttons, Rect::default());
+            [
+                rects.last().map_or(0.0, |button| button.right()),
+                lay.u(28.0),
+            ]
+        }
         ControlView::Font(name) => {
             let text = lay.width(name, VALUE, Ink::Plain);
             [(text + lay.u(50.0)).max(lay.u(220.0)), lay.u(36.0)]
@@ -1582,6 +1595,14 @@ fn lay_row(
         lay_lock(lay, place, number, from, middle);
     }
     lay_control(lay, &row.control, control, number, locked);
+    // Around the button the keys are on, of buttons side by side.
+    let control = match &row.control {
+        ControlView::Buttons { buttons, at } => button_rects(lay, buttons, control)
+            .get(*at)
+            .copied()
+            .unwrap_or(control),
+        _ => control,
+    };
     if focused && !locked {
         let ring = lay.u(3.0);
         lay.fill(
@@ -1902,6 +1923,30 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
                 lay.hit(rect, whole);
             }
         }
+        ControlView::Buttons { buttons, .. } => {
+            let rects = button_rects(lay, buttons, rect);
+            for (at, (&(label, acts), button)) in buttons.iter().zip(rects).enumerate() {
+                let (fill, ink) = if acts {
+                    (
+                        Fill::rounded(button.to_array(), Paint::AccentFaint, button.height / 2.0)
+                            .bordered(edge, Paint::AccentEdge),
+                        Ink::Accent,
+                    )
+                } else {
+                    (
+                        Fill::rounded(button.to_array(), Paint::Clear, button.height / 2.0)
+                            .bordered(edge, Paint::PaletteEdge),
+                        Ink::Muted,
+                    )
+                };
+                lay.fill(fill);
+                lay.text_mid(button.x + lay.u(14.0), middle, label, ink, HELP);
+                lay.hit(
+                    button,
+                    SettingsHit::Control(row, Part::Segment(u8::try_from(at).unwrap_or(0))),
+                );
+            }
+        }
         ControlView::Advanced | ControlView::Open | ControlView::Button(_) => {
             lay.fill(
                 Fill::rounded(rect.to_array(), Paint::AccentFaint, rect.height / 2.0)
@@ -1922,6 +1967,27 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
         }
         ControlView::Cards(_) => {}
     }
+}
+
+/// Where each of `buttons` side by side goes, from `rect`'s left and
+/// as tall as a button, centred in it.
+fn button_rects(lay: &mut Lay<'_>, buttons: &[(&str, bool)], rect: Rect) -> Vec<Rect> {
+    let height = lay.u(28.0);
+    let y = (rect.y + (rect.height - height) / 2.0).round();
+    let mut x = rect.x;
+    (buttons.iter())
+        .map(|&(label, _)| {
+            let width = lay.width(label, HELP, Ink::Accent) + lay.u(28.0);
+            let button = Rect {
+                x,
+                y,
+                width,
+                height,
+            };
+            x += width + lay.u(8.0);
+            button
+        })
+        .collect()
 }
 
 /// Lays out the agents' cards, side by side, as many as four to a line,

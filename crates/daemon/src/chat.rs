@@ -3369,6 +3369,43 @@ impl HostedChat {
         self.set_notice(Some(notice));
     }
 
+    /// Says how signing in to managed MCP server `server` goes, for a
+    /// button in the chat to sign in with; `None` once it needs none.
+    /// Returns whether that changed anything.
+    pub(crate) fn set_mcp_sign_in(
+        &mut self,
+        server: &str,
+        state: Option<clackatoo_protocol::McpSignInState>,
+    ) -> bool {
+        let servers = &mut self.node.mcp_sign_in;
+        let at = servers.iter().position(|each| each.server == server);
+        match (at, state) {
+            (Some(at), Some(state)) if servers[at].state != state => servers[at].state = state,
+            (Some(at), None) => {
+                servers.remove(at);
+            }
+            // At most a few: a chat has at most 16 managed servers.
+            (None, Some(state)) if servers.len() < 16 => {
+                servers.push(clackatoo_protocol::McpSignIn {
+                    server: server.to_owned(),
+                    state,
+                });
+            }
+            _ => return false,
+        }
+        self.journal
+            .push(ChatPatch::McpSignIn(self.node.mcp_sign_in.clone()));
+        true
+    }
+
+    /// How signing in to managed MCP server `server` goes, if the chat
+    /// has said it needs one.
+    pub(crate) fn mcp_sign_in(&self, server: &str) -> Option<&clackatoo_protocol::McpSignInState> {
+        (self.node.mcp_sign_in.iter())
+            .find(|each| each.server == server)
+            .map(|each| &each.state)
+    }
+
     /// Says that turn `turn` changed `files`.
     pub(crate) fn set_files(&mut self, turn: usize, files: Option<TurnFiles>) {
         if let Some(edited) = self.node.turns.get_mut(turn)

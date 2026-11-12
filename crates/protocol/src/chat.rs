@@ -162,6 +162,14 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::CONTEXT }, _, _>"
     )]
     pub draft_context: Vec<crate::ContextSelection>,
+    /// The managed MCP servers the agent can't use until the user signs
+    /// in to them, each with how that's going, for a button to sign in.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::MCP_SIGN_IN }, _>",
+        deserialize_with = "wire::since::<{ wire::MCP_SIGN_IN }, _, _>"
+    )]
+    pub mcp_sign_in: Vec<crate::McpSignIn>,
 }
 
 /// Where branches of a chat's conversation part, on the branch shown
@@ -2129,6 +2137,9 @@ pub enum ChatPatch {
     /// which changes the turns shown, sends the chat whole instead.
     /// Requires `wire::CHAT_BRANCHES`.
     Branches(Vec<Divergence>),
+    /// The servers that need a sign in are now these (see
+    /// [`ChatNode::mcp_sign_in`]). Requires `wire::MCP_SIGN_IN`.
+    McpSignIn(Vec<crate::McpSignIn>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -2575,6 +2586,7 @@ impl ChatNode {
             .min(self.turns.len());
         Self {
             draft_context: self.draft_context.clone(),
+            mcp_sign_in: self.mcp_sign_in.clone(),
             agent: self.agent.clone(),
             turns: self.turns[start..].to_vec(),
             state: self.state.clone(),
@@ -2692,6 +2704,7 @@ impl ChatNode {
                 self.draft_context.clear();
             }
             ChatPatch::Branches(branches) => self.branches = branches,
+            ChatPatch::McpSignIn(servers) => self.mcp_sign_in = servers,
             ChatPatch::History {
                 first,
                 before,

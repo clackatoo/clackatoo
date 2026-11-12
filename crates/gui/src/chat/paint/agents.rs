@@ -87,6 +87,7 @@ impl ChatView {
                     tone: row_tone(&entry.status),
                     stop: None,
                     open: Some(Hit::Subagent(entry.chat)),
+                    button: None,
                 })
                 .collect();
             if entries.len() > rows.len() {

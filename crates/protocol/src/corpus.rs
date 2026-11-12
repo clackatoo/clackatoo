@@ -559,6 +559,11 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::MANAGED_MCP, sample)),
     );
+    samples.extend(
+        mcp_sign_in_samples()
+            .into_iter()
+            .map(|sample| (crate::wire::MCP_SIGN_IN, sample)),
+    );
     samples.extend(more().into_iter().map(|sample| (FIRST, sample)));
     // The fallbacks a newer daemon sends in place of what's newer.
     samples.extend([
@@ -4789,6 +4794,7 @@ fn links() -> Vec<(LinkId, LinkTarget)> {
 fn chat() -> ChatNode {
     ChatNode {
         draft_context: Vec::new(),
+        mcp_sign_in: Vec::new(),
         agent: "Claude Code".into(),
         turns: vec![turn()],
         state: ChatState::Answering,
@@ -5259,6 +5265,65 @@ fn managed_mcp_samples() -> Vec<Sample> {
     samples
 }
 
+/// Samples of protocol 162: a chat's servers needing a sign in, one in
+/// every state, in a snapshot and a patch, and a server being signed in
+/// to in Settings.
+fn mcp_sign_in_samples() -> Vec<Sample> {
+    use crate::{McpReply, McpScope, McpServerInfo, McpSignIn, McpSignInState, McpState};
+    let terminal = TerminalId(3);
+    let servers: Vec<McpSignIn> = [
+        McpSignInState::Needed,
+        McpSignInState::SigningIn,
+        McpSignInState::SignedIn,
+        McpSignInState::Failed("The browser closed".into()),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(at, state)| McpSignIn {
+        server: format!("docs-{at}"),
+        state,
+    })
+    .collect();
+    vec![
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "sign in".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode {
+                    mcp_sign_in: servers.clone(),
+                    ..chat()
+                })),
+            }),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::McpSignIn(servers)),
+                Patch::Chat(ChatPatch::McpSignIn(Vec::new())),
+            ]),
+        })),
+        Sample::Server(ServerMessage::Response(Response::Mcp(McpReply {
+            servers: vec![McpServerInfo {
+                name: "docs".into(),
+                settings: "{}".into(),
+                source: "Personal".into(),
+                path: "mcp.json".into(),
+                revision: "revision".into(),
+                editable: true,
+                scope: McpScope::Personal,
+                trusted: true,
+                enabled: true,
+                state: McpState::Starting,
+                detail: "Waiting for browser sign in.".into(),
+                tools: vec![],
+                signing_in: true,
+            }],
+            ..McpReply::default()
+        }))),
+    ]
+}
+
 fn managed_mcp_replies() -> Vec<Sample> {
     use crate::{McpImport, McpReply, McpScope, McpServerInfo, McpState, McpToolInfo};
     let mut samples = Vec::new();
@@ -5289,6 +5354,7 @@ fn managed_mcp_replies() -> Vec<Sample> {
                         name: "lookup".into(),
                         description: "Find a document".into(),
                     }],
+                    signing_in: false,
                 }],
                 imports: vec![McpImport {
                     name: "other".into(),

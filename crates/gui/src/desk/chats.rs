@@ -163,9 +163,15 @@ impl Desk {
             let (mut copied, mut yanked, mut commands) = (Vec::new(), Vec::new(), Vec::new());
             let (mut wanting, mut opening) = (Vec::new(), Vec::new());
             let (mut follows, mut outputs, mut remedies) = (Vec::new(), Vec::new(), Vec::new());
+            let mut sign_ins = Vec::new();
             for (&terminal, chat) in &mut self.chats {
                 redraw |= chat.settle(fonts);
                 follows.extend(chat.take_follows().into_iter().map(|id| (terminal, id)));
+                sign_ins.extend(
+                    chat.take_sign_ins()
+                        .into_iter()
+                        .map(|name| (terminal, name)),
+                );
                 outputs.extend(chat.take_outputs().into_iter().map(|tool| (terminal, tool)));
                 remedies.extend(
                     chat.take_remedies()
@@ -200,6 +206,11 @@ impl Desk {
             // A click on a task's line on a chat's shelf.
             for (chat, id) in follows {
                 self.follow_task(chat, &id);
+                redraw = true;
+            }
+            // A chat's Sign in to an MCP server.
+            for (chat, server) in sign_ins {
+                self.sign_in_to_mcp(chat, server);
                 redraw = true;
             }
             // A command card's button, or `go` on it.
@@ -714,7 +725,7 @@ impl Desk {
     }
 
     /// The pane showing chat `chat` in the tab shown, if one does.
-    fn chat_pane_shown(&self, chat: TerminalId) -> Option<PaneId> {
+    pub(super) fn chat_pane_shown(&self, chat: TerminalId) -> Option<PaneId> {
         self.shown_tab().and_then(|tab| {
             (tab.layout.panes().iter())
                 .find(|pane| pane.content == Content::Terminal(chat))

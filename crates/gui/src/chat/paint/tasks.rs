@@ -47,6 +47,7 @@ impl ChatView {
                 stop: (task.can_stop && task.state == AgentTaskState::Running)
                     .then(|| Hit::StopTask(task.id.clone())),
                 open: (task.output.is_some()).then(|| Hit::TaskOutput(task.id.clone())),
+                button: None,
             })
             .collect();
         if rows.is_empty() {

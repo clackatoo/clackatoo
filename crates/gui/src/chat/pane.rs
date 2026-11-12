@@ -244,6 +244,12 @@ impl ChatPane {
         std::mem::take(&mut self.view.follows)
     }
 
+    /// Takes the managed MCP servers whose Sign in was clicked, oldest
+    /// first, by name.
+    pub(crate) fn take_sign_ins(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.view.sign_ins)
+    }
+
     /// Takes the commands whose output is to be shown in a terminal,
     /// oldest first, by their tool calls' IDs.
     pub(crate) fn take_outputs(&mut self) -> Vec<String> {

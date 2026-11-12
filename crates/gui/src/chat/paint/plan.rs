@@ -55,6 +55,7 @@ impl ChatView {
                     },
                     stop: None,
                     open: None,
+                    button: None,
                 })
                 .collect();
             let mut heading = done_of(plan);

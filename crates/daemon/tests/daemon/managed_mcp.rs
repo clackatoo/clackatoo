@@ -289,3 +289,38 @@ fn managed_mcp_tests_do_not_call_tools_and_configuration_conflicts_do_not_overwr
     let next = start_tooled_chat(&mut client, AgentTools::Ask);
     assert!(last_words(&ask(&mut client, next, "tools")).contains("managed_fixture"));
 }
+
+#[test]
+fn a_server_refusing_the_agent_for_want_of_a_login_asks_the_chat_to_sign_in() {
+    use clackatoo_protocol::McpSignInState;
+    use serde_json::json;
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let script = "import sys\nsys.stdin.readline()\nsys.stderr.write('401 Unauthorized\\n')\n";
+    admin(
+        &mut client,
+        McpAction::Save {
+            name: "fixture".into(),
+            scope: McpScope::Personal,
+            expected: None,
+            settings: json!({"command":"python3","args":["-u","-c",script]}).to_string(),
+        },
+    );
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let mut proxy = Proxy::new(&mut client, chat);
+    proxy.send(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}));
+    let node = wait_for_chat(&mut client, chat, |node| !node.mcp_sign_in.is_empty());
+    assert_eq!(node.mcp_sign_in[0].server, "fixture");
+    assert_eq!(node.mcp_sign_in[0].state, McpSignInState::Needed);
+    // A window may sign in to it; a command server signs in through its
+    // environment, which the chat isn't told is under way.
+    let reply = admin(
+        &mut client,
+        McpAction::Authenticate {
+            name: "fixture".into(),
+        },
+    );
+    assert!(reply.login_url.is_none(), "{reply:?}");
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(node.mcp_sign_in[0].state, McpSignInState::Needed);
+}

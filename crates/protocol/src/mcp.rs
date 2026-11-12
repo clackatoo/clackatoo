@@ -1,6 +1,8 @@
 //! Clackatoo-managed MCP servers and their authenticated session proxies.
 use serde::{Deserialize, Serialize};
 
+use crate::wire;
+
 /// Where a managed server is configured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum McpScope {
@@ -42,6 +44,7 @@ pub struct McpToolInfo {
 
 /// A server as Settings may show it. Credentials are references, never values.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub struct McpServerInfo {
     /// Stable configured name.
     pub name: String,
@@ -67,6 +70,36 @@ pub struct McpServerInfo {
     pub detail: String,
     /// Tools from the last successful connection or test.
     pub tools: Vec<McpToolInfo>,
+    /// A browser sign in to it is under way.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::MCP_SIGN_IN }, _>",
+        deserialize_with = "wire::since::<{ wire::MCP_SIGN_IN }, _, _>"
+    )]
+    pub signing_in: bool,
+}
+
+/// A managed server a chat's agent can't use until the user signs in to
+/// it, and how signing in is going. Every window shows the daemon's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignIn {
+    /// The configured server name.
+    pub server: String,
+    /// How signing in to it is going.
+    pub state: McpSignInState,
+}
+
+/// How signing in to a chat's server is going.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpSignInState {
+    /// The server refused the agent: it needs a sign in.
+    Needed,
+    /// The browser is open on its sign in.
+    SigningIn,
+    /// Signed in; the agent's connection starts again.
+    SignedIn,
+    /// Signing in failed, saying why.
+    Failed(String),
 }
 
 /// A provider entry awaiting an explicit import.

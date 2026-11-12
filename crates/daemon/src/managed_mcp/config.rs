@@ -259,6 +259,7 @@ impl Bound {
                 String::new()
             },
             tools: Vec::new(),
+            signing_in: false,
         }
     }
 }
