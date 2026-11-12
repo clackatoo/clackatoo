@@ -767,6 +767,8 @@ fn easy_pages_go_by_tab_braces_and_clicks_and_the_keys_page_records_keys() {
     type_keys(&mut desk, "}");
     assert_eq!(easy(&mut desk).title, "Editor");
     type_keys(&mut desk, "{{");
+    assert_eq!(easy(&mut desk).title, "Permissions");
+    type_keys(&mut desk, "{");
     assert_eq!(easy(&mut desk).title, "MCP Servers");
     desk.settings_pointer(SettingsHit::Page(3));
     let view = easy(&mut desk);
@@ -1075,6 +1077,7 @@ fn daemon_said(machine: &str) -> clackatoo_protocol::DaemonSettings {
         dir: dir.into(),
         options,
         failure: None,
+        permission_history: Vec::new(),
     }
 }
 

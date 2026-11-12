@@ -49,6 +49,7 @@ mod modes;
 mod nested;
 mod originals;
 mod outputs;
+pub(crate) mod permissions;
 mod plan;
 pub(crate) mod queue;
 mod relations;
@@ -201,6 +202,8 @@ fn chat_wide(id: &str) -> bool {
         BROWSING_SETTING,
         SUBAGENTS_SETTING,
         SUBAGENTS_ABOVE_SETTING,
+        permissions::SETTING,
+        "clackatoo.permissions.previous",
     ]
     .contains(&id)
 }
@@ -212,6 +215,7 @@ fn shown_own(id: &str) -> bool {
         || id == BROWSER_SETTING
         || id == SUBAGENTS_SETTING
         || id == SPECIALIST_SETTING
+        || id == permissions::SETTING
 }
 
 /// The Subagents setting's value `value`, as a number: 0 for off. `None`
@@ -442,6 +446,10 @@ enum Link {
     reason = "independent facts of a chat, each set and cleared on its own"
 )]
 pub(crate) struct HostedChat {
+    /// A compatible mode was confirmed by the provider for this session.
+    permission_confirmed: bool,
+    /// Last mode actually reported by the provider, before optimistic UI edits.
+    permission_observed: Option<String>,
     active_specialist: Option<crate::specialists::Specialist>,
     specialist_choices: Vec<SettingChoice>,
     /// Completed compactions, so host context can be supplied again afterwards.
@@ -800,6 +808,8 @@ impl HostedChat {
         browser: bool,
     ) -> Self {
         Self {
+            permission_confirmed: false,
+            permission_observed: None,
             image_receipts: Vec::new(),
             context_epoch: 0,
             active_specialist: None,
@@ -1036,6 +1046,7 @@ impl HostedChat {
             .map(setting_from_handover)
             .collect();
         resumed.chosen = chat.chosen;
+        resumed.default_permission_engine(crate::permissions::Engine::Provider);
         resumed.restore_specialist();
         let (relations, senders) = Relations::resume(chat.relations);
         resumed.relations = relations;
@@ -1372,6 +1383,9 @@ impl HostedChat {
                     self.set_tools(tools);
                 }
             }
+            ChatAction::Set { setting, value } if setting == permissions::SETTING => {
+                actions.extend(self.choose_permission_engine(&value));
+            }
             ChatAction::Set { setting, value } if setting == BROWSER_SETTING => {
                 if let Some(&(browser, ..)) =
                     (BROWSER_VALUES.iter()).find(|(_, id, ..)| *id == value)
@@ -1408,23 +1422,37 @@ impl HostedChat {
             ChatAction::Resend => self.resend(&mut actions),
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
-                let was = (self.node.settings.iter())
-                    .find(|known| known.id == setting && known.kind == SettingKind::Mode)
-                    .map(|known| known.value.clone());
-                if self.set_value(&setting, &value) {
-                    if let Some(was) = was {
-                        self.mode_chosen(&was, &value);
-                    }
-                    self.chosen.retain(|(id, _)| *id != setting);
-                    self.chosen.push((setting.clone(), value.clone()));
-                    if self.link == Link::Open {
-                        self.asked(&setting);
-                        actions.push(Action::Set { setting, value });
-                    }
-                }
+                self.choose_provider_setting(setting, value, &mut actions);
             }
         }
         actions
+    }
+
+    fn choose_provider_setting(
+        &mut self,
+        setting: String,
+        value: String,
+        actions: &mut Vec<Action>,
+    ) {
+        let was = (self.node.settings.iter())
+            .find(|known| known.id == setting && known.kind == SettingKind::Mode)
+            .map(|known| known.value.clone());
+        if was.is_some() && !self.permission_mode_allowed(&value) {
+            self.set_notice(Some("Clackatoo rules require a provider mode that sends approval requests. Switch to Provider permissions to use this mode.".into()));
+            return;
+        }
+        if self.set_value(&setting, &value) {
+            if let Some(was) = was {
+                self.permission_confirmed = false;
+                self.mode_chosen(&was, &value);
+            }
+            self.chosen.retain(|(id, _)| *id != setting);
+            self.chosen.push((setting.clone(), value.clone()));
+            if self.link == Link::Open {
+                self.asked(&setting);
+                actions.push(Action::Set { setting, value });
+            }
+        }
     }
 
     /// Gives setting `id` the value `value`, as far as the chat's view
@@ -1552,6 +1580,12 @@ impl HostedChat {
         }
         match self.link {
             Link::Open => {
+                if !self.permissions_ready() {
+                    self.queued = Some(prompt);
+                    self.set_state(ChatState::Starting);
+                    actions.extend(self.require_permission_mode());
+                    return;
+                }
                 self.set_state(ChatState::Answering);
                 actions.push(self.prompt(prompt));
             }
@@ -1808,6 +1842,12 @@ impl HostedChat {
             }
         }
         self.show_question();
+        if self.link == Link::Open && !self.permissions_ready() && self.queued.take().is_some() {
+            self.end_turn(Outcome::Stopped);
+            self.set_state(ChatState::Ready);
+            self.hold_waiting(again);
+            return;
+        }
         if self.link == Link::Open {
             actions.push(Action::Cancel);
         } else if self.queued.take().is_some() {
@@ -1868,6 +1908,7 @@ impl HostedChat {
         if let Some(carry) = self.carry.take() {
             self.carry_settings(carry);
         }
+        self.prepare_permission_connection();
         let starting = self.starting_mode.take();
         if let Some(mode) = starting.clone()
             && let Some(setting) = (self.node.settings.iter()).find(|setting| {
@@ -1913,12 +1954,21 @@ impl HostedChat {
                 actions.push(Action::Set { setting, value });
             }
         }
-        let queued = self.queued.take();
-        self.set_state(if queued.is_some() {
-            ChatState::Answering
+        actions.extend(self.require_permission_mode());
+        let queued = if self.permissions_ready() {
+            self.queued.take()
         } else {
-            ChatState::Ready
-        });
+            None
+        };
+        if self.permissions_ready() || !matches!(self.node.state, ChatState::Failed(_)) {
+            self.set_state(if queued.is_some() {
+                ChatState::Answering
+            } else if self.queued.is_some() {
+                ChatState::Starting
+            } else {
+                ChatState::Ready
+            });
+        }
         actions.extend(queued.map(|text| self.prompt(text)));
         actions
     }
@@ -2033,6 +2083,12 @@ impl HostedChat {
         }
         self.budget = budget;
         if to.name == self.agent {
+            return None;
+        }
+        if self.permission_engine() == crate::permissions::Engine::Clackatoo
+            && !matches!(to.name.as_str(), "claude" | "codex")
+        {
+            self.set_notice(Some("Select Provider permissions before switching to this provider; Clackatoo rules do not support its approval mode yet.".into()));
             return None;
         }
         // What it runs in the background goes with the agent it leaves,
@@ -2291,6 +2347,11 @@ impl HostedChat {
     /// The agent's settings after the chat asked to change one, or why it
     /// couldn't.
     pub(crate) fn settings_changed(&mut self, result: Result<Vec<SessionConfigOption>, String>) {
+        let mode_answer = self.setting_asked.front().is_some_and(|(id, _)| {
+            self.setting_of(SettingKind::Mode)
+                .is_some_and(|setting| setting.id == *id)
+        });
+        let confirmed = result.as_ref().is_ok_and(|options| !options.is_empty());
         match result {
             Ok(options) if !options.is_empty() => {
                 self.setting_asked.pop_front();
@@ -2306,6 +2367,9 @@ impl HostedChat {
                 self.setting_asked.pop_front();
                 self.set_notice(Some(format!("The setting couldn't be changed: {err}")));
             }
+        }
+        if mode_answer {
+            self.permission_mode_answered(confirmed);
         }
     }
 
@@ -4083,6 +4147,7 @@ impl HostedChat {
             }
         }
         for (id, value, (now, chosen)) in put_back {
+            self.permission_confirmed = false;
             let agent = self.node.agent.clone();
             self.set_notice(Some(format!(
                 "{agent} switched itself to {now}; put back to {chosen}"
@@ -4105,6 +4170,9 @@ impl HostedChat {
             return true;
         }
         let (agent, now) = (self.agent.as_str(), setting.value.as_str());
+        if !self.permission_mode_allowed(now) {
+            return false;
+        }
         let (Some(rank), Some(chosen_rank)) = (modes::rank(agent, now), modes::rank(agent, chosen))
         else {
             return false;
@@ -4163,6 +4231,18 @@ impl HostedChat {
     /// the agent never changes those.
     fn set_settings(&mut self, mut settings: Vec<Setting>) {
         settings.retain(|setting| !chat_wide(&setting.id));
+        self.permission_observed = settings
+            .iter()
+            .find(|setting| setting.kind == SettingKind::Mode)
+            .map(|setting| setting.value.clone());
+        if !self
+            .permission_observed
+            .as_deref()
+            .is_some_and(|mode| self.permission_mode_allowed(mode))
+        {
+            self.permission_confirmed = false;
+        }
+        settings.push(self.permission_setting());
         settings.push(tools_setting(self.tools()));
         settings.push(browser_setting(self.browser()));
         settings.push(subagents_setting(self.subagents(), &self.subagents_offered));
@@ -8812,6 +8892,7 @@ mod tests {
             [
                 (SettingKind::Mode, "auto"),
                 (SettingKind::Model, "haiku"),
+                (SettingKind::Other, "provider"),
                 (SettingKind::Tools, "ask"),
                 (SettingKind::Browser, "off"),
                 (SettingKind::Subagents, "6"),

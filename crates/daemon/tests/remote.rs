@@ -52,6 +52,7 @@ impl TestDaemon {
             .expect("a free port")
             .port();
         let config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),

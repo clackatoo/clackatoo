@@ -1655,6 +1655,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: "Settings scrolls smoothly, as panes do: Easy's pages, Advanced's list and the font picker",
     },
+    News {
+        id: "permissions",
+        date: "2026-11-12",
+        lesson: "agents",
+        what: "Permissions settings: provider or Clackatoo rules, explicit Allow/Ask/Deny, and recent decisions",
+    },
 ];
 
 impl News {

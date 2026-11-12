@@ -76,11 +76,12 @@ enum Change {
     Option {
         info: &'static Info,
         value: Option<Value>,
+        expected: Option<String>,
     },
 }
 impl Asked {
     fn option_saved(&self, refused: Option<String>) -> OptionSaved {
-        let Change::Option { info, value } = &self.change;
+        let Change::Option { info, value, .. } = &self.change;
         OptionSaved {
             name: info.name.into(),
             value: value.as_ref().map(Value::text),
@@ -260,6 +261,8 @@ impl Daemon {
     /// Takes from `fresh`, the daemon's config as its own config is now,
     /// what changes as the daemon runs.
     fn take_live_config(&mut self, fresh: &DaemonConfig) {
+        let rules_changed = self.config.permissions.rules != fresh.permissions.rules;
+        self.config.permissions = fresh.permissions.clone();
         let claude_plugins = self.config.agents.configured.claude_plugins;
         let codex_plugins = self.config.agents.configured.codex_plugins;
         self.config.agents.configured = fresh.agents.configured.clone();
@@ -275,6 +278,13 @@ impl Daemon {
             .filter(|id| self.chat_ref(*id).is_some())
             .collect();
         for id in chats {
+            if rules_changed {
+                let actions = self
+                    .chat(id)
+                    .map(crate::chat::HostedChat::cancel_rule_questions)
+                    .unwrap_or_default();
+                self.act(id, actions);
+            }
             let specialists = self.specialists_for(id);
             if let Some(chat) = self.chat(id) {
                 chat.offer_specialists(&specialists);
@@ -363,6 +373,7 @@ impl Daemon {
             dir: own.dirs.config().display().to_string(),
             options,
             failure,
+            permission_history: self.permissions.history.iter().cloned().collect(),
         }
     }
 
@@ -400,6 +411,39 @@ impl Daemon {
         name: &str,
         value: Option<&str>,
     ) -> Result<Response, Error> {
+        if name == "permissions.rules" {
+            return Err(Error::Other(
+                "Permission rule edits require a current draft revision; update the window".into(),
+            ));
+        }
+        self.save_daemon_option_checked(token, name, value, None)
+    }
+
+    pub(super) fn serve_set_permission_rules(
+        &mut self,
+        token: Token,
+        rules: &str,
+        expected: &str,
+    ) -> Result<Response, Error> {
+        if expected.len() > crate::permissions::MAX_BYTES {
+            return Err(Error::Other("The permission draft exceeds 64 KiB".into()));
+        }
+        crate::permissions::read_rules(rules).map_err(Error::Other)?;
+        self.save_daemon_option_checked(
+            token,
+            "permissions.rules",
+            Some(rules),
+            Some(expected.to_owned()),
+        )
+    }
+
+    fn save_daemon_option_checked(
+        &mut self,
+        token: Token,
+        name: &str,
+        value: Option<&str>,
+        expected: Option<String>,
+    ) -> Result<Response, Error> {
         if let Some(refused) = self.not_a_window(token) {
             return Err(refused);
         }
@@ -428,7 +472,11 @@ impl Daemon {
         }
         let asked = Asked {
             token,
-            change: Change::Option { info, value },
+            change: Change::Option {
+                info,
+                value,
+                expected,
+            },
         };
         self.configuring.jobs.push_back(asked);
         // Started at once, unless a run is under way.
@@ -497,9 +545,17 @@ impl Daemon {
 fn run_job(dirs: &settings::Dirs, job: Option<Asked>) -> Ran {
     let ran = match job {
         Some(Asked {
-            change: Change::Option { info, value },
+            change:
+                Change::Option {
+                    info,
+                    value,
+                    expected,
+                },
             ..
-        }) => settings::change(dirs, info, value),
+        }) => match expected {
+            Some(expected) => settings::change_permission_rules(dirs, value, &expected),
+            None => settings::change(dirs, info, value),
+        },
         None => settings::rerun(dirs),
     };
     // Made here, off the loop, as it reads the web app's password.

@@ -509,6 +509,8 @@ gates! {
     /// which an older peer is never sent, as it has no button to sign in
     /// with.
     MCP_SIGN_IN = 162,
+    /// Permission engine controls and recent rule decisions in daemon settings.
+    PERMISSIONS = 163,
 }
 
 /// The specialist field's gate. Its historical release name remains in
@@ -1365,6 +1367,14 @@ impl Downgrade for ClientMessage {
                 Self::Request(
                     crate::Request::DaemonSettings | crate::Request::SetDaemonOption { .. }
                 )
+            )
+        {
+            return Downgraded::Refused;
+        }
+        if wire < PERMISSIONS
+            && matches!(
+                self,
+                Self::Request(crate::Request::SetPermissionRules { .. })
             )
         {
             return Downgraded::Refused;

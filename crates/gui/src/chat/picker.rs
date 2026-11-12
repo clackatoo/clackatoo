@@ -941,6 +941,11 @@ pub(super) fn fast_mode(settings: &[Setting]) -> Option<&Setting> {
 pub(super) fn permissions(settings: &[Setting]) -> Vec<Setting> {
     let of = |kind| settings.iter().find(|setting| setting.kind == kind);
     (of(SettingKind::Mode).into_iter())
+        .chain(
+            settings
+                .iter()
+                .find(|setting| setting.is_permission_engine()),
+        )
         .chain(settings.iter().find(|setting| setting.is_plan_mode()))
         .chain(
             [
@@ -965,7 +970,12 @@ pub(super) fn permissions_label(settings: &[Setting]) -> String {
             .map_or_else(|| setting.value.clone(), |choice| choice.name.clone())
     };
     let mode = (settings.iter())
-        .find(|setting| setting.kind == SettingKind::Mode)
+        .find(|setting| setting.is_permission_engine() && setting.value == "clackatoo")
+        .or_else(|| {
+            settings
+                .iter()
+                .find(|setting| setting.kind == SettingKind::Mode)
+        })
         .map_or_else(|| "Permissions".to_owned(), name);
     match settings.iter().find(|setting| setting.planning()) {
         Some(plan) => format!("{} · {mode}", name(plan)),

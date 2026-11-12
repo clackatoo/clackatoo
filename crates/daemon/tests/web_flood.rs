@@ -40,6 +40,7 @@ fn pipelined_requests_arent_answered_past_what_the_client_reads() {
     web.assets = &BIG_APP;
     let socket = web.socket.clone();
     let config = DaemonConfig {
+        permissions: clackatoo_daemon::permissions::Config::default(),
         terminal: clackatoo_term::Config::default(),
         shell: "/bin/sh".into(),
         home: dir.path().to_owned(),

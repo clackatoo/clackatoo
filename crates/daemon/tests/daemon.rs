@@ -88,6 +88,7 @@ impl TestDaemon {
     fn start_with_restoring(change: impl FnOnce(&Path, &mut DaemonConfig), restore: bool) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
@@ -4794,8 +4795,8 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
         node.settings.iter().any(|setting| setting.value == "auto")
     });
     // The agent's two, and the chat's own for clackatoo's tools and the
-    // browser, how many subagents may work at once, and its Specialist.
-    assert_eq!(node.settings.len(), 6);
+    // browser, permission engine, subagent limit and its Specialist.
+    assert_eq!(node.settings.len(), 7);
     assert_eq!(
         last_words(&ask(&mut client, chat, "settings")),
         "auto haiku\n"
@@ -4977,6 +4978,7 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
             "model",
             "reasoning_effort",
             "fast-mode",
+            "clackatoo.permissions",
             "clackatoo.tools",
             "clackatoo.browser",
             "clackatoo.subagents",
@@ -14586,6 +14588,62 @@ fn refusing_tells_the_agent_and_always_allowing_stops_the_asking() {
         words.contains("wait_for_terminal: $ echo typed\ntyped\n[exited with status 0]"),
         "{words}"
     );
+}
+
+#[test]
+fn clackatoo_permission_rules_override_tools_allow_and_keep_unmatched_requests_interactive() {
+    use clackatoo_daemon::permissions::{Config, Engine, read_rules};
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.permissions = Config {
+            engine: Engine::Clackatoo,
+            rules: read_rules(
+                r#"[
+                {"decision":"allow","kind":"tool","target":"clackatoo/list_panes"},
+                {"decision":"deny","kind":"tool","target":"clackatoo/run_in_terminal"}
+            ]"#,
+            )
+            .unwrap(),
+        };
+    });
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let node = ask(&mut client, chat, "mcp list_panes {}");
+    assert!(
+        node.settings
+            .iter()
+            .any(|s| s.is_permission_engine() && s.value == "clackatoo")
+    );
+    assert!(node.question.is_none());
+    assert!(!last_words(&node).contains("failed:"));
+    let command = format!(
+        "touch {}",
+        daemon.dir.path().join("must-not-exist").display()
+    );
+    let input = serde_json::json!({"command":command});
+    let node = ask(&mut client, chat, &format!("mcp run_in_terminal {input}"));
+    assert!(
+        last_words(&node).contains("Clackatoo permissions denied"),
+        "{}",
+        last_words(&node)
+    );
+    assert!(!daemon.dir.path().join("must-not-exist").exists());
+    assert_eq!(tab_contents(&mut client).len(), 1);
+    client
+        .chat(chat, ChatAction::Send("mcp get_diagnostics {}".into()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    assert!(
+        node.question
+            .as_ref()
+            .unwrap()
+            .choices
+            .iter()
+            .all(|c| c.kind != clackatoo_protocol::ChoiceKind::AllowAlways)
+    );
+    answer(&mut client, chat, Some("reject".into()));
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
 }
 
 #[test]

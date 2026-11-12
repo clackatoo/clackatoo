@@ -2053,6 +2053,7 @@ pub(super) mod tests {
 
     pub(in crate::server) fn daemon_with_chat(dir: &Path) -> (Daemon, TerminalId) {
         let config = DaemonConfig {
+            permissions: crate::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.to_owned(),

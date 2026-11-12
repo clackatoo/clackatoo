@@ -991,6 +991,8 @@ config runs again (see [When it runs](#when-it-runs)). The
 | Option | Is | Starts |
 |---|---|---|
 | `daemon.upgrade.keep_agents` | Agents go on through an upgrade, with what they run, rather than being stopped and started again (see [agents through upgrades](~clackatoo/reference/agents-lasting)). | on |
+| `daemon.permissions.engine` | Default engine for new chats: `provider` or `clackatoo`. Existing chats keep their selection. See [permission rules](~clackatoo/reference/permissions). | `provider` |
+| `daemon.permissions.rules` | JSON array of literal Allow, Ask and Deny rules. Edited in Settings → Permissions. | `[]` |
 | `daemon.plugins.claude` | Allow Claude Code's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
 | `daemon.plugins.codex` | Allow Codex's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
 | `daemon.mcp.providers` | Allow provider-managed MCP servers alongside clackatoo's managed servers. Takes effect after a daemon restart or upgrade. | off |

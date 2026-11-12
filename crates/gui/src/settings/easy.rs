@@ -77,6 +77,8 @@ enum Shown {
     Skill(usize),
     Specialist(usize),
     Mcp(usize),
+    Permission(usize),
+    PermissionHistory(usize),
 }
 
 /// How many of what only Advanced has a search shows.
@@ -213,6 +215,9 @@ impl SettingsMenu {
         let daemon = self.daemon;
         let shown = |entry: &Entry| daemon || !entry.daemons();
         if !self.searching() {
+            if self.easy.page() == Page::Permissions {
+                return self.permission_sections();
+            }
             if self.easy.page() == Page::Mcp {
                 let provider = easy::on(Page::Mcp)
                     .filter(|_| self.mcp_browser())
@@ -307,6 +312,32 @@ impl SettingsMenu {
             .collect();
         if !skills.is_empty() {
             sections.push(("Skills".into(), skills));
+        }
+        sections
+    }
+
+    fn permission_sections(&self) -> Vec<(String, Vec<Shown>)> {
+        let mut sections = Vec::new();
+        if !self.permission_drafting() {
+            sections.push((
+                "Default for new chats".into(),
+                easy::on(Page::Permissions)
+                    .filter(|entry| self.daemon || !entry.daemons())
+                    .map(Shown::Entry)
+                    .collect(),
+            ));
+        }
+        sections.push((
+            "Clackatoo rules".into(),
+            (0..self.permission_rows()).map(Shown::Permission).collect(),
+        ));
+        if !self.permission_drafting() {
+            sections.push((
+                "Recent decisions".into(),
+                (0..self.permission_history_rows())
+                    .map(Shown::PermissionHistory)
+                    .collect(),
+            ));
         }
         sections
     }
@@ -423,7 +454,14 @@ impl SettingsMenu {
                             ),
                         })
                     }
-                    None | Some(Shown::Skill(_) | Shown::Specialist(_) | Shown::Mcp(_)) => None,
+                    None
+                    | Some(
+                        Shown::Skill(_)
+                        | Shown::Specialist(_)
+                        | Shown::Mcp(_)
+                        | Shown::Permission(_)
+                        | Shown::PermissionHistory(_),
+                    ) => None,
                 };
                 self.mode = Mode::Advanced;
                 if let Some(index) = picked
@@ -467,12 +505,14 @@ impl SettingsMenu {
             return Outcome::Changed;
         }
         match self.easy_focused() {
-            None => Outcome::Nothing,
             Some(Shown::Advanced(index)) => self.go_to_advanced(index),
             Some(Shown::Entry(entry)) => self.activate(entry, None, facts, history),
             Some(Shown::Skill(at)) => self.open_skill(at),
             Some(Shown::Specialist(at)) => self.specialist_act(at),
             Some(Shown::Mcp(at)) => self.mcp_enter(at),
+            Some(Shown::Permission(at)) => self.permission_act(at, None, facts),
+            Some(Shown::PermissionHistory(0)) => Outcome::RefreshPermissions,
+            None | Some(Shown::PermissionHistory(_)) => Outcome::Nothing,
         }
     }
 
@@ -581,6 +621,19 @@ impl SettingsMenu {
                 self.easy_step_entry(entry, by, false, facts, history)
             }
             Some(Shown::Mcp(at)) => self.mcp_step(at, by),
+            Some(Shown::Permission(at)) if at < 2 => {
+                let picked = match self.permission_row(at).control {
+                    ControlView::Segmented { picked, labels } => picked.and_then(|p| {
+                        let current = isize::try_from(p).ok()?;
+                        let count = isize::try_from(labels.len()).ok()?;
+                        u8::try_from((current + by).rem_euclid(count)).ok()
+                    }),
+                    _ => None,
+                };
+                picked.map_or(Outcome::Nothing, |picked| {
+                    self.permission_act(at, Some(Part::Segment(picked)), facts)
+                })
+            }
             _ => Outcome::Nothing,
         }
     }
@@ -865,6 +918,12 @@ impl SettingsMenu {
                     return Outcome::Changed;
                 };
                 match (shown, hit) {
+                    (Shown::Permission(at), SettingsHit::Control(_, part)) => {
+                        self.permission_act(at, Some(part), facts)
+                    }
+                    (Shown::Permission(at), _) => self.permission_act(at, None, facts),
+                    (Shown::PermissionHistory(0), _) => Outcome::RefreshPermissions,
+                    (Shown::PermissionHistory(_), _) => Outcome::Nothing,
                     (Shown::Skill(at), _) => self.open_skill(at),
                     (Shown::Specialist(18), SettingsHit::Control(_, Part::Segment(at))) => {
                         self.specialist_scope(at == 1)
@@ -981,6 +1040,7 @@ impl SettingsMenu {
     /// What Easy draws.
     #[allow(clippy::too_many_lines, reason = "the page, then each row")]
     pub(crate) fn easy_view(&mut self, facts: &Facts) -> EasyView {
+        self.permission_follow(facts);
         let sections = self.easy_sections();
         let searching = self.searching();
         let page = self.easy.page();
@@ -1027,6 +1087,7 @@ impl SettingsMenu {
         };
         // Whether a row shows the daemon's settings.
         let daemons = page == Page::Specialists
+            || page == Page::Permissions
             || page == Page::Mcp
             || (sections.iter().flat_map(|(_, rows)| rows))
                 .any(|shown| matches!(shown, Shown::Entry(entry) if entry.daemons()));
@@ -1048,6 +1109,9 @@ impl SettingsMenu {
         // What's being typed or recorded says how, unless something more
         // was said.
         let editing = match &self.editing {
+            _ if self.permission_editing() => {
+                Some("Enter finishes the field · Ctrl+W deletes a word · Esc undoes the field edit")
+            }
             _ if self.mcp_editing() => Some(
                 "Enter finishes the field · Ctrl+J inserts a line in JSON · Esc undoes this field edit",
             ),
@@ -1126,6 +1190,8 @@ impl SettingsMenu {
     #[allow(clippy::too_many_lines, reason = "each kind of control")]
     fn row_view(&mut self, shown: Shown, searching: bool, facts: &Facts, all: &[Bound]) -> RowView {
         let entry = match shown {
+            Shown::Permission(at) => return self.permission_row(at),
+            Shown::PermissionHistory(at) => return self.permission_history_row(at),
             Shown::Specialist(at) => return self.specialist_row(at),
             Shown::Mcp(at) => return self.mcp_row(at),
             Shown::Skill(at) => {

@@ -148,6 +148,7 @@ impl TestDaemon {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bashrc"), BASHRC).unwrap();
         let config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/bash".into(),
             home: dir.clone(),

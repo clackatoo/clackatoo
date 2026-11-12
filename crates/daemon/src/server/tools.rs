@@ -959,13 +959,67 @@ impl Daemon {
     /// Carries out a call from the agent of the chat `chat`, asking the
     /// user first if it must.
     fn call_tool(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool, raw: mcp::Raw) {
+        self.call_tool_checked(token, chat, id, tool, raw, None);
+    }
+
+    fn native_permission_action(
+        tool: &Tool,
+        raw: &mcp::Raw,
+        question: Option<&(String, Option<String>, Choices)>,
+    ) -> crate::permissions::Action {
+        use crate::permissions::{Action, Kind};
+        let command = match tool {
+            Tool::RunInTerminal { command, .. }
+            | Tool::RunInBackground { command, .. }
+            | Tool::StartActivity { command, .. } => Some(command.clone()),
+            // Arbitrary input can target a shell or a running program.
+            Tool::SendToTerminal { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        let cwd = match tool {
+            Tool::RunInTerminal { cwd, .. }
+            | Tool::RunInBackground { cwd, .. }
+            | Tool::StartActivity { cwd, .. } => cwd.clone(),
+            _ => None,
+        };
+        let file = match tool {
+            Tool::OpenFile { path, .. } | Tool::Explore { path: Some(path) } => {
+                Some((Kind::Read, path.clone()))
+            }
+            _ => None,
+        };
+        let always_ask = matches!(tool, Tool::SendToTerminal { .. })
+            || question.is_some_and(|(_, _, offered)| !matches!(offered, Choices::Tool));
+        let bounded = crate::permissions::bounded_json(&raw.arguments);
+        Action {
+            tool: format!("clackatoo/{}", raw.name),
+            arguments: if bounded {
+                raw.arguments.clone()
+            } else {
+                Value::Null
+            },
+            command,
+            cwd,
+            file,
+            always_ask: always_ask || !bounded,
+        }
+    }
+
+    fn call_tool_checked(
+        &mut self,
+        token: Token,
+        chat: TerminalId,
+        id: Value,
+        tool: Tool,
+        raw: mcp::Raw,
+        checked: Option<&crate::permissions::Verdict>,
+    ) {
         let Some(tools) = self.chat(chat).map(|chat| chat.tools()) else {
             self.answer_tool(token, &id, Err("the chat has closed".to_owned()));
             return;
         };
         if tools == AgentTools::Off {
-            let refused = Err("the user has turned this chat's tools off".to_owned());
-            self.answer_tool(token, &id, refused);
+            self.answer_tool(token, &id, Err("this chat’s tools are off".into()));
             return;
         }
         if matches!(tool, Tool::Browser(_))
@@ -997,7 +1051,52 @@ impl Daemon {
             self.answer_tool(token, &id, Err(why));
             return;
         }
-        let Some((what, whole, offered)) = self.question_for(chat, &tool, tools) else {
+        let rules = self.uses_permission_rules(chat);
+        let question = self.question_for(chat, &tool, if rules { AgentTools::Ask } else { tools });
+        if rules && checked.is_none() {
+            let action = Self::native_permission_action(&tool, &raw, question.as_ref());
+            let secret = match self.sources.get(token.0) {
+                Some(Source::Tools(connection)) => connection.token.clone(),
+                _ => None,
+            };
+            self.check_permission(chat, action, move |daemon, verdict| {
+                if !matches!(daemon.sources.get(token.0), Some(Source::Tools(connection)) if connection.chat == chat && connection.token == secret && !connection.finished) { return; }
+                daemon.call_tool_checked(token, chat, id, tool, raw, Some(&verdict));
+            });
+            return;
+        }
+        if let Some(verdict) = checked {
+            match verdict.decision {
+                crate::permissions::Decision::Allow => {
+                    if question
+                        .as_ref()
+                        .is_none_or(|(_, _, choices)| matches!(choices, Choices::Tool))
+                    {
+                        self.carry_out(token, chat, id, tool, raw);
+                        return;
+                    }
+                }
+                crate::permissions::Decision::Deny => {
+                    self.answer_tool(token, &id, Err(format!("Clackatoo permissions denied this action: {}. Do not try another route.", verdict.reason)));
+                    return;
+                }
+                crate::permissions::Decision::Ask => {}
+            }
+        }
+        let question = if rules {
+            question
+                .map(|(what, whole, _)| (what, whole, Choices::Once))
+                .or_else(|| {
+                    Some((
+                        format!("use clackatoo tool {}", code_span(&raw.name)),
+                        Some(visible(&raw.arguments.to_string())),
+                        Choices::Once,
+                    ))
+                })
+        } else {
+            question
+        };
+        let Some((what, whole, offered)) = question else {
             self.carry_out(token, chat, id, tool, raw);
             return;
         };

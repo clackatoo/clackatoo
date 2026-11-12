@@ -22,6 +22,24 @@ Try `viw` to select a word, then `aw` to extend it. Brackets, quotes, sentences,
 
 ## Opening a chat
 
+Open `:Settings`, then **Permissions** under **Agents**, to choose who reviews
+new chats' approval requests. **Provider permissions** uses the provider's
+mode. **Clackatoo rules** applies your Allow, Ask and Deny rules, asking when
+nothing matches. Existing chats keep their selection; change one through
+**Permission engine** in its permissions menu while it is idle.
+
+On that settings page, add a Command rule for `git status`, choose Allow, and
+save with the button or Ctrl+S if you want that exact request approved. Tool
+rules match names such as `clackatoo/list_panes` or `managed_docs/search`;
+Read and Edit rules match directories such as `{project}`. Deny wins over
+Ask, then Allow. Refresh recent decisions to see which rule decided a
+request. You do not need to save a rule to continue this lesson.
+
+Claude uses Manual and Codex keeps Workspace access while Clackatoo reviews
+their requests. Operations already permitted by the provider may run without
+requesting review. These rules do not sandbox an approved program. Tools Off,
+specialist limits and explicit browser or native-window grants still apply.
+
 `:Agent codex` or `:Agent antigravity` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.
 
 A chat works in the directory a new terminal would start in, and until its first message it says which agent and folder it has, as `Claude Code in ~/project`. Like any pane, it opens in the window's mode, so after `:Agent` it's in normal mode, and says so: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.

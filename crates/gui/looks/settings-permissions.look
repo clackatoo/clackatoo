@@ -1,0 +1,18 @@
+# Permission engine ownership, literal rule drafts and confirmed saves.
+size 1280x900
+keys <C-;>:Settings<CR>
+wait-for Appearance
+keys }}}}}}}}}
+wait-for Permission engine
+shot permissions
+keys j<CR>
+wait-for Exact arguments
+keys gg<CR><CR>j<CR>j<CR>
+type git status
+keys <CR>
+shot permission-command-draft
+keys jj<CR>
+wait-for Command: git status
+shot permission-rule-saved
+size 560x780
+shot permissions-narrow

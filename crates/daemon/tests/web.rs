@@ -146,6 +146,7 @@ impl TestDaemon {
         let socket = web.socket.clone();
         let tailscale = web.mode == WebMode::Tailscale;
         let mut config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),

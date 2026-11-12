@@ -527,6 +527,9 @@ impl Daemon {
         method: &str,
         request: &str,
     ) -> Result<bool, String> {
+        if !proxy::metadata(method) && self.uses_permission_rules(permission.chat) {
+            return self.approve_mcp_with_rules(permission, method, request);
+        }
         if proxy::metadata(method)
             || !self
                 .chat_ref(permission.chat)
@@ -569,6 +572,77 @@ impl Daemon {
         }
         self.collect_damage(permission.chat);
         self.managed_mcp.permissions.push(permission);
+        Ok(true)
+    }
+
+    fn approve_mcp_with_rules(
+        &mut self,
+        mut permission: Permission,
+        method: &str,
+        request: &str,
+    ) -> Result<bool, String> {
+        if request.len() > 64 * 1024
+            || method.len() > 128
+            || self.managed_mcp.permissions.len() >= 64
+        {
+            return Err(
+                "The MCP approval request is too large, or too many approvals are waiting".into(),
+            );
+        }
+        let input: Value = serde_json::from_str(request)
+            .map_err(|_| "The MCP permission request is not valid JSON")?;
+        let tool = if method == "tools/call" {
+            input
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        } else {
+            method
+        };
+        let action = crate::permissions::Action {
+            tool: format!("managed_{}/{}", permission.server, tool),
+            arguments: permission_arguments(method, &input),
+            command: None,
+            cwd: None,
+            file: None,
+            always_ask: false,
+        };
+        permission.call = self.next_tool_question();
+        let (call, chat) = (permission.call, permission.chat);
+        let title = format!(
+            "Use {} on MCP server {}?",
+            crate::skills::line(tool, 128),
+            crate::skills::line(&permission.server, 64)
+        );
+        self.managed_mcp.permissions.push(permission);
+        let whole = request.to_owned();
+        self.check_permission(chat, action, move |daemon, verdict| {
+            if !daemon
+                .managed_mcp
+                .permissions
+                .iter()
+                .any(|permission| permission.call == call)
+            {
+                return;
+            }
+            match verdict.decision {
+                crate::permissions::Decision::Allow => {
+                    daemon.permitted_mcp(call, true);
+                }
+                crate::permissions::Decision::Deny => {
+                    daemon.permitted_mcp(call, false);
+                }
+                crate::permissions::Decision::Ask => {
+                    let asked = daemon.chat(chat).is_some_and(|chat| {
+                        chat.ask_for_tool(call, &title, Some(&whole), crate::chat::Choices::Once)
+                    });
+                    if !asked {
+                        daemon.permitted_mcp(call, false);
+                    }
+                    daemon.collect_damage(chat);
+                }
+            }
+        });
         Ok(true)
     }
 
@@ -1091,9 +1165,64 @@ fn finish_settings(roots: &[Roots], mut reply: McpReply, after: After) -> Finish
     }
 }
 
+/// Only tools/call has a separately named tool with its own arguments.
+/// Resource and prompt operations retain all their request parameters.
+fn permission_arguments(method: &str, input: &Value) -> Value {
+    if method == "tools/call" {
+        input
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| input.clone())
+    } else {
+        input.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn non_tool_requests_cannot_inject_arguments_to_match_a_different_resource() {
+        use crate::permissions::{Action, Config, Context, Decision, read_rules};
+        let public = json!({"uri":"public"});
+        let forged = json!({"uri":"secret", "arguments":public});
+        let mut policy = Config {
+            rules: read_rules(r#"[{"decision":"allow","kind":"tool","target":"managed_fixture/resources/read","arguments":{"uri":"public"}}]"#).unwrap(),
+            ..Config::default()
+        };
+        let context = Context {
+            cwd: ".".into(),
+            project: ".".into(),
+            home: ".".into(),
+            protected: vec![],
+        };
+        let action = |input: &Value| Action {
+            tool: "managed_fixture/resources/read".into(),
+            arguments: permission_arguments("resources/read", input),
+            command: None,
+            cwd: None,
+            file: None,
+            always_ask: false,
+        };
+        assert_eq!(
+            policy.decide(&action(&public), &context).decision,
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.decide(&action(&forged), &context).decision,
+            Decision::Ask
+        );
+        policy.rules = read_rules(&json!([{"decision":"deny","kind":"tool","target":"managed_fixture/resources/read","arguments":forged}]).to_string()).unwrap();
+        assert_eq!(
+            policy.decide(&action(&forged), &context).decision,
+            Decision::Deny
+        );
+        assert_eq!(
+            permission_arguments("tools/call", &json!({"name":"read","arguments":public})),
+            public
+        );
+    }
+
     #[test]
     fn saving_never_approves_a_different_definition_discovered_after_the_write() {
         let dir = tempfile::tempdir().unwrap();

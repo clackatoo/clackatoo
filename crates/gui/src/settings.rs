@@ -49,6 +49,7 @@
 
 mod easy;
 mod mcp;
+mod permissions;
 mod specialists;
 pub(crate) mod view;
 
@@ -91,6 +92,7 @@ pub(crate) struct Facts<'a> {
 /// that isn't it yet.
 #[derive(Debug, Default)]
 pub(crate) struct DaemonFacts {
+    permission_history: Vec<clackatoo_protocol::PermissionRecord>,
     /// The daemon's machine, if it isn't this one: then the menu says the
     /// daemon's settings are that machine's.
     pub(crate) elsewhere: Option<String>,
@@ -147,6 +149,7 @@ impl DaemonFacts {
             })
             .collect();
         Self {
+            permission_history: settings.permission_history.clone(),
             elsewhere: elsewhere.then(|| settings.machine.clone()),
             dir: settings.dir.clone().into(),
             failure: settings.failure.clone(),
@@ -161,6 +164,10 @@ impl DaemonFacts {
     /// Whether the daemon said its option `info`.
     pub(crate) fn knows(&self, info: &Info) -> bool {
         self.of(info).is_some()
+    }
+    /// The configured value before an optimistic menu edit.
+    pub(crate) fn configured_text(&self, info: &Info) -> Option<String> {
+        self.of(info).map(|each| each.value.text())
     }
 
     /// Counts on `info`'s option being saved as `value`, or with none, taken
@@ -381,6 +388,8 @@ pub(crate) enum Outcome {
         action: clackatoo_protocol::McpAction,
         id: u64,
     },
+    /// Refresh permission decision history from the daemon.
+    RefreshPermissions,
     /// Save a complete specialist draft.
     SaveSpecialist {
         specialist: clackatoo_protocol::SpecialistDefinition,
@@ -584,6 +593,7 @@ enum Editing {
 /// The settings menu's state.
 #[derive(Debug)]
 pub(crate) struct SettingsMenu {
+    permissions: permissions::Permissions,
     /// What's typed, the row picked and the first shown.
     picker: Picker,
     /// Letters type, as after `/`, rather than act.
@@ -635,6 +645,7 @@ impl SettingsMenu {
     /// case as `case` says; the bindings' changes counted `keys_seen`.
     pub(crate) fn new(query: &str, case: Case, mode: Mode, facts: &Facts, keys_seen: u64) -> Self {
         let mut menu = Self {
+            permissions: permissions::Permissions::default(),
             picker: Picker::new(String::new()),
             typing: false,
             g: false,
@@ -752,6 +763,24 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
+        self.permission_follow(facts);
+        if self.permission_page() && self.permission_drafting() {
+            let mut handled = false;
+            let outcome = picker::press(press, |stroke| {
+                if stroke == Stroke::ctrl('s') {
+                    handled = true;
+                    self.permission_act(4, None, facts)
+                } else if self.permission_editing() {
+                    handled = true;
+                    self.permission_key(stroke)
+                } else {
+                    Outcome::Nothing
+                }
+            });
+            if handled {
+                return outcome;
+            }
+        }
         if self.mcp_page() {
             let mut handled = false;
             let outcome = picker::press(press, |stroke| {
@@ -948,6 +977,9 @@ impl SettingsMenu {
 
     /// Types `text`, into the search, or the value being typed.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
+        if self.permission_editing() {
+            return self.permission_paste(text);
+        }
         if self.mcp_editing() {
             return self.mcp_paste(text);
         }

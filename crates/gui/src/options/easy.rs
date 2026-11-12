@@ -26,6 +26,7 @@ pub(crate) enum Page {
     Editor,
     Terminals,
     Agents,
+    Permissions,
     Skills,
     Specialists,
     Mcp,
@@ -35,7 +36,7 @@ pub(crate) enum Page {
 
 impl Page {
     /// Every page, in the order the side lists them.
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Appearance,
         Self::Editor,
         Self::Terminals,
@@ -45,12 +46,15 @@ impl Page {
         Self::Specialists,
         Self::Skills,
         Self::Mcp,
+        Self::Permissions,
     ];
 
     /// Settings pages are grouped by what they configure.
     pub(crate) fn group(self) -> &'static str {
         match self {
-            Self::Agents | Self::Skills | Self::Specialists | Self::Mcp => "Agents",
+            Self::Agents | Self::Permissions | Self::Skills | Self::Specialists | Self::Mcp => {
+                "Agents"
+            }
             _ => "General",
         }
     }
@@ -61,6 +65,7 @@ impl Page {
             Self::Editor => "Editor",
             Self::Terminals => "Terminals",
             Self::Agents => "Agents",
+            Self::Permissions => "Permissions",
             Self::Skills => "Skills",
             Self::Mcp => "MCP Servers",
             Self::Specialists => "Specialists",
@@ -76,6 +81,9 @@ impl Page {
             Self::Editor => "Indenting, searching, and what language servers add.",
             Self::Terminals => "Marks, what's kept after a restart, and pasting.",
             Self::Agents => "Which agent a new chat starts with, and what it may do.",
+            Self::Permissions => {
+                "Choose who reviews approval requests, and manage Clackatoo's rules."
+            }
             Self::Specialists => "Create and customize reusable agent roles.",
             Self::Mcp => "Manage server connections, credentials and provider configuration.",
             Self::Skills => "Shared skills and skillsets available to every agent in this project.",
@@ -109,6 +117,9 @@ impl Page {
             Self::Specialists => Some(
                 "Specialists are SPECIALIST.md files. Create personal or project roles, or copy a packaged role to customize it. Existing chats keep their current role.",
             ),
+            Self::Permissions => Some(
+                "Rules review requests that reach Clackatoo. Provider-approved operations keep their existing permissions; the provider's sandbox still applies. Rules are not an operating-system sandbox.",
+            ),
             Self::Appearance | Self::Editor => None,
         }
     }
@@ -118,7 +129,7 @@ impl Page {
             Self::Appearance => Icon::Appearance,
             Self::Editor | Self::Skills | Self::Mcp => Icon::Code,
             Self::Terminals => Icon::Terminal,
-            Self::Agents | Self::Specialists => Icon::Star,
+            Self::Agents | Self::Specialists | Self::Permissions => Icon::Star,
             Self::Keys => Icon::Keyboard,
             Self::Machines => Icon::Phone,
         }
@@ -285,10 +296,23 @@ const fn keys(label: &'static str, action: Action) -> Entry {
     }
 }
 
-use Page::{Agents, Appearance, Editor, Keys, Machines, Mcp, Terminals};
+use Page::{Agents, Appearance, Editor, Keys, Machines, Mcp, Permissions, Terminals};
 
 /// Every entry, page by page, in the order each page shows them.
 pub(crate) const ENTRIES: &[Entry] = &[
+    choices(
+        Permissions,
+        "Default for new chats",
+        (
+            "Permission engine",
+            "Existing chats keep their selection. Change a chat in its permissions menu. Claude uses Manual; Codex uses Workspace access. Other providers use Provider permissions.",
+        ),
+        &["permissions.engine"],
+        &[
+            choice("Provider permissions", &["provider"]),
+            choice("Clackatoo rules", &["clackatoo"]),
+        ],
+    ),
     // Appearance.
     Entry {
         page: Appearance,

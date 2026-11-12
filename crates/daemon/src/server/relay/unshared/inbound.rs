@@ -87,7 +87,8 @@ pub(super) fn request_names(request: &Request) -> Asked {
         | Request::SaveSpecialist {..}
         | Request::SpecialistFiles {..}
         | Request::SaveSpecialistFile {..}
-        | Request::SetDaemonOption { .. } => return Asked::Own,
+        | Request::SetDaemonOption { .. }
+        | Request::SetPermissionRules { .. } => return Asked::Own,
         Request::Review(ref action) => return Asked::Review(action.clone()),
         // What's inside names what it names.
         Request::Masked { ref request, .. } => return request_names(request),

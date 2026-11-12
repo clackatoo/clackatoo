@@ -1940,6 +1940,7 @@ impl Elsewhere {
         let run = dir.join("run");
         std::fs::create_dir_all(&run).unwrap();
         let config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.to_owned(),
             shell_integration: None,

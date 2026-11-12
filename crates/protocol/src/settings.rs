@@ -26,6 +26,29 @@ pub struct DaemonSettings {
     /// Why its config, as its files are now, didn't run, if it didn't:
     /// the daemon goes by what last ran without a mistake meanwhile.
     pub failure: Option<String>,
+    /// Recent rule decisions, newest first, since this daemon started.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::before::<{ crate::wire::PERMISSIONS }, _>",
+        deserialize_with = "crate::wire::since::<{ crate::wire::PERMISSIONS }, _, _>"
+    )]
+    pub permission_history: Vec<PermissionRecord>,
+}
+
+/// One bounded record of a Clackatoo permission decision. It contains no
+/// argument values, file contents, or command text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionRecord {
+    /// The chat that requested the action.
+    pub chat: crate::TerminalId,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+    /// Stable tool identity or action class.
+    pub tool: String,
+    /// Allow, Ask or Deny.
+    pub decision: String,
+    /// The rule that matched, or why the user must decide.
+    pub reason: String,
 }
 
 /// One thing a run of the daemon's config changed of what runs programs,

@@ -255,6 +255,58 @@ fn managed_mcp_approves_each_external_call_before_forwarding_and_preserves_built
 }
 
 #[test]
+fn clackatoo_rules_review_managed_calls_even_when_tools_are_allowed() {
+    use clackatoo_daemon::permissions::{Config, Engine, read_rules};
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.permissions = Config {
+            engine: Engine::Clackatoo,
+            rules: read_rules(r#"[
+                {"decision":"allow","kind":"tool","target":"managed_fixture/write","arguments":{}},
+                {"decision":"deny","kind":"tool","target":"managed_fixture/write","arguments":{"refuse":true}}
+            ]"#).unwrap(),
+        };
+    });
+    let mut client = daemon.client();
+    let marker = daemon.dir.path().join("external-call");
+    fixture(&mut client, &marker);
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let node = ask(
+        &mut client,
+        chat,
+        "mcp-server managed_fixture\nmcp write {}",
+    );
+    assert!(last_words(&node).contains("upstream answered"), "{node:?}");
+    let node = ask(
+        &mut client,
+        chat,
+        r#"mcp-server managed_fixture
+mcp write {"refuse":true}"#,
+    );
+    assert!(last_words(&node).contains("refused"), "{node:?}");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed\n");
+    client
+        .chat(
+            chat,
+            ChatAction::Send(
+                r#"mcp-server managed_fixture
+mcp write {"unmatched":true}"#
+                    .into(),
+            ),
+        )
+        .unwrap();
+    let question = wait_for_chat(&mut client, chat, |n| n.question.is_some())
+        .question
+        .unwrap();
+    assert_eq!(question.choices.len(), 2);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed\n");
+    answer(&mut client, chat, Some("reject".into()));
+    wait_for_chat(&mut client, chat, |n| last_outcome(n).is_some());
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "executed\n");
+}
+
+#[test]
 fn managed_mcp_tests_do_not_call_tools_and_configuration_conflicts_do_not_overwrite() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();

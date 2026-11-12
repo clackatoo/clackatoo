@@ -71,6 +71,7 @@ impl TestDaemon {
             restart_on_upgrade: false,
         };
         let config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/cat".into(),
             home: root.to_owned(),

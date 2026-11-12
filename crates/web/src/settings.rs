@@ -114,6 +114,7 @@ pub fn panel(node: &ChatNode, picker: &Picker, capabilities: &[(String, String)]
                             | SettingKind::Browser
                             | SettingKind::Subagents
                     ) || s.is_plan_mode()
+                        || s.is_permission_engine()
                 })
                 .map(choices),
         );
@@ -157,7 +158,10 @@ pub fn panel(node: &ChatNode, picker: &Picker, capabilities: &[(String, String)]
     panel.child(model_list(node, picker)).children(
         node.settings
             .iter()
-            .filter(|s| matches!(s.kind, SettingKind::Effort | SettingKind::Other))
+            .filter(|s| {
+                matches!(s.kind, SettingKind::Effort | SettingKind::Other)
+                    && !s.is_permission_engine()
+            })
             .map(choices),
     )
 }

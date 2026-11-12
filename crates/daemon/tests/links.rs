@@ -162,6 +162,7 @@ impl World {
         let dir = self.host(host);
         std::fs::create_dir_all(dir.join("clackatoo")).unwrap();
         let mut config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.clone(),

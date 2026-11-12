@@ -1033,6 +1033,16 @@ pub fn tokens(count: u64) -> String {
 }
 
 impl Setting {
+    /// The daemon-owned permission engine selector, kept as an ordinary
+    /// select so older clients can still display and change it.
+    pub const PERMISSION_ENGINE: &'static str = "clackatoo.permissions";
+
+    /// Whether this selects the chat's permission engine.
+    #[must_use]
+    pub fn is_permission_engine(&self) -> bool {
+        self.id == Self::PERMISSION_ENGINE
+    }
+
     /// The choice it has now, if it's one of its choices.
     #[must_use]
     pub fn current(&self) -> Option<&SettingChoice> {

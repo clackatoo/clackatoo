@@ -161,7 +161,8 @@ pub use review::{
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
 pub use settings::{
-    ConfigChange, DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy, OptionSource,
+    ConfigChange, DaemonOption, DaemonSettings, OptionPlace, OptionSaved, OptionSetBy,
+    OptionSource, PermissionRecord,
 };
 pub use shown::invisible;
 pub use view::{
@@ -178,7 +179,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 162;
+pub const PROTOCOL_VERSION: u32 = 163;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1983,6 +1984,14 @@ pub enum Request {
         token: String,
         /// Open, check authorization, or report state.
         action: McpProxyAction,
+    },
+    /// Saves permission rules only if they still equal what the window
+    /// edited. Refused from agents, web devices and relays. Protocol 163.
+    SetPermissionRules {
+        /// The complete JSON rule list.
+        rules: String,
+        /// The complete rule list the draft started from.
+        expected: String,
     },
 }
 

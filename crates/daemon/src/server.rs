@@ -90,6 +90,7 @@ mod notices;
 mod offers;
 mod outline;
 mod pastes;
+mod permissions;
 mod pictures;
 mod pieces;
 mod recovery;
@@ -1133,6 +1134,7 @@ pub struct Daemon {
     mentioning: mentions::Mentioning,
     skills: skills::Skills,
     managed_mcp: managed_mcp::ManagedMcp,
+    permissions: permissions::Permissions,
     specialist_files: specialist_files::Saving,
     work: work::Work,
     outlines: outline::Outlines,
@@ -1386,6 +1388,7 @@ impl Daemon {
             mentioning: mentions::Mentioning::default(),
             skills: skills::Skills::default(),
             managed_mcp: managed_mcp::ManagedMcp::default(),
+            permissions: permissions::Permissions::default(),
             specialist_files: specialist_files::Saving::default(),
             work: work::Work::new(Arc::clone(&waker)),
             outlines: outline::Outlines::default(),
@@ -1864,6 +1867,7 @@ impl Daemon {
         self.finish_contexts_for_upgrade();
         self.finish_specialist_files();
         self.finish_managed_mcp();
+        self.finish_permissions();
         // Capture before ending links or dropping their client receipts.
         let federation = Some(self.hand_over_federation()?);
         // And the ports forwarded through them, still listening.
@@ -2284,6 +2288,7 @@ impl Daemon {
                     .chain(self.next_outline_due())
                     .chain(self.next_context_due())
                     .chain(self.next_managed_mcp_due())
+                    .chain(self.next_permission_due())
                     .chain(self.next_paste_due())
                     .chain(self.next_grace_due())
                     .chain(self.held_until())
@@ -2342,6 +2347,7 @@ impl Daemon {
             self.take_contexts();
             self.take_specialist_files();
             self.take_managed_mcp();
+            self.take_permissions();
             self.take_specialist_limits();
             self.take_renames();
             self.take_pastes();
@@ -4306,6 +4312,9 @@ impl Daemon {
             Request::DaemonSettings => self.serve_daemon_settings(token),
             Request::SetDaemonOption { name, value } => {
                 self.serve_set_daemon_option(token, &name, value.as_deref())
+            }
+            Request::SetPermissionRules { rules, expected } => {
+                self.serve_set_permission_rules(token, &rules, &expected)
             }
             Request::Connect {
                 host,

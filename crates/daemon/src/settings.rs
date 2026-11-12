@@ -216,6 +216,9 @@ impl Settings {
         if let Err((name, said)) = self.web_checked() {
             return wrong(name, said);
         }
+        if let Err(said) = crate::permissions::read_rules(&self.text("permissions.rules")) {
+            return wrong("permissions.rules", said);
+        }
         Ok(())
     }
 
@@ -281,6 +284,20 @@ impl Settings {
             }
         }
         Ok(())
+    }
+
+    /// Permission policy, validated while the config runs off the loop.
+    #[must_use]
+    pub fn permissions(&self) -> crate::permissions::Config {
+        crate::permissions::Config {
+            engine: if self.text("permissions.engine") == "clackatoo" {
+                crate::permissions::Engine::Clackatoo
+            } else {
+                crate::permissions::Engine::Provider
+            },
+            rules: crate::permissions::read_rules(&self.text("permissions.rules"))
+                .unwrap_or_default(),
+        }
     }
 
     /// What it says of agents: those it adds, the limits on chats agents
@@ -728,6 +745,25 @@ pub fn rerun(dirs: &Dirs) -> Result<Settings, String> {
 /// running the config with it.
 pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings, String> {
     change_model(dirs, |model| model.set(info, value))
+}
+
+/// Saves rules under the config lock, preserving a concurrent writer's work.
+pub(crate) fn change_permission_rules(
+    dirs: &Dirs,
+    value: Option<Value>,
+    expected: &str,
+) -> Result<Settings, String> {
+    let info = options::find("permissions.rules").expect("declared permission rules");
+    change_model(dirs, |model| {
+        let current = rerun(dirs)?;
+        if current.set_by(info.name).source == Source::Config {
+            return Err("daemon/init.lua sets permission rules; change them there".into());
+        }
+        if current.value(info.name).text() != expected {
+            return Err("Permission rules changed since this draft opened. Reload and review the current rules before saving.".into());
+        }
+        model.set(info, value)
+    })
 }
 
 fn change_model(

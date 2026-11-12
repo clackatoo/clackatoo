@@ -86,6 +86,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 pub use agents::{AgentConfig, Configured as ConfiguredAgents, CustomAgent};
+pub mod permissions;
 pub use browser::{BrowserConfig, check_browser, snap_of};
 pub use client::{Client, ClientError, Receiver, Sender, UdpTarget, random_window};
 pub use display::DisplayConfig;
@@ -130,6 +131,8 @@ pub struct DaemonConfig {
     /// The agents chats can talk to: programs speaking ACP, the Agent
     /// Client Protocol, on their stdin and stdout.
     pub agents: AgentConfig,
+    /// Rules and default engine for approval requests.
+    pub permissions: permissions::Config,
     /// The program, and its arguments, that agents start to reach the
     /// tools clackatoo gives them (see [`mcp`]): `clackatoo mcp`, which
     /// is given `--chat ID --socket PATH` after them. `None` gives agents
@@ -610,6 +613,7 @@ impl DaemonConfig {
             shell: non_empty("SHELL").unwrap_or_else(|| "/bin/sh".into()),
             home: non_empty("HOME").map_or_else(|| "/".into(), PathBuf::from),
             shell_integration: None,
+            permissions: settings.permissions(),
             agents: AgentConfig {
                 custom: (non_empty("CLACKATOO_AGENT").into_iter())
                     .map(|command| CustomAgent {

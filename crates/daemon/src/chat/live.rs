@@ -22,7 +22,7 @@ impl HostedChat {
     /// load, nor moving to another agent. Otherwise its agent is stopped
     /// as before an upgrade could keep it.
     pub(crate) fn can_go_on(&self) -> bool {
-        !self.told_again() && self.carry.is_none()
+        !self.told_again() && self.carry.is_none() && self.permissions_ready()
     }
 
     /// Hands the chat over to the next build, whose agent goes on with it
@@ -86,6 +86,10 @@ impl HostedChat {
             LiveLink::Open => Link::Open,
             LiveLink::Closing => Link::Closing,
         };
+        self.permission_observed = self.mode().map(str::to_owned);
+        self.permission_confirmed = self
+            .mode()
+            .is_some_and(|mode| self.permission_mode_allowed(mode));
         if let Some(queued) = live.queued {
             self.role = queued.role;
             self.queued = Some(Prompt {

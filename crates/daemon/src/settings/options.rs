@@ -73,6 +73,10 @@ options! {
     "machine.priority" ("Run the daemon ahead of other programs") in Machine: Kind::Bool => Value::Bool(true);
     /// Whether agents go on through an upgrade, with all they run.
     "upgrade.keep_agents" ("Keep agents running through upgrades") in Agents live:Kind::Bool => Value::Bool(true);
+    /// The engine offered by default to new chats. Existing chats keep theirs.
+    "permissions.engine" ("A new chat's permission engine") in Agents live: Kind::Choice(&["provider", "clackatoo"]) => Value::Choice("provider");
+    /// A JSON list of literal Allow, Ask and Deny rules.
+    "permissions.rules" ("Clackatoo permission rules") in Agents live: Kind::Text => Value::Text("[]".to_owned());
     /// Allow Claude Code to load its own plugins and skill catalogue.
     /// Applied when the daemon starts or upgrades.
     "plugins.claude" ("Allow Claude Code's native plugins") in Agents: Kind::Bool => Value::Bool(false);
@@ -235,6 +239,7 @@ mod tests {
             [
                 "machine",
                 "upgrade",
+                "permissions",
                 "plugins",
                 "mcp",
                 "subagents",

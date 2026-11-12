@@ -56,7 +56,7 @@ pub(super) struct AgentSlot {
     spec: AgentSpec,
     /// What it was started with.
     command: Vec<OsString>,
-    agent: Agent,
+    pub(super) agent: Agent,
     tokens: [Token; 4],
     /// Its read budget ran out with more of its stderr waiting.
     unread_errors: bool,
@@ -71,7 +71,7 @@ const WOKEN_STOP: Duration = Duration::from_secs(5);
 pub(super) struct Agents {
     usage: crate::provider_usage::Cache,
     images: crate::tool_images::Queue,
-    running: BTreeMap<AgentId, AgentSlot>,
+    pub(super) running: BTreeMap<AgentId, AgentSlot>,
     next: u32,
     /// What the agents sent last, for the chats to act on.
     incoming: Vec<Incoming>,
@@ -492,6 +492,15 @@ impl Daemon {
         let dir = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
         let project = clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir.clone());
         chat.show_cwd(shown, &dir, project);
+        let engine = chat
+            .relations()
+            .parent
+            .and_then(|parent| self.chat_ref(parent))
+            .map_or(
+                self.config.permissions.engine,
+                HostedChat::permission_engine,
+            );
+        chat.default_permission_engine(engine);
         // A chat from before the Subagents setting gets the default.
         chat.offer_subagents(&self.tools.subagent_limits());
         self.terminals.insert(
@@ -1602,56 +1611,19 @@ impl Daemon {
                 options,
                 unknown,
             } => {
-                // One asked as a conversation is told again was asked long
-                // ago: no one's there to answer it.
-                let serving = (self.chat_in(name, &session))
-                    .map(|(id, _)| id)
-                    .is_some_and(|id| self.serves_tools(id));
-                let Some((id, chat)) =
-                    (self.chat_in(name, &session)).filter(|(_, chat)| !chat.told_again())
-                else {
-                    if let Some(slot) = self.agents.running.get_mut(&agent) {
-                        slot.agent.answer_permission(&request, None);
-                    }
-                    return;
-                };
-                // Ruled out by the chat's limits, or about clackatoo's own
-                // tools, which ask the user themselves: answered at once.
-                // Limits first, so nothing passing as ours gets past them.
-                // Only an answer of a kind known is ever chosen for the
-                // user.
-                let interaction =
-                    name == "antigravity" && tool.tool_call_id.0.starts_with("interaction_");
-                let known: Vec<_> = (options.iter())
-                    .filter(|option| !unknown.iter().any(|id| *option.option_id.0 == **id))
-                    .cloned()
-                    .collect();
-                if chat.side_parent().is_some() {
-                    if let Some(slot) = self.agents.running.get_mut(&agent) {
-                        slot.agent.answer_permission(&request, None);
-                    }
-                    return;
-                }
-                let answered = if interaction {
-                    None
-                } else {
-                    (chat.turned_down(&tool, &known))
-                        .or_else(|| chat.about_own_tools(&tool, &known, serving))
-                };
-                if let Some(option) = answered {
-                    if let Some(slot) = self.agents.running.get_mut(&agent) {
-                        slot.agent.answer_permission(&request, Some(&option));
-                    }
-                    self.collect_damage(id);
-                    return;
-                }
-                // Too many waiting: no, at once, as it can't be shown.
-                if !chat.ask(request.clone(), &tool, &options, &unknown)
-                    && let Some(slot) = self.agents.running.get_mut(&agent)
-                {
-                    slot.agent.answer_permission(&request, None);
-                }
-                id
+                self.provider_permission(
+                    super::permissions::ProviderRequest {
+                        agent,
+                        name: name.to_owned(),
+                        session,
+                        request,
+                        tool,
+                        options,
+                        unknown,
+                    },
+                    None,
+                );
+                return;
             }
             Incoming::Elicit { request, asked } => {
                 let asked = *asked;

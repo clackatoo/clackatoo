@@ -2175,7 +2175,31 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             },
         ],
         failure: Some("daemon/init.lua:3: daemon.web.port is a whole number".into()),
+        permission_history: Vec::new(),
     };
+    let mut permissions = settings.clone();
+    samples.push((
+        crate::wire::PERMISSIONS,
+        Sample::Client(ClientMessage::Request(Request::SetPermissionRules {
+            rules: "[]".into(),
+            expected: "[]".into(),
+        })),
+    ));
+    permissions
+        .permission_history
+        .push(crate::PermissionRecord {
+            chat: TerminalId(7),
+            at: 1_794_499_200,
+            tool: "clackatoo/run_in_terminal".into(),
+            decision: "Ask".into(),
+            reason: "No permission rule matched".into(),
+        });
+    samples.push((
+        crate::wire::PERMISSIONS,
+        Sample::Server(ServerMessage::Response(Response::DaemonSettings(
+            permissions,
+        ))),
+    ));
     let outside = vec![
         crate::ConfigChange {
             name: "agents.claude command".into(),

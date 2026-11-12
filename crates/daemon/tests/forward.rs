@@ -37,6 +37,7 @@ impl TestDaemon {
 
     fn run(&mut self) {
         let config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: self.dir.path().to_owned(),

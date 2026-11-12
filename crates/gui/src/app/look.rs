@@ -826,6 +826,10 @@ mod tests {
     const PATIENCE: Duration = Duration::from_secs(20);
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "isolated daemon and window setup followed by rendering assertions"
+    )]
     fn a_window_drawn_offscreen_shows_what_its_shell_prints_and_how_soon() {
         if super::gpu().is_err() {
             eprintln!("no GPU: skipped");
@@ -835,6 +839,7 @@ mod tests {
         let runtime = RuntimeDir::at(dir.path().join("run"));
         std::fs::create_dir_all(runtime.path()).unwrap();
         let config = DaemonConfig {
+            permissions: clackatoo_daemon::permissions::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
             shell_integration: None,

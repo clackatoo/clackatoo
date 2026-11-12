@@ -314,6 +314,9 @@ impl Desk {
         self.settings_changed();
         // Only what this window asked for: another's is its own to say.
         let saved = saved.filter(|saved| self.daemon_saved(&saved.name));
+        if let (Some(menu), Some(saved)) = (&mut self.settings, &saved) {
+            menu.permission_saved(saved);
+        }
         match saved {
             Some(OptionSaved {
                 name,
@@ -382,17 +385,31 @@ impl Desk {
         if !self.daemon_has(wire::DAEMON_SETTINGS) {
             return self.warn_saved("this daemon is too old to change its settings here".into());
         }
+        let request = if info.name == "permissions.rules" {
+            if !self.daemon_has(wire::PERMISSIONS) {
+                return self
+                    .warn_saved("Update the daemon before changing permission rules".into());
+            }
+            let expected = self
+                .daemon_settings
+                .as_ref()
+                .and_then(|daemon| daemon.configured_text(info))
+                .unwrap_or_else(|| "[]".into());
+            Request::SetPermissionRules {
+                rules: value.map_or_else(|| "[]".into(), crate::options::Value::text),
+                expected,
+            }
+        } else {
+            Request::SetDaemonOption {
+                name: info.name.to_owned(),
+                value: value.map(crate::options::Value::text),
+            }
+        };
         if let Some(daemon) = &mut self.daemon_settings {
             daemon.counting_on(info, value.cloned());
         }
         *self.daemon_saving.entry(info.name).or_default() += 1;
-        self.request(
-            Request::SetDaemonOption {
-                name: info.name.to_owned(),
-                value: value.map(crate::options::Value::text),
-            },
-            Asked::DaemonOption(info),
-        );
+        self.request(request, Asked::DaemonOption(info));
     }
 
     /// A change this window asked the daemon to save of its option called
@@ -686,6 +703,7 @@ impl Desk {
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Mcp { action, id } => self.settings_mcp_action(action, id),
+            Outcome::RefreshPermissions => self.ask_daemon_settings(),
             Outcome::Close => self.settings = None,
             Outcome::Set(sets) => {
                 // The daemon's, and the window's that run programs, are
@@ -767,29 +785,33 @@ impl Desk {
                 self.open_config_line(&place, true);
             }
             Outcome::OpenSkill(place) => {
-                self.settings = None;
-                let Some(shown) = self.shown else {
-                    return;
-                };
-                let path = place.file.to_string();
-                let landing = FileLocation {
-                    path: path.clone(),
-                    line: 0,
-                    col: 0,
-                    offset: None,
-                    text: String::new(),
-                };
-                self.request(
-                    Request::Split {
-                        pane: shown.pane,
-                        side: Side::Right,
-                        terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
-                        on: None,
-                    },
-                    Asked::PaneAt(Some(landing)),
-                );
+                self.open_settings_skill(&place);
             }
         }
+    }
+
+    fn open_settings_skill(&mut self, place: &crate::options::provenance::Place) {
+        self.settings = None;
+        let Some(shown) = self.shown else {
+            return;
+        };
+        let path = place.file.to_string();
+        let landing = FileLocation {
+            path: path.clone(),
+            line: 0,
+            col: 0,
+            offset: None,
+            text: String::new(),
+        };
+        self.request(
+            Request::Split {
+                pane: shown.pane,
+                side: Side::Right,
+                terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
+                on: None,
+            },
+            Asked::PaneAt(Some(landing)),
+        );
     }
 
     /// Counts on `info`'s option being saved as `value`: the menu shows and
