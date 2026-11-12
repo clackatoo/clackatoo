@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.41 (2026-11-12)
+
+### Fixes
+
+- **agents:** bring Codex's adapter up a patch level, and offer installs over MCP failures (9938c970)
+
 ## 2026.11.40 (2026-11-11)
 
 ### Features
