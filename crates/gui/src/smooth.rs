@@ -34,11 +34,13 @@ impl Motion {
 
     /// Goes on to `target`, a place rather than a distance, from where
     /// it's drawn now: in time if `smooth`, or else at once.
+    /// The same place again changes nothing, not even where it's drawn,
+    /// which only frames move on.
     pub(crate) fn to(&mut self, target: f64, smooth: bool, now: Instant) {
-        self.advance(now);
         if (target - self.target).abs() < 0.000_001 {
             return;
         }
+        self.advance(now);
         self.target = target;
         if smooth {
             self.animation = Some((self.position, now));
@@ -117,6 +119,9 @@ mod tests {
         offset.advance(now + DURATION / 2);
         let halfway = offset.position;
         assert!(halfway > 0.0 && halfway < 100.0);
+        // Going on to the same place leaves it drawn where it was.
+        offset.to(100.0, true, now + DURATION);
+        assert!((offset.position - halfway).abs() < 0.000_001);
         // Somewhere else: from where it's drawn, not from where it started.
         offset.to(40.0, true, now + DURATION / 2);
         assert!((offset.position - halfway).abs() < 0.000_001);

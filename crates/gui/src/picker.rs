@@ -159,6 +159,7 @@ impl Picker {
     pub(crate) fn restart(&mut self) {
         self.selected = 0;
         self.top = 0;
+        self.drawn = 0;
     }
 
     /// Keeps the row picked among the `len` there are now, as fewer may

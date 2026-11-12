@@ -1791,9 +1791,10 @@ fn without_subagents_setting(message: &ServerMessage) -> Option<ServerMessage> {
     dropped.then_some(message)
 }
 
-/// `message` as a peer of `wire`, older than `PROMPT_BOX`, reads a chat:
-/// without the chat updates it has no controls for (a sent draft before
-/// `PROMPT_BOX`, a retry before `CHAT_FACTS`, and the older ones), or
+/// `message` as a peer of `wire`, older than `MCP_SIGN_IN`, reads a chat:
+/// without the chat updates it has no controls for (servers to sign in to
+/// before `MCP_SIGN_IN`, a sent draft before `PROMPT_BOX`, a retry before
+/// `CHAT_FACTS`, and the older ones), or
 /// else, before `CHAT_FACTS`, without what `CHAT_FACTS` brought. `None`
 /// if it reads it as it is. `TURN_FAILED` (116) is a field of the list of
 /// chats, gated as fields are, so it needs nothing here, and `NESTED_WORK`
