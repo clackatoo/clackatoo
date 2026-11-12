@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.42 (2026-11-12)
+
+### Features
+
+- **mcp:** sign in to managed servers from their list and from chats (6810759a)
+- **settings:** scroll Settings smoothly through the panes' motion (e8252f78)
+
+### Fixes
+
+- **settings:** draw a list where it was drawn until a frame moves it (8ee7c759)
+
 ## 2026.11.41 (2026-11-12)
 
 ### Fixes
