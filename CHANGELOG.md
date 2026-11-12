@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.43 (2026-11-12)
+
+### Features
+
+- **permissions:** add configurable approval rules (58beede2)
+
 ## 2026.11.42 (2026-11-12)
 
 ### Features
