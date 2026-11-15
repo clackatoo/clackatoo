@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.44 (2026-11-15)
+
+### Fixes
+
+- **gui:** scroll agent tables with horizontal gestures (c4d16b5c)
+
 ## 2026.11.43 (2026-11-12)
 
 ### Features
