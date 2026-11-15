@@ -65,6 +65,15 @@ pub(super) struct Gesture {
 }
 
 impl Desk {
+    /// Horizontal wheel input belongs only to a wide table directly under
+    /// the pointer. `pixels` follows the wheel's sign, as vertical input does.
+    pub(crate) fn wheel_sideways(&mut self, point: [f32; 2], pixels: f32) -> Option<bool> {
+        let (terminal, _, pixel) = self.cell_at(point, None)?;
+        let chat = self.chats.get_mut(&terminal)?;
+        let moved = chat.view_mut().wheel_sideways_pixels(pixel, -pixels)?;
+        Some(chat.disarm() || moved)
+    }
+
     /// None means the original wheel event belongs to a program or popup.
     pub(crate) fn smooth_wheel(
         &mut self,

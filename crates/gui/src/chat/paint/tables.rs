@@ -1,6 +1,7 @@
 //! A chat's tables, laid out as a grid (see [`crate::markdown::tables`]),
-//! scrolled sideways when wider than the column, by Shift and the wheel,
-//! `zl` and `zh`, or the cursor going to a cell out of view.
+//! scrolled sideways when wider than the column, by a horizontal gesture,
+//! Shift and the wheel, `zl` and `zh`, or the cursor going to a cell out
+//! of view.
 
 use super::TableLaid;
 use crate::chat::ChatView;
@@ -58,12 +59,21 @@ impl ChatView {
     /// the wheel turned `lines` with Shift held does: up, to the left.
     /// `None` if there's no table there to scroll, or it fits.
     pub(crate) fn wheel_sideways(&mut self, at: [f32; 2], lines: f32) -> Option<bool> {
+        self.wheel_sideways_pixels(at, -lines * self.line_height)
+    }
+
+    /// Scrolls the table under the pointer by exact pixels, keeping even
+    /// a trackpad's fractional movement. Positive pixels move right.
+    pub(crate) fn wheel_sideways_pixels(&mut self, at: [f32; 2], pixels: f32) -> Option<bool> {
+        if !pixels.is_finite() || self.menu.is_some() || self.viewing_modal() {
+            return None;
+        }
         let (turn, piece, table) = self.table_at(at)?;
         let laid = self.laid_table(turn, piece, table)?;
         if laid.max_scroll(self.cache.width) <= 0.0 {
             return None;
         }
-        Some(self.scroll_sideways(Some(at), -lines * self.line_height))
+        Some(self.scroll_sideways(Some(at), pixels))
     }
 
     /// The table at `at`, from the pane's top left, as drawn last: its
@@ -230,6 +240,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one rendered table exercises wheel, keyboard and hit testing together"
+    )]
     fn a_table_too_wide_scrolls_sideways_by_the_wheel_and_the_keys() {
         use crate::chat::fixtures::{paint as draw, read, talk};
         let wide = (0..12)
@@ -260,6 +274,20 @@ mod tests {
             .copied()
             .unwrap();
         let at = [cell.at[0] + 4.0, cell.at[1] + 4.0];
+        // A trackpad keeps sub-pixel motion in both directions.
+        assert_eq!(chat.wheel_sideways_pixels(at, 0.25), Some(true));
+        assert!((table(&chat).1 - 0.25).abs() < 0.001);
+        assert_eq!(chat.wheel_sideways_pixels(at, -0.125), Some(true));
+        assert!((table(&chat).1 - 0.125).abs() < 0.001);
+        assert_eq!(chat.wheel_sideways_pixels(at, -1000.0), Some(true));
+        assert!(table(&chat).1.abs() < f32::EPSILON);
+        assert_eq!(chat.wheel_sideways_pixels(at, -1.0), Some(false));
+        // Local overlays own the pointer, including Shift+wheel.
+        chat.usage_modal = true;
+        assert_eq!(chat.wheel_sideways_pixels(at, 10.0), None);
+        assert_eq!(chat.wheel_sideways(at, -1.0), None);
+        chat.usage_modal = false;
+        assert_eq!(chat.wheel_sideways_pixels(at, f32::NAN), None);
         assert_eq!(chat.wheel_sideways(at, -1.0), Some(true));
         assert!(table(&chat).1 > 0.0);
         assert_eq!(chat.wheel_sideways(at, -1000.0), Some(true));

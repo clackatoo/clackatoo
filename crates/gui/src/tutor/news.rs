@@ -1661,6 +1661,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Permissions settings: provider or Clackatoo rules, explicit Allow/Ask/Deny, and recent decisions",
     },
+    News {
+        id: "table-gestures",
+        date: "2026-11-15",
+        lesson: "agents",
+        what: "Scroll wide Agent tables sideways with a trackpad swipe or horizontal mouse wheel",
+    },
 ];
 
 impl News {

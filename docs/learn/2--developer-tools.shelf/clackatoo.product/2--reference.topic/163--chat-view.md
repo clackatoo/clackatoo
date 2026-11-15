@@ -209,8 +209,10 @@ is named after the title the agent gives the conversation.
 
 A table is a grid: its head in bold over a line, each column as wide as its
 widest cell and lined up as the table says. One wider than the column scrolls
-sideways, with `‹` or `›` at a cut edge: <kbd>Shift</kbd> and the wheel over
-it, `zl` and `zh` in normal mode, or the cursor going to a cell out of view.
+sideways, with `‹` or `›` at a cut edge: swipe horizontally on a trackpad,
+use a horizontal mouse wheel, or hold <kbd>Shift</kbd> and turn the wheel over
+it. In normal mode, `zl` and `zh` scroll it too; moving the cursor to a cell
+out of view brings that cell into view.
 Copied, its cells are a tab apart and its rows a line.
 
 Code in a fenced block that names its language is colored by the daemon's

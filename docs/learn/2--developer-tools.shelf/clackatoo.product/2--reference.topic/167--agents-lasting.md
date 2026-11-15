@@ -159,8 +159,7 @@ If starting the new build fails, the daemon goes on as it was, agents and all.
 
 ## Known limits
 
-- The phone's chats don't color code. Sideways swipes on a trackpad don't
-  scroll tables: use <kbd>Shift</kbd> and the wheel.
+- The phone's chats don't color code.
 - Moving a file in the explorer forgets which of its lines agents changed.
   Rejecting every change of a file an agent made leaves it empty, rather than
   in the trash. Reviews of everything since the base stop past about 8 MB of

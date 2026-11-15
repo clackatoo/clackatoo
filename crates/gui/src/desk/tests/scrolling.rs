@@ -12,6 +12,47 @@ fn text() -> String {
 }
 
 #[test]
+fn horizontal_wheel_targets_a_wide_chat_table_without_scrolling_the_chat() {
+    let mut desk = desk(one_tab(pane(1)));
+    let row = (0..12)
+        .map(|n| format!("column number {n}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let markdown = format!("| {row} |\n|{}\n| {row} |", "---|".repeat(12));
+    desk.view_changed(
+        TerminalId(1),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Chat(Box::new(crate::chat::fixtures::talk(&[(
+                "show me", &markdown,
+            )]))),
+        }),
+    );
+    let mut fonts = crate::chat::fixtures::fonts();
+    paint_chat(&mut desk, &mut fonts);
+    let before = desk.chat_mut(TerminalId(1)).unwrap().view().wheel_metrics();
+    let point = (0..100_u16)
+        .flat_map(|y| (0..180_u16).map(move |x| [f32::from(x) * 4.0, f32::from(y) * 4.0]))
+        .find(|&point| desk.wheel_sideways(point, 0.0).is_some())
+        .expect("a wide table under the pointer");
+    desk.take_outbox();
+    assert_eq!(desk.wheel_sideways(point, -0.25), Some(true));
+    assert_eq!(desk.wheel_sideways(point, 0.125), Some(true));
+    assert_eq!(desk.wheel_sideways(point, f32::MAX), Some(true));
+    assert_eq!(desk.wheel_sideways(point, 1.0), Some(false));
+    assert_eq!(desk.wheel_sideways(point, -f32::MAX), Some(true));
+    assert_eq!(desk.wheel_sideways(point, -1.0), Some(false));
+    assert_eq!(desk.wheel_sideways([100.0, -10.0], -10.0), None);
+    assert_eq!(
+        desk.chat_mut(TerminalId(1)).unwrap().view().wheel_metrics(),
+        before
+    );
+    assert!(desk.scroll_wakes().is_none());
+    assert!(desk.take_outbox().is_empty());
+}
+
+#[test]
 fn trackpad_pixels_keep_partial_rows_and_clicks_match_the_visible_text() {
     let mut desk = editing("/t.txt", &text());
     normal_mode(&mut desk);

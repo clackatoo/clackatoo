@@ -2393,9 +2393,14 @@ impl App {
         };
         #[allow(clippy::cast_precision_loss)]
         let line = cell_height as f32;
-        let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => f64::from(y) * WHEEL_LINES,
-            MouseScrollDelta::PixelDelta(position) => position.y / f64::from(cell_height),
+        let (sideways, lines) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => (
+                f64::from(x) * WHEEL_LINES * f64::from(cell_height),
+                f64::from(y) * WHEEL_LINES,
+            ),
+            MouseScrollDelta::PixelDelta(position) => {
+                (position.x, position.y / f64::from(cell_height))
+            }
         };
         if let Some(help) = &mut self.shortcut_help {
             let lines = lines + self.wheel_remainder;
@@ -2409,6 +2414,15 @@ impl App {
             return;
         };
         let over_finder = self.hit(point).raised();
+        #[allow(clippy::cast_possible_truncation)]
+        if self.picker.is_none() && !over_finder && sideways != 0.0 {
+            if self.desk.wheel_sideways(point, sideways as f32) == Some(true) {
+                self.request_redraw();
+            }
+            if lines == 0.0 {
+                return;
+            }
+        }
         // Easy's page scrolls by pixels, as panes do, a line a line of
         // its text.
         if self.picker.is_none()
