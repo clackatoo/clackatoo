@@ -63,16 +63,16 @@ impl Control {
         })
     }
 }
-const KINDS: [(ContextKind, &str); 9] = [
-    (ContextKind::All, "All"),
-    (ContextKind::File, "Files"),
-    (ContextKind::Symbol, "Symbols"),
-    (ContextKind::Diagnostics, "Diagnostics"),
-    (ContextKind::Command, "Commands"),
-    (ContextKind::Change, "Changes"),
-    (ContextKind::Chat, "Chats"),
-    (ContextKind::Board, "Boards"),
-    (ContextKind::Project, "Folders"),
+const KINDS: [ContextKind; 9] = [
+    ContextKind::All,
+    ContextKind::File,
+    ContextKind::Symbol,
+    ContextKind::Diagnostics,
+    ContextKind::Command,
+    ContextKind::Change,
+    ContextKind::Chat,
+    ContextKind::Board,
+    ContextKind::Project,
 ];
 #[derive(Debug, Default)]
 pub(crate) struct Context {
@@ -116,7 +116,7 @@ impl State {
         self.context.historical = false;
         self.context.status = "Searching…".into();
         self.context_request(ContextAction::Search {
-            kind: KINDS[self.context.kind].0,
+            kind: KINDS[self.context.kind],
             query: self.context.query.clone(),
             offset: self.context.offset,
         });
@@ -149,7 +149,7 @@ impl State {
                 {
                     self.context.items = vec![ContextCandidate {
                         kind: ContextKind::All,
-                        label: source_label(&selection.source),
+                        label: selection.source.label(),
                         detail: "Attached context".into(),
                         source: selection.source.clone(),
                     }];
@@ -402,8 +402,8 @@ impl State {
             el("div")
                 .class("context-browser")
                 .child(el("nav").class("context-categories").children(
-                    KINDS.iter().enumerate().map(|(i, (_, label))| {
-                        button(label, Control::Kind(i))
+                    KINDS.iter().enumerate().map(|(i, kind)| {
+                        button(kind.label(), Control::Kind(i))
                             .attr("aria-pressed", (i == self.context.kind).to_string())
                     }),
                 ))
@@ -426,10 +426,7 @@ impl State {
             body = body.child(
                 el("div")
                     .class("context-attached")
-                    .child(button(
-                        &source_label(&selection.source),
-                        Control::Inspect(i),
-                    ))
+                    .child(button(&selection.source.label(), Control::Inspect(i)))
                     .child(button("Remove", Control::Remove(i))),
             );
         }
@@ -438,9 +435,9 @@ impl State {
             body = body
                 .child(el("h3").text(&snapshot.label))
                 .child(el("p").text(format!(
-                    "{} · {:?} · {} bytes · about {} tokens",
+                    "{} · {} · {} bytes · about {} tokens",
                     snapshot.location,
-                    snapshot.mode,
+                    snapshot.mode.label(),
                     snapshot.bytes,
                     snapshot.bytes / 4
                 )))
@@ -479,18 +476,6 @@ impl State {
             body,
         ));
         panel
-    }
-}
-fn source_label(source: &ContextRef) -> String {
-    match source {
-        ContextRef::File { path, lines } => {
-            format!("{path}{}", clackatoo_protocol::lines_suffix(*lines))
-        }
-        ContextRef::Symbol { name, path, .. } => format!("{name} · {path}"),
-        ContextRef::Retained { id, .. } => {
-            format!("Captured context · {}", &id[..id.len().min(12)])
-        }
-        other => format!("{other:?}"),
     }
 }
 
