@@ -100,6 +100,11 @@ impl HostedChat {
             });
         }
         self.stop_requested = live.stop_requested;
+        // The turn it was stopped in is the one it was handed over in: no
+        // turn begins while a daemon upgrades.
+        if live.stop_requested {
+            self.stopped_turn = self.last_uid();
+        }
         self.slow = live.slow;
         self.heard = (live.heard).map(|heard| usize::try_from(heard).unwrap_or(usize::MAX));
         self.woke_by_task = live.woke_by_task;
