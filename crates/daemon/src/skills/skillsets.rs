@@ -78,6 +78,9 @@ struct Resolved {
     includes: BTreeMap<String, Vec<String>>,
     sets: BTreeMap<String, Option<Vec<PathBuf>>>,
     places: BTreeMap<PathBuf, (Tree, PathBuf)>,
+    /// The specialists among them that a project's folder defines,
+    /// whatever bundle led to them.
+    from_project: BTreeSet<String>,
     /// The folder of each bundle met, by name: two of one name are refused.
     names: BTreeMap<String, PathBuf>,
 }
@@ -218,16 +221,18 @@ impl Finding {
         for (name, dirs) in resolved.sets {
             packages.sets.entry(name).or_insert(dirs);
         }
-        let project = !bundle.tree.is_personal();
         for (name, specialist) in resolved.specialists {
             let source = resolved.sources.get(&name);
+            // By the folder that defines it, not the bundle that led to
+            // it: one of the user's own may include a project's.
+            let project = resolved.from_project.contains(&name);
             // A project's, inside a bundle of another name, that would
             // take the place of one built in.
             if project && specialists::is_built_in(&name) {
                 let folder = source.and_then(|file| file.parent());
                 packages.unloaded.entry(name).or_insert_with(|| Unloaded {
                     path: folder.unwrap_or(&bundle.root).to_owned(),
-                    source: label.to_owned(),
+                    source: "Project".to_owned(),
                     why: Why::BuiltIn,
                 });
                 continue;
@@ -338,6 +343,9 @@ fn resolve(
     out.names.insert(bundle.name.clone(), bundle.root.clone());
     if let Some(mut specialist) = bundle.specialist.clone() {
         specialist.extra.directories.clone_from(&directories);
+        if !bundle.tree.is_personal() {
+            out.from_project.insert(bundle.name.clone());
+        }
         out.sources
             .insert(bundle.name.clone(), bundle.source.clone());
         if let Some(text) = &bundle.text {
@@ -529,33 +537,37 @@ fn manifest(tree: &Tree, below: &Path) -> Result<Bundle, String> {
 /// so a `[specialist]` table and a `SPECIALIST.md`'s front matter are
 /// read by the same rules.
 fn item_json(item: &toml_edit::Item) -> serde_json::Value {
-    use serde_json::{Value, json};
-    fn value(v: &toml_edit::Value) -> Value {
-        if let Some(s) = v.as_str() {
-            json!(s)
-        } else if let Some(b) = v.as_bool() {
-            json!(b)
-        } else if let Some(n) = v.as_integer() {
-            json!(n)
-        } else if let Some(n) = v.as_float() {
-            json!(n)
-        } else if let Some(a) = v.as_array() {
-            Value::Array(a.iter().map(value).collect())
-        } else if let Some(t) = v.as_inline_table() {
-            Value::Object(t.iter().map(|(k, v)| (k.into(), value(v))).collect())
-        } else {
-            Value::Null
-        }
-    }
-    if let Some(table) = item.as_table() {
-        Value::Object(
-            table
+    use serde_json::Value;
+    match item {
+        toml_edit::Item::Table(table) => {
+            let fields = table
                 .iter()
-                .map(|(k, v)| (k.into(), item_json(v)))
-                .collect(),
-        )
-    } else {
-        item.as_value().map_or(Value::Null, value)
+                .map(|(key, item)| (key.to_owned(), item_json(item)));
+            Value::Object(fields.collect())
+        }
+        toml_edit::Item::Value(value) => value_json(value),
+        _ => Value::Null,
+    }
+}
+
+/// `value`, of a `skillset.toml`, as JSON: a date, which a specialist
+/// has no use for, is nothing.
+fn value_json(value: &toml_edit::Value) -> serde_json::Value {
+    use serde_json::{Value, json};
+    use toml_edit::Value as Toml;
+    match value {
+        Toml::String(text) => json!(text.value()),
+        Toml::Boolean(flag) => json!(flag.value()),
+        Toml::Integer(number) => json!(number.value()),
+        Toml::Float(number) => json!(number.value()),
+        Toml::Array(array) => Value::Array(array.iter().map(value_json).collect()),
+        Toml::InlineTable(table) => {
+            let fields = table
+                .iter()
+                .map(|(key, value)| (key.to_owned(), value_json(value)));
+            Value::Object(fields.collect())
+        }
+        Toml::Datetime(_) => Value::Null,
     }
 }
 
@@ -964,5 +976,57 @@ skills=[]
         assert!(!catalogue.unloaded.contains_key("reviewer"));
         let why = catalogue.unloaded["direct"].why.to_string();
         assert!(why.contains("link"), "{why}");
+    }
+
+    /// What holds a project's specialist goes by the folder that defines
+    /// it, however it's reached: one of the user's own bundles that
+    /// includes a project's skillset doesn't make the specialists inside
+    /// that skillset the user's.
+    #[test]
+    fn a_projects_specialist_reached_through_the_users_own_bundle_is_still_the_projects() {
+        let world = World::new();
+        let release = world.repo.join(".agents/skillsets/release");
+        package_in(
+            &release,
+            "release",
+            "includes=[\"./explore\", \"./reviewer\"]",
+        );
+        specialist(
+            &release.join("explore"),
+            "explore",
+            "limits: none\n",
+            "REPO",
+        );
+        specialist(
+            &release.join("reviewer"),
+            "reviewer",
+            "limits: none\n",
+            "REPO",
+        );
+        // The user's own: a skillset and a specialist that take the
+        // project's `release` in, and a reviewer that only reads.
+        package_in(
+            &world.home.join(".agents/skillsets/mine"),
+            "mine",
+            "includes=[\"release\"]",
+        );
+        specialist(
+            &world.home.join(".agents/specialists/lead"),
+            "lead",
+            "skillsets: [release]\n",
+            "MINE",
+        );
+        specialist(
+            &world.home.join(".agents/specialists/reviewer"),
+            "reviewer",
+            "limits: read-only\n",
+            "MINE",
+        );
+        let catalogue = world.found();
+        assert!(!catalogue.specialists.contains_key("explore"));
+        assert_eq!(catalogue.unloaded["explore"].why, Why::BuiltIn);
+        assert_eq!(catalogue.specialists["lead"].instructions, "MINE");
+        let reviewer = &catalogue.specialists["reviewer"];
+        assert_eq!(reviewer.limits, Limits::ReadOnly, "{reviewer:?}");
     }
 }

@@ -2149,11 +2149,11 @@ mod tests {
     #[test]
     fn a_save_that_names_no_call_timeout_keeps_the_one_the_definition_has() {
         let dir = tempfile::tempdir().unwrap();
-        let roots = Roots {
-            home: dir.path().join("home"),
-            cwd: dir.path().join("home"),
-            config: Some(dir.path().join("config")),
-        };
+        let roots = Roots::in_project(
+            dir.path().join("home"),
+            dir.path().join("home"),
+            Some(dir.path().join("config")),
+        );
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(
             dir.path().join("config/mcp.json"),

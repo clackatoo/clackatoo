@@ -11,7 +11,7 @@ use serde_yaml_ng::Value;
 use super::reading::Tree;
 use super::{
     Catalogue, Entry, Found, HashSet, MOST_DESCRIPTION, MOST_ENTRIES, MOST_SKILLS, Roots, Unloaded,
-    Why, brief, front_matter, line, mix, skillsets,
+    Why, brief, front_matter, line, mix, names_a_skill, skillsets,
 };
 
 /// The file a skill's folder holds.
@@ -123,24 +123,49 @@ fn personal_folders(roots: &Roots) -> Vec<Folder> {
 
 /// Whether the folder at `path` is the daemon's user's: one that isn't,
 /// such as a shared scratch directory, is never read as a project.
-fn owned_by_user(path: &Path) -> bool {
+pub(crate) fn owned_by_user(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|folder| folder.uid() == rustix::process::geteuid().as_raw())
 }
 
-/// What a walk through folders of skills has used up.
+/// What a walk through folders of skills has used up. A project's
+/// folders have a budget of their own, and room for half the skills: a
+/// project with a great many never leaves the user's own unread.
 struct Walk {
     /// The folders looked into, so one reached twice is read once.
     seen: HashSet<PathBuf>,
-    /// How many more folders may be looked into.
+    /// How many more of the user's own folders may be looked into.
     budget: usize,
+    /// How many more of a project's.
+    project_budget: usize,
 }
 
 impl Walk {
+    /// A walk with nothing used up.
     fn new() -> Self {
         Self {
             seen: HashSet::new(),
             budget: MOST_ENTRIES,
+            project_budget: MOST_ENTRIES / 2,
         }
+    }
+
+    /// The budget that looking into a folder of `tree` is taken from.
+    fn budget_for(&mut self, tree: &Tree) -> &mut usize {
+        if tree.is_personal() {
+            &mut self.budget
+        } else {
+            &mut self.project_budget
+        }
+    }
+}
+
+/// The most skills taken from a folder of `tree`, counting those found
+/// before it.
+fn most_skills(tree: &Tree) -> usize {
+    if tree.is_personal() {
+        MOST_SKILLS
+    } else {
+        MOST_SKILLS / 2
     }
 }
 
@@ -250,7 +275,10 @@ impl Catalogue {
                 if left == 0 {
                     return;
                 }
-                if !child.folder || child.name.starts_with('.') {
+                // Only what could be loaded, were the folder trusted: a
+                // name that can't be a skill's or a specialist's is no
+                // more than text of the folder's own choosing.
+                if !child.folder || !names_a_skill(&child.name) {
                     continue;
                 }
                 left -= 1;
@@ -334,18 +362,19 @@ impl Found {
         walk: &mut Walk,
         mut stamp: Option<&mut u64>,
     ) {
-        if self.len() >= MOST_SKILLS || !walk.seen.insert(place.tree.real(below)) {
+        let most = most_skills(place.tree);
+        if self.len() >= most || !walk.seen.insert(place.tree.real(below)) {
             return;
         }
         for child in place.tree.children(below) {
-            if walk.budget == 0 || self.len() >= MOST_SKILLS {
+            if *walk.budget_for(place.tree) == 0 || self.len() >= most {
                 return;
             }
             // Dot folders are for whatever keeps the folder, not skills.
             if !child.folder || child.name.starts_with('.') {
                 continue;
             }
-            walk.budget -= 1;
+            *walk.budget_for(place.tree) -= 1;
             let folder = below.join(&child.name);
             // A native plugin's bundle: its skills come with tools and
             // hooks that only the product it's for supplies.
@@ -371,7 +400,7 @@ impl Found {
                 // Its name is taken all the same: a broken copy never lets
                 // a less specific one run in its place.
                 Err(problem) => self.refuse(Skill {
-                    name: child.name,
+                    name: line(&child.name, 64),
                     description: String::new(),
                     path: (place.tree.path(&folder).join(SKILL))
                         .to_string_lossy()
@@ -427,6 +456,12 @@ pub(super) fn read(tree: &Tree, folder: &Path, label: &str) -> Result<Option<Rea
             .map(str::trim)
             .filter(|value| !value.is_empty())
     };
+    // What a field that must be text is missing: the field, or text.
+    let lacks = |key: &str| match &metadata[key] {
+        Value::Null => format!("it has no {key}"),
+        Value::String(_) => format!("its {key} is empty"),
+        _ => format!("its {key} must be text"),
+    };
     let boolean = |key: &str, default: bool| -> Result<bool, String> {
         match &metadata[key] {
             Value::Null => Ok(default),
@@ -434,12 +469,8 @@ pub(super) fn read(tree: &Tree, folder: &Path, label: &str) -> Result<Option<Rea
             _ => Err(format!("{key} must be true or false")),
         }
     };
-    let name = string("name").ok_or("it has no name")?;
-    let named_well = name.len() <= 64
-        && (name.bytes()).all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_:".contains(&byte)
-        });
-    if !named_well {
+    let name = string("name").ok_or_else(|| lacks("name"))?;
+    if !names_a_skill(name) {
         return Err(
             "skill names use at most 64 lowercase letters, numbers, hyphens, underscores or colons"
                 .into(),
@@ -449,12 +480,13 @@ pub(super) fn read(tree: &Tree, folder: &Path, label: &str) -> Result<Option<Rea
     // wins, so the two must agree, as the Agent Skills format asks.
     let folder_name = folder.file_name().and_then(|name| name.to_str());
     if folder_name != Some(name) {
+        let folder_name = line(folder_name.unwrap_or_default(), 64);
         return Err(format!(
-            "its name, {name}, isn't its folder's, {}",
-            folder_name.unwrap_or_default()
+            "its name, {name}, isn't its folder's, {folder_name}: rename the folder to {name}, \
+             or set name: {folder_name} in its SKILL.md"
         ));
     }
-    let description = string("description").ok_or("it has no description")?;
+    let description = string("description").ok_or_else(|| lacks("description"))?;
 
     let mut problems = Vec::new();
     if clackatoo_protocol::INTERFACE_COMMANDS.contains(&name)
@@ -536,8 +568,8 @@ mod tests {
             deepest: DEEPEST,
         };
         let mut walk = Walk {
-            seen: HashSet::new(),
             budget: 2,
+            ..Walk::new()
         };
         let mut found = Found::default();
         found.walk(&place, Path::new(""), 0, &mut walk, None);

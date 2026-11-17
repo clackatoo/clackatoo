@@ -38,6 +38,14 @@ const MOST_WAITING: usize = 1024;
 /// share one read.
 const FRESH: Duration = Duration::from_secs(2);
 
+/// How long the project found for a folder that isn't a chat's is taken
+/// as its project, for Settings, which asks every few seconds.
+const PROJECT_KNOWN_FOR: Duration = Duration::from_secs(30);
+
+/// How many times reading a catalogue again is tried, after what decides
+/// it changed, before the chats that had it are left without.
+const MOST_RETRIES: u8 = 3;
+
 /// The most catalogues kept, the least lately read let go first.
 const MOST_KEPT: usize = 32;
 
@@ -91,8 +99,9 @@ struct Asker {
 enum Purpose {
     /// The chat's agent connects once it's read.
     Connect(TerminalId),
-    /// The chats that have the catalogue are to have it as it is now.
-    Refresh,
+    /// A chat is to have the catalogue as it is now, without connecting
+    /// again: this one, or with `None`, every chat with these roots.
+    Refresh(Option<TerminalId>),
     /// Settings lists the skills.
     Browse { token: Token, ticket: u64 },
     /// Settings lists the specialists, with their files if `files`.
@@ -144,6 +153,37 @@ struct Kept {
     read: Instant,
 }
 
+/// A chat's catalogue, and the roots it was read for: when the chat's
+/// roots are no longer those, as its project is trusted or not, or a
+/// skill is switched off, it's no longer the chat's.
+#[derive(Debug)]
+struct Held {
+    roots: Roots,
+    catalogue: Arc<Catalogue>,
+}
+
+/// A catalogue to be read again, as reading it failed after what decides
+/// it changed.
+#[derive(Debug)]
+struct Retry {
+    roots: Roots,
+    /// How many reads have failed.
+    tries: u8,
+    /// Whether no read of it is under way, so one is to be started.
+    waiting: bool,
+}
+
+/// The project found for a folder that isn't a chat's.
+#[derive(Debug)]
+struct Looked {
+    /// The folder, as it was asked about.
+    cwd: PathBuf,
+    /// The folder with links followed, and the project it's in.
+    real: PathBuf,
+    project: PathBuf,
+    at: Instant,
+}
+
 /// The catalogues the daemon has, and the reads under way.
 #[derive(Debug, Default)]
 pub(super) struct Skills {
@@ -159,7 +199,15 @@ pub(super) struct Skills {
     kept: Vec<Kept>,
     /// Each chat's catalogue: the one kept for its roots, or, for a chat
     /// started as a specialist, what the specialist chooses of it.
-    catalogues: BTreeMap<TerminalId, Arc<Catalogue>>,
+    catalogues: BTreeMap<TerminalId, Held>,
+    /// The catalogues to read again, as reading them failed.
+    retries: Vec<Retry>,
+    /// The project last found for a folder that isn't a chat's.
+    looked: Mutex<Option<Looked>>,
+    /// How many times a chat has been given a catalogue: what a read
+    /// costs the event loop, for tests to count.
+    #[cfg(test)]
+    given: u64,
     /// The session and the context each chat's agent was last told its
     /// catalogue in.
     announced: BTreeMap<TerminalId, (String, u64)>,
@@ -208,12 +256,14 @@ fn will_be_read(scheduler: &crate::work::Scheduler, work: u64) -> bool {
 impl Daemon {
     /// The chat `chat`'s catalogue, once it's been read.
     pub(super) fn skill_catalogue(&self, chat: TerminalId) -> Option<&Catalogue> {
-        self.skills.catalogues.get(&chat).map(Arc::as_ref)
+        let held = self.skills.catalogues.get(&chat)?;
+        Some(&held.catalogue)
     }
 
     /// The chat's catalogue, to read a skill from on a worker.
     pub(super) fn shared_skill_catalogue(&self, chat: TerminalId) -> Option<Arc<Catalogue>> {
-        self.skills.catalogues.get(&chat).cloned()
+        let held = self.skills.catalogues.get(&chat)?;
+        Some(Arc::clone(&held.catalogue))
     }
 
     /// Lets go of the chat `chat`'s catalogue: it's closing, or becoming
@@ -226,18 +276,40 @@ impl Daemon {
 
     /// The roots of a catalogue for the folder `cwd`, which isn't known
     /// to be a chat's: Settings', for the pane it was opened from. A chat
-    /// there says what its project is; with none, it's looked for, on
-    /// disk, as it is when a chat is added.
+    /// there says what its project is. With none, it's looked for on
+    /// disk, as it is when a chat is added, and kept a while: Settings
+    /// asks every few seconds while it's open.
     pub(super) fn skill_roots(&self, cwd: PathBuf) -> Roots {
-        let known = (self.terminals.values())
-            .filter_map(|slot| slot.terminal.chat_ref())
-            .find(|chat| chat.real_cwd() == cwd)
-            .map(|chat| chat.project().to_owned());
-        let project = known.unwrap_or_else(|| {
-            let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-            clackatoo_syntax::git_root(&cwd, &self.config.home).unwrap_or(cwd)
-        });
-        self.roots_of(cwd, project)
+        let chats = || (self.terminals.values()).filter_map(|slot| slot.terminal.chat_ref());
+        if let Some(chat) = chats().find(|chat| chat.real_cwd() == cwd) {
+            let project = chat.project().to_owned();
+            return self.roots_of(cwd, project);
+        }
+        let mut looked = (self.skills.looked.lock()).unwrap_or_else(PoisonError::into_inner);
+        let known = (looked.as_ref())
+            .filter(|looked| looked.cwd == cwd && looked.at.elapsed() < PROJECT_KNOWN_FOR);
+        let (real, project) = if let Some(looked) = known {
+            (looked.real.clone(), looked.project.clone())
+        } else {
+            // With links followed, as a chat's is, so the roots are those
+            // of a chat there.
+            let real = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            let project =
+                clackatoo_syntax::git_root(&real, &self.config.home).unwrap_or(real.clone());
+            *looked = Some(Looked {
+                cwd,
+                real: real.clone(),
+                project: project.clone(),
+                at: Instant::now(),
+            });
+            (real, project)
+        };
+        drop(looked);
+        // A chat there, reached by another name for the folder.
+        let project = chats()
+            .find(|chat| chat.real_cwd() == real)
+            .map_or(project, |chat| chat.project().to_owned());
+        self.roots_of(real, project)
     }
 
     /// The roots of the chat `chat`'s catalogue.
@@ -283,7 +355,15 @@ impl Daemon {
             .filter(|kept| kept.read.elapsed() < FRESH)
             .map(|kept| Arc::clone(&kept.catalogue));
         if let Some(catalogue) = recent {
-            self.skills_finished(purpose, &roots, Ok(catalogue));
+            // The chats there have it already, but one that asks now.
+            let blocked = match purpose {
+                Purpose::Connect(chat) | Purpose::Refresh(Some(chat)) => {
+                    self.give_catalogue(&roots, &catalogue, Some(chat), &purpose)
+                }
+                Purpose::Refresh(None) => self.give_catalogue(&roots, &catalogue, None, &purpose),
+                _ => BTreeSet::new(),
+            };
+            self.skills_finished(purpose, &roots, Ok(catalogue), &blocked);
             return;
         }
         // A read of the same catalogue whose result hasn't been taken
@@ -303,7 +383,7 @@ impl Daemon {
             .collect();
         let full = shared.is_none() && reads.len() >= MOST_READING;
         if full || self.skills.pending.len() >= MOST_WAITING {
-            self.skills_finished(purpose, &roots, Err(Failed::Busy));
+            self.skills_failed(purpose, &roots, Failed::Busy);
             return;
         }
         self.skills.next += 1;
@@ -326,7 +406,7 @@ impl Daemon {
             return;
         }
         let reading = shared.map_or(job, |(reading, _)| reading);
-        let priority = if matches!(purpose, Purpose::Refresh) {
+        let priority = if matches!(purpose, Purpose::Refresh(_)) {
             Priority::Background
         } else {
             Priority::Interactive
@@ -368,7 +448,7 @@ impl Daemon {
                 };
                 self.skills.pending.insert(job, pending);
             }
-            Err(why) => self.skills_finished(purpose, &roots, Err(Failed::Unstarted(why))),
+            Err(why) => self.skills_failed(purpose, &roots, Failed::Unstarted(why)),
         }
     }
 
@@ -450,7 +530,7 @@ impl Daemon {
     /// already-live session again.
     pub(super) fn refresh_chat_skills(&mut self, chat: TerminalId) {
         if let Some(roots) = self.chat_roots(chat) {
-            self.read_catalogue(Purpose::Refresh, roots);
+            self.read_catalogue(Purpose::Refresh(Some(chat)), roots);
         }
     }
 
@@ -469,7 +549,7 @@ impl Daemon {
             };
             if Some(&roots) != but && !asked.contains(&roots) {
                 asked.push(roots.clone());
-                self.read_catalogue(Purpose::Refresh, roots);
+                self.read_catalogue(Purpose::Refresh(None), roots);
             }
         }
     }
@@ -477,10 +557,84 @@ impl Daemon {
     /// What's on disk was changed from here, or what the user trusts or
     /// has switched off was: nothing kept or being read is current, and
     /// every chat's catalogue is read again.
+    ///
+    /// A chat whose roots are no longer those its catalogue was read for
+    /// loses it at once, before anything is read: a folder no longer
+    /// trusted, or a skill switched off, stops being offered whether or
+    /// not the read that follows succeeds. One that fails is tried again.
     pub(super) fn skills_changed(&mut self) {
         self.skills.epoch += 1;
         self.skills.kept.clear();
+        let held: Vec<_> = self.skills.catalogues.keys().copied().collect();
+        for chat in held {
+            let now = self.chat_roots(chat);
+            let was = self.skills.catalogues.get(&chat).map(|held| &held.roots);
+            if now.as_ref() == was {
+                continue;
+            }
+            self.skills.catalogues.remove(&chat);
+            self.skills.retries.extend(now.map(|roots| Retry {
+                roots,
+                tries: 0,
+                waiting: false,
+            }));
+            let specialists = self.specialists_for(chat);
+            if let Some(own) = self.chat(chat) {
+                own.offer_skills(Vec::new());
+                own.offer_specialists(&specialists);
+            }
+            self.collect_damage(chat);
+        }
         self.refresh_skills_but(None);
+    }
+
+    /// A read of the catalogue for `roots`, to have chats there offered
+    /// it as it is now, failed, as `failed` says. If it's one that's
+    /// being tried again, it waits to be: but not for ever.
+    fn refresh_failed(&mut self, roots: &Roots, failed: &Failed) {
+        log::warn!("refreshing shared skills: {failed}");
+        let Some(at) = (self.skills.retries.iter()).position(|retry| retry.roots == *roots) else {
+            return;
+        };
+        let retry = &mut self.skills.retries[at];
+        // No room to read is no try at reading.
+        if *failed != Failed::Busy {
+            retry.tries += 1;
+        }
+        retry.waiting = true;
+        if retry.tries >= MOST_RETRIES {
+            log::warn!(
+                "shared skills: {} is left unread after {MOST_RETRIES} tries",
+                roots.cwd.display()
+            );
+            self.skills.retries.swap_remove(at);
+        }
+    }
+
+    /// Starts again the reads that failed, where there's room, and lets
+    /// go of those whose chats have gone or have moved on.
+    fn retry_refreshes(&mut self) {
+        let chats: Vec<_> = self.terminals.keys().copied().collect();
+        let wanted: Vec<Roots> = (chats.into_iter())
+            .filter(|chat| !self.skills.catalogues.contains_key(chat))
+            .filter_map(|chat| self.chat_roots(chat))
+            .collect();
+        (self.skills.retries).retain(|retry| wanted.contains(&retry.roots));
+        let reads: BTreeSet<u64> = (self.skills.pending.values())
+            .map(|pending| pending.reading)
+            .collect();
+        let mut room = MOST_READING.saturating_sub(reads.len());
+        let mut again = Vec::new();
+        for retry in &mut self.skills.retries {
+            if retry.waiting && room > 0 {
+                retry.waiting = false;
+                room -= 1;
+                again.push(retry.roots.clone());
+            }
+        }
+        for roots in again {
+            self.read_catalogue(Purpose::Refresh(None), roots);
+        }
     }
 
     /// Lists the skills for the window at `token`, as they are for what
@@ -556,7 +710,7 @@ impl Daemon {
         }
         self.skills.keep(roots, &catalogue);
         if !same {
-            self.update_skill_catalogues(roots, &catalogue, None);
+            self.give_catalogue(roots, &catalogue, None, &Purpose::Refresh(None));
         }
     }
 
@@ -643,26 +797,54 @@ impl Daemon {
         }
     }
 
-    /// Gives `catalogue`, read for `roots`, to every chat with those
-    /// roots, and returns the chats that can't have it, as their
-    /// specialist needs what it doesn't hold: each is told, and `opening`,
-    /// the chat that's connecting, if one is, fails to.
-    fn update_skill_catalogues(
+    /// Gives `catalogue`, read for `roots`, to the chat `only`, or with
+    /// none, to every chat with those roots, and returns the chats that
+    /// can't have it, as their specialist needs what it doesn't hold.
+    /// Each is told, and one that's connecting, as `purpose` says, fails
+    /// to. Once for a read, however many wait on it: each chat given a
+    /// catalogue has its commands and specialists worked out again.
+    fn give_catalogue(
         &mut self,
         roots: &Roots,
         catalogue: &Arc<Catalogue>,
-        opening: Option<TerminalId>,
+        only: Option<TerminalId>,
+        purpose: &Purpose,
+    ) -> BTreeSet<TerminalId> {
+        let opening = |id: TerminalId| matches!(purpose, Purpose::Connect(chat) if *chat == id);
+        self.give_catalogue_to(roots, catalogue, only, &opening)
+    }
+
+    /// As [`give_catalogue`](Self::give_catalogue), with `opening` saying
+    /// which chats are connecting.
+    fn give_catalogue_to(
+        &mut self,
+        roots: &Roots,
+        catalogue: &Arc<Catalogue>,
+        only: Option<TerminalId>,
+        opening: &dyn Fn(TerminalId) -> bool,
     ) -> BTreeSet<TerminalId> {
         let mut blocked = BTreeSet::new();
-        let chats: Vec<_> = self.terminals.keys().copied().collect();
+        let chats: Vec<_> = match only {
+            Some(chat) => vec![chat],
+            None => self.terminals.keys().copied().collect(),
+        };
+        (self.skills.retries).retain(|retry| retry.roots != *roots);
         for id in chats {
             if self.chat_roots(id).as_ref() != Some(roots) {
                 continue;
             }
+            #[cfg(test)]
+            {
+                self.skills.given += 1;
+            }
             match self.scoped_for(id, catalogue) {
                 Ok(scoped) => {
                     let commands = scoped.commands();
-                    self.skills.catalogues.insert(id, scoped);
+                    let held = Held {
+                        roots: roots.clone(),
+                        catalogue: scoped,
+                    };
+                    self.skills.catalogues.insert(id, held);
                     let specialists = self.specialists_for(id);
                     if let Some(chat) = self.chat(id) {
                         chat.offer_skills(commands);
@@ -673,7 +855,7 @@ impl Daemon {
                     blocked.insert(id);
                     self.forget_skill_catalogue(id);
                     if let Some(chat) = self.chat(id) {
-                        if opening == Some(id) {
+                        if opening(id) {
                             chat.failed_to_connect(&missing.to_string());
                         } else {
                             chat.notify(missing.to_string());
@@ -701,26 +883,26 @@ impl Daemon {
         }
     }
 
-    /// What was read for `purpose`, with `roots`, is there, or couldn't
-    /// be read.
+    /// What was to be read for `purpose`, with `roots`, couldn't be, as
+    /// `failed` says.
+    fn skills_failed(&mut self, purpose: Purpose, roots: &Roots, failed: Failed) {
+        self.skills_finished(purpose, roots, Err(failed), &BTreeSet::new());
+    }
+
+    /// What was read for `purpose`, with `roots`, is there, and has been
+    /// given to the chats, but for those `blocked`; or it couldn't be
+    /// read.
     fn skills_finished(
         &mut self,
         purpose: Purpose,
         roots: &Roots,
         result: Result<Arc<Catalogue>, Failed>,
+        blocked: &BTreeSet<TerminalId>,
     ) {
-        let opening = match purpose {
-            Purpose::Connect(chat) => Some(chat),
-            _ => None,
-        };
-        let blocked = match &result {
-            Ok(catalogue) => self.update_skill_catalogues(roots, catalogue, opening),
-            Err(_) => BTreeSet::new(),
-        };
         match purpose {
-            Purpose::Refresh => {
+            Purpose::Refresh(_) => {
                 if let Err(failed) = result {
-                    log::warn!("refreshing shared skills: {failed}");
+                    self.refresh_failed(roots, &failed);
                 }
             }
             Purpose::Connect(chat) => {
@@ -765,9 +947,7 @@ impl Daemon {
                         let scoped = self.scoped_for(asker.chat, &catalogue);
                         scoped.map_err(|missing| missing.to_string())
                     })
-                    .and_then(|catalogue| {
-                        serde_json::to_string(&catalogue.infos()).map_err(|err| err.to_string())
-                    });
+                    .map(|catalogue| catalogue.listing());
                 self.answer_skill_tool(&asker, listed);
             }
             Purpose::Load {
@@ -867,9 +1047,65 @@ impl Daemon {
         let pending = std::mem::take(&mut self.skills.pending);
         for (_, pending) in pending {
             let _ = self.work.scheduler.cancel(pending.work);
-            if !matches!(&pending.purpose, Purpose::Connect(_) | Purpose::Refresh) {
-                self.skills_finished(pending.purpose, &pending.roots, Err(Failed::Upgrading));
+            if !matches!(&pending.purpose, Purpose::Connect(_) | Purpose::Refresh(_)) {
+                self.skills_failed(pending.purpose, &pending.roots, Failed::Upgrading);
             }
+        }
+    }
+
+    /// Whether the user cancelled `pending`'s read, in the list of
+    /// background work.
+    fn read_cancelled(&self, pending: &Pending) -> bool {
+        matches!(
+            self.work.scheduler.state(pending.work),
+            Some(WorkState::Cancelling | WorkState::Cancelled)
+        )
+    }
+
+    /// A skill was read for `waiting`, an agent's `load_skill`.
+    fn skill_loaded(&mut self, waiting: Vec<Pending>, loaded: &Result<String, Unloadable>) {
+        for pending in waiting {
+            if self.read_cancelled(&pending) {
+                self.skills_failed(pending.purpose, &pending.roots, Failed::Cancelled);
+            } else if let Purpose::Loading(asker) = &pending.purpose {
+                let loaded = loaded.clone().map_err(|refused| refused.to_string());
+                self.answer_skill_tool(asker, loaded);
+            }
+        }
+    }
+
+    /// `catalogue` was read, for everything in `waiting`, which all asked
+    /// for the same roots. It's kept and given to the chats there once,
+    /// however many waited, and then each thing waiting is answered: a
+    /// daemon that starts with a hundred chats in one folder gives each
+    /// its catalogue once, not once for each of the hundred.
+    fn catalogue_arrived(&mut self, waiting: Vec<Pending>, catalogue: &Arc<Catalogue>) {
+        let mut current = Vec::new();
+        for pending in waiting {
+            if self.read_cancelled(&pending) {
+                self.skills_failed(pending.purpose, &pending.roots, Failed::Cancelled);
+            } else if pending.epoch != self.skills.epoch {
+                // Read before something saved from Settings: again.
+                self.read_catalogue(pending.purpose, pending.roots);
+            } else {
+                current.push(pending);
+            }
+        }
+        let Some(roots) = current.first().map(|pending| pending.roots.clone()) else {
+            return;
+        };
+        self.catalogue_read(&roots, catalogue);
+        let connecting: BTreeSet<TerminalId> = (current.iter())
+            .filter_map(|pending| match pending.purpose {
+                Purpose::Connect(chat) => Some(chat),
+                _ => None,
+            })
+            .collect();
+        let opening = |chat: TerminalId| connecting.contains(&chat);
+        let blocked = self.give_catalogue_to(&roots, catalogue, None, &opening);
+        for pending in current {
+            let read = Ok(Arc::clone(catalogue));
+            self.skills_finished(pending.purpose, &roots, read, &blocked);
         }
     }
 
@@ -887,42 +1123,12 @@ impl Daemon {
             let jobs: Vec<_> = (self.skills.pending.iter())
                 .filter_map(|(&job, pending)| (pending.reading == reading).then_some(job))
                 .collect();
-            let mut kept = false;
-            for job in jobs {
-                let pending = self.skills.pending.remove(&job).expect("listed above");
-                let cancelled = matches!(
-                    self.work.scheduler.state(pending.work),
-                    Some(WorkState::Cancelling | WorkState::Cancelled)
-                );
-                match &done {
-                    _ if cancelled => {
-                        self.skills_finished(
-                            pending.purpose,
-                            &pending.roots,
-                            Err(Failed::Cancelled),
-                        );
-                    }
-                    Done::Skill(loaded) => {
-                        if let Purpose::Loading(asker) = &pending.purpose {
-                            let loaded = loaded.clone().map_err(|refused| refused.to_string());
-                            self.answer_skill_tool(asker, loaded);
-                        }
-                    }
-                    // Read before something saved from Settings: again.
-                    Done::Catalogue(_) if pending.epoch != self.skills.epoch => {
-                        self.read_catalogue(pending.purpose, pending.roots);
-                    }
-                    Done::Catalogue(catalogue) => {
-                        if !std::mem::replace(&mut kept, true) {
-                            self.catalogue_read(&pending.roots, catalogue);
-                        }
-                        self.skills_finished(
-                            pending.purpose,
-                            &pending.roots,
-                            Ok(Arc::clone(catalogue)),
-                        );
-                    }
-                }
+            let waiting: Vec<Pending> = (jobs.into_iter())
+                .filter_map(|job| self.skills.pending.remove(&job))
+                .collect();
+            match done {
+                Done::Skill(loaded) => self.skill_loaded(waiting, &loaded),
+                Done::Catalogue(catalogue) => self.catalogue_arrived(waiting, &catalogue),
             }
         }
         let now = Instant::now();
@@ -943,8 +1149,9 @@ impl Daemon {
             if failed == Failed::TimedOut && !shared {
                 let _ = self.work.scheduler.cancel(pending.work);
             }
-            self.skills_finished(pending.purpose, &pending.roots, Err(failed));
+            self.skills_failed(pending.purpose, &pending.roots, failed);
         }
+        self.retry_refreshes();
         let Skills {
             catalogues,
             announced,
@@ -961,7 +1168,7 @@ impl Daemon {
         self.skills
             .catalogues
             .get(&chat)
-            .map(|catalogue| catalogue.instructions())
+            .map(|held| held.catalogue.instructions())
             .unwrap_or_default()
     }
 
@@ -1002,7 +1209,7 @@ impl Daemon {
     /// itself, which stays the agent's.
     pub(super) fn is_shared_skill(&self, chat: TerminalId, text: &str) -> bool {
         let named = (self.skills.catalogues.get(&chat))
-            .is_some_and(|catalogue| catalogue.has_command(text));
+            .is_some_and(|held| held.catalogue.has_command(text));
         named && !(self.chat_ref(chat)).is_some_and(|own| own.agent_offers(text))
     }
 
@@ -1055,7 +1262,13 @@ impl Daemon {
         let roots = self.chat_roots(chat).expect("a chat");
         let catalogue = Arc::new(Catalogue::discover(&roots));
         self.catalogue_read(&roots, &catalogue);
-        self.update_skill_catalogues(&roots, &catalogue, None);
+        self.give_catalogue(&roots, &catalogue, None, &Purpose::Refresh(None));
+    }
+
+    /// Lets go of the chat `chat`, as closing it does.
+    pub(super) fn close_chat_for_test(&mut self, chat: TerminalId) {
+        self.terminals.remove(&chat);
+        self.forget_skill_catalogue(chat);
     }
 
     /// Makes every catalogue kept old enough to be read again.
@@ -1150,8 +1363,8 @@ mod tests {
             .unwrap();
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         daemon.skills.next = 1;
-        daemon.read_catalogue(Purpose::Refresh, roots.clone());
-        daemon.read_catalogue(Purpose::Refresh, roots);
+        daemon.read_catalogue(Purpose::Refresh(None), roots.clone());
+        daemon.read_catalogue(Purpose::Refresh(None), roots);
         let work: Vec<_> = (daemon.skills.pending.values())
             .map(|pending| pending.work)
             .collect();
@@ -1236,12 +1449,12 @@ mod tests {
         let roots = |at: usize| daemon.skill_roots(dir.path().join(format!("folder-{at}")));
         let all: Vec<_> = (0..=MOST_READING).map(roots).collect();
         for roots in &all[..MOST_READING] {
-            daemon.read_catalogue(Purpose::Refresh, roots.clone());
+            daemon.read_catalogue(Purpose::Refresh(None), roots.clone());
         }
         assert_eq!(daemon.skills.pending.len(), MOST_READING);
-        daemon.read_catalogue(Purpose::Refresh, all[MOST_READING].clone());
+        daemon.read_catalogue(Purpose::Refresh(None), all[MOST_READING].clone());
         assert_eq!(daemon.skills.pending.len(), MOST_READING, "refused");
-        daemon.read_catalogue(Purpose::Refresh, all[0].clone());
+        daemon.read_catalogue(Purpose::Refresh(None), all[0].clone());
         assert_eq!(daemon.skills.pending.len(), MOST_READING + 1, "shared");
         drop(release);
         settle(&mut daemon, |daemon| daemon.skills.pending.is_empty());
@@ -1262,11 +1475,11 @@ mod tests {
         let roots = daemon.chat_roots(chat).unwrap();
         let missing = Arc::new(Catalogue::discover(&roots));
         for _ in 0..2 {
-            let blocked = daemon.update_skill_catalogues(&roots, &missing, Some(chat));
+            let blocked = daemon.give_catalogue(&roots, &missing, None, &Purpose::Connect(chat));
             assert!(blocked.contains(&chat));
             assert!(daemon.skill_catalogue(chat).is_none());
         }
-        daemon.skills_finished(Purpose::Connect(chat), &roots, Err(Failed::TimedOut));
+        daemon.skills_failed(Purpose::Connect(chat), &roots, Failed::TimedOut);
         assert!(daemon.skill_catalogue(chat).is_none());
         skill(
             &dir.path().join(".agents/skills"),
@@ -1274,7 +1487,7 @@ mod tests {
             "Check",
         );
         let fixed = Arc::new(Catalogue::discover(&roots));
-        let blocked = daemon.update_skill_catalogues(&roots, &fixed, Some(chat));
+        let blocked = daemon.give_catalogue(&roots, &fixed, None, &Purpose::Connect(chat));
         assert!(blocked.is_empty());
         assert!(daemon.is_shared_skill(chat, "/required-check"));
     }
@@ -1289,7 +1502,7 @@ mod tests {
         let (mut daemon, chat) = daemon_with_chat(dir.path());
         skill(&dir.path().join(".agents/skills"), "check", "Check it.");
         let roots = daemon.chat_roots(chat).unwrap();
-        daemon.skills_finished(Purpose::Connect(chat), &roots, Err(Failed::TimedOut));
+        daemon.skills_failed(Purpose::Connect(chat), &roots, Failed::TimedOut);
         assert!(daemon.skill_catalogue(chat).is_none());
         assert!(daemon.skills.skipped.is_empty());
         let notice = daemon.chat(chat).unwrap().node().notice.clone().unwrap();
@@ -1493,5 +1706,115 @@ mod tests {
                 assert_eq!(told, "", "{name}");
             }
         }
+    }
+
+    /// A folder untrusted, or a skill switched off, stops being offered
+    /// there and then, before anything is read again, and so whether or
+    /// not that read succeeds. A read that fails is made again.
+    #[test]
+    fn untrusting_or_switching_off_takes_effect_before_the_read_that_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        daemon.trust.folders = crate::trust::Trust::load(&crate::Trusting::ThisRun);
+        let repo = dir.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        skill(&repo.join(".agents/skills"), "local", "Local.");
+        skill(&dir.path().join(".agents/skills"), "mine", "Mine.");
+        daemon.trust.folders.mark(repo.clone(), true);
+        let chat = add_chat(&mut daemon, &repo);
+        daemon.read_skills_now(chat);
+        let offers = |daemon: &mut Daemon, name: &str| {
+            let commands = &daemon.chat(chat).unwrap().node().commands;
+            commands.iter().any(|command| command.name == name)
+        };
+        assert!(daemon.is_shared_skill(chat, "/local") && offers(&mut daemon, "local"));
+
+        daemon.trust.folders.mark(repo.clone(), false);
+        daemon.skills_changed();
+        assert!(daemon.skill_catalogue(chat).is_none(), "gone at once");
+        assert!(!daemon.is_shared_skill(chat, "/local") && !offers(&mut daemon, "local"));
+        // The read that follows fails, as one that takes too long does.
+        let roots = daemon.chat_roots(chat).unwrap();
+        let pending = std::mem::take(&mut daemon.skills.pending);
+        assert!(!pending.is_empty());
+        daemon.skills_failed(Purpose::Refresh(None), &roots, Failed::TimedOut);
+        assert!(daemon.skill_catalogue(chat).is_none());
+        // It's made again, and gives the chat what it may still have.
+        daemon.take_skills();
+        assert_eq!(daemon.skills.pending.len(), 1, "read again");
+        settle(&mut daemon, |daemon| daemon.skill_catalogue(chat).is_some());
+        assert!(daemon.is_shared_skill(chat, "/mine"));
+        assert!(!daemon.is_shared_skill(chat, "/local"));
+        assert!(daemon.skills.retries.is_empty());
+
+        let off: Arc<[String]> = ["mine".to_owned()].into();
+        daemon.config.agents.configured.disabled_skills = off;
+        daemon.skills_changed();
+        assert!(!daemon.is_shared_skill(chat, "/mine") && !offers(&mut daemon, "mine"));
+        // Tried only so many times, when every read fails.
+        for _ in 0..MOST_RETRIES {
+            let roots = daemon.chat_roots(chat).unwrap();
+            daemon.skills.pending.clear();
+            daemon.skills_failed(Purpose::Refresh(None), &roots, Failed::TimedOut);
+            daemon.take_skills();
+        }
+        assert!(daemon.skills.retries.is_empty());
+        assert!(daemon.skill_catalogue(chat).is_none());
+    }
+
+    /// A read many chats wait on gives each chat its catalogue once: the
+    /// work on the event loop grows with the chats, not with their square.
+    #[test]
+    fn a_read_many_chats_share_gives_each_its_catalogue_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, first) = daemon_with_chat(dir.path());
+        skill(&dir.path().join(".agents/skills"), "check", "Check it.");
+        let mut chats = vec![first];
+        for _ in 1..64 {
+            chats.push(add_chat(&mut daemon, dir.path()));
+        }
+        for &chat in &chats {
+            daemon.refresh_chat_skills(chat);
+        }
+        settle(&mut daemon, |daemon| daemon.skills.pending.is_empty());
+        assert_eq!(daemon.skills.given, 64);
+        // One more that asks while it's fresh is given it alone.
+        let late = add_chat(&mut daemon, dir.path());
+        daemon.refresh_chat_skills(late);
+        assert!(daemon.is_shared_skill(late, "/check"));
+        assert_eq!(daemon.skills.given, 65);
+    }
+
+    /// Settings' catalogue for a folder is the one of a chat there, by
+    /// whatever name the folder is reached, and the project found for a
+    /// folder with no chat is kept a while rather than looked for on
+    /// disk at each of Settings' requests.
+    #[test]
+    fn a_folders_roots_are_a_chats_there_and_its_project_is_kept_a_while() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let top = dir.path().canonicalize().unwrap();
+        let repo = top.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let link = top.join("link");
+        std::os::unix::fs::symlink(repo.join("sub"), &link).unwrap();
+        let through = daemon.skill_roots(link.clone());
+        assert_eq!(through.cwd, repo.join("sub"));
+        assert_eq!(through.project, repo);
+        let chat = add_chat(&mut daemon, &repo.join("sub"));
+        assert_eq!(
+            Some(daemon.skill_roots(link.clone())),
+            daemon.chat_roots(chat)
+        );
+        daemon.close_chat_for_test(chat);
+        // Not looked for again: the repository going isn't seen yet.
+        std::fs::remove_dir(repo.join(".git")).unwrap();
+        assert_eq!(daemon.skill_roots(link.clone()).project, repo);
+        let mut looked = daemon.skills.looked.lock().unwrap();
+        let at = &mut looked.as_mut().unwrap().at;
+        *at = at.checked_sub(PROJECT_KNOWN_FOR).unwrap();
+        drop(looked);
+        assert_eq!(daemon.skill_roots(link).project, repo.join("sub"));
     }
 }

@@ -321,7 +321,12 @@ impl Registry {
         let mut registry = Self::default();
         // From the working directory up to the project's root, and never
         // above it: a folder above is nobody's project, and may be anyone's.
-        for dir in roots.project_folders() {
+        // Nor from a folder that isn't the user's own, such as a shared
+        // scratch directory someone made a repository of. Not gated on the
+        // folder being trusted: a project's server runs only once its
+        // exact definition has been reviewed, which is the stricter gate.
+        let owned = (roots.project_folders()).filter(|dir| crate::skills::owned_by_user(dir));
+        for dir in owned {
             registry.read(
                 roots,
                 &dir.join(".agents/mcp.json"),

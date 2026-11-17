@@ -228,7 +228,9 @@ impl Settings {
         if let Err(said) = crate::permissions::read_rules(&self.text("permissions.rules")) {
             return wrong("permissions.rules", said);
         }
-        if let Some(name) = (self.disabled_skills().iter()).find(|name| !skill_name(name)) {
+        if let Some(name) =
+            (self.disabled_skills().iter()).find(|name| !crate::skills::names_a_skill(name))
+        {
             let said = format!(
                 "daemon.skills.disabled lists skills by name, with spaces or commas between: \
                  {name:?} isn't a skill's name"
@@ -762,15 +764,6 @@ pub fn rerun(dirs: &Dirs) -> Result<Settings, String> {
 /// running the config with it.
 pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings, String> {
     change_model(dirs, |model| model.set(info, value))
-}
-
-/// Whether `name` could be a shared skill's: the characters a `SKILL.md`
-/// may name itself with.
-fn skill_name(name: &str) -> bool {
-    name.len() <= 64
-        && (name.bytes()).all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_:".contains(&byte)
-        })
 }
 
 /// Saves rules under the config lock, preserving a concurrent writer's work.
