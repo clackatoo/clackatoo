@@ -535,6 +535,29 @@ impl Terminal {
             Which::Before => spans.iter().rposition(|span| span.first < line)?,
             Which::After => spans.iter().position(|span| span.first > line)?,
         };
+        Some(self.block_of(&spans, index))
+    }
+
+    /// The last blocks of the document, newest first, at most `most` of
+    /// them: each as [`block`](Self::block) gives it, but all found in one
+    /// pass over the marks, where asking for each would go over them
+    /// again.
+    #[must_use]
+    pub fn last_blocks(&self, most: usize) -> Vec<Block> {
+        if self.is_alternate_screen() {
+            return Vec::new();
+        }
+        let spans = self.spans();
+        (0..spans.len())
+            .rev()
+            .take(most)
+            .map(|index| self.block_of(&spans, index))
+            .collect()
+    }
+
+    /// The block that starts at `spans[index]`, which runs to the line
+    /// before the next span, or to the document's end.
+    fn block_of(&self, spans: &[Span], index: usize) -> Block {
         let span = spans[index];
         let (_, last_line) = self.document_bounds();
         let end = spans
@@ -542,7 +565,7 @@ impl Terminal {
             .map_or(last_line, |next| next.first - 1);
         let last = self.last_written(span.first, end);
         let entry = self.block_entry(span.block);
-        Some(Block {
+        Block {
             first: span.first,
             last,
             output: span.output.filter(|&output| output <= last),
@@ -550,7 +573,7 @@ impl Terminal {
             cwd: entry.and_then(|entry| entry.cwd.as_deref().map(str::to_owned)),
             running: entry.is_some_and(|entry| entry.phase == Phase::Running),
             exit: entry.and_then(|entry| entry.exit),
-        })
+        }
     }
 
     /// The start of every block, in order, from the marks: consecutive
@@ -1007,6 +1030,22 @@ mod tests {
         assert_eq!(first(0, Which::Before), None);
         assert_eq!(first(3, Which::After), Some(4));
         assert_eq!(first(4, Which::After), None);
+    }
+
+    #[test]
+    fn the_last_blocks_are_what_asking_for_each_gives_newest_first() {
+        let mut t = terminal(20, 6, 100);
+        for name in ["one", "two", "three"] {
+            t.advance(PROMPT.as_bytes());
+            t.advance(command(name, "out\r\n", 0).as_bytes());
+        }
+        let (_, last) = t.document_bounds();
+        let newest = t.block(last, Which::At).unwrap();
+        let before = t.block(newest.first, Which::Before).unwrap();
+        assert_ne!(newest, before);
+        assert_eq!(t.last_blocks(2), [newest, before]);
+        assert_eq!(t.last_blocks(9).len(), 3);
+        assert!(t.last_blocks(0).is_empty());
     }
 
     #[test]
