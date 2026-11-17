@@ -136,10 +136,10 @@
 //! 54. The regions programs marked private (OSC 46373, CLACKA-242) still
 //!     open in each terminal, so what they print after an upgrade is in
 //!     them too. Before, none was open.
-//! 55. The context people attached to chats' messages (CLACKA-253 has
-//!     its history): what each turn was sent with, on the branch shown and
-//!     those kept, what waits with queued messages, and what's chosen in
-//!     the draft. Before, no message had any.
+//! 55. The context people attached to chats' messages: what each turn
+//!     was sent with, on the branch shown and those kept, what waits with
+//!     queued messages, and what's chosen in the draft. Before, no
+//!     message had any.
 //! 56. How many times each managed MCP server's connections were told to
 //!     start again, as after a sign-in, so the proxies that outlive the
 //!     upgrade aren't told again for one they already made. Before, no

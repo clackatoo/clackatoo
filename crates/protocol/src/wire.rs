@@ -67,9 +67,10 @@ use std::cell::Cell;
 use serde::{Deserialize, Deserializer};
 
 use crate::{
-    Answer, BufferUpdate, ChatPatch, ChoiceKind, ClientMessage, ConnectionState, Content, Done,
-    Error, Event, FilesUpdate, Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage,
-    Setting, SettingKind, ToolContent, Turn, ViewUpdate, Workspaces,
+    Answer, BufferUpdate, ChatPatch, ChoiceKind, ClientMessage, ConnectionState, Content,
+    ContextMode, ContextRef, ContextReply, ContextSelection, ContextSnapshot, Done, Error, Event,
+    FilesUpdate, Found, Item, McpSignIn, McpSignInState, McpState, Node, PROTOCOL_VERSION, Patch,
+    Response, ServerMessage, Setting, SettingKind, ToolContent, Turn, ViewUpdate, Workspaces,
 };
 
 /// The oldest client a daemon of this build talks to.
@@ -487,21 +488,54 @@ gates! {
     /// daemon relaying, which shows the lines to the client that asked
     /// itself.
     RELAY_HINTS = 153,
-    /// Shared skills, discovered by the daemon for Settings.
+    /// The skills the daemon shares with every agent, for a window's
+    /// settings to list: `Request::Skills`, answered with
+    /// `Response::Skills`. An older daemon is never asked.
     SKILLS = 154,
-    /// Native specialist Settings browser and saved overrides.
+    /// Specialists in a window's settings, as the daemon's config has
+    /// them: `Request::Specialists`, answered with
+    /// `Response::Specialists`, and `Request::SaveSpecialist`, answered
+    /// with `Response::SpecialistSaved`. Superseded by
+    /// [`SPECIALIST_FILES`] before any release had it, and kept only as
+    /// version 160's samples hold it: no window of this build asks
+    /// either, and an older daemon is never asked.
     SPECIALIST_SETTINGS = 155,
-    /// Markdown specialist files, source information and scoped saves.
+    /// Specialists as the files that define them, for a window's
+    /// settings: `Request::SpecialistFiles`, answered with
+    /// `Response::SpecialistFiles`, each with where it came from, and
+    /// `Request::SaveSpecialistFile`. An older daemon is never asked.
     SPECIALIST_FILES = 156,
-    /// Shared daemon background work, its progress and native-window controls.
+    /// What the daemon is doing in the background: `Event::Work`, the
+    /// jobs going and lately done, which an older window is never sent,
+    /// and `Request::Work`, to list them and to cancel or dismiss one,
+    /// answered with `Response::Work`, which an older daemon is never
+    /// asked.
     WORK = 157,
-    /// Shared-index editor outlines and project symbol searches.
+    /// Outlines of code from the daemon's index: `Search::CodeSymbols`, a
+    /// search an older daemon is never asked for, and
+    /// `Found::IndexStatus`, how much of the project the index covers,
+    /// sent only in answer to it.
     CODE_OUTLINES = 158,
-    /// Captured workspace context attachments.
+    /// What people attach to chats' messages: `Request::Context`, to
+    /// search for it, preview it and read it back, answered with
+    /// `Response::Context`; `ChatAction::SubmitContext` and
+    /// `ChatAction::DraftContext`; and what holds it, `Turn`'s `context`,
+    /// `ChatNode`'s `draft_context` and `QueuedMessage`'s `context_count`.
+    /// An older daemon is never asked, and an older peer is sent chats
+    /// without those fields. `Turn`'s and `QueuedMessage`'s are their
+    /// structs' first fields, not their last as the rule is: version
+    /// 160's samples hold them so, and so they stay.
     CONTEXT = 159,
-    /// Temporary side questions addressed through a parent chat.
+    /// Side questions, asked of a chat's agent beside its conversation:
+    /// `Request::Side`, addressed by the chat they're beside, answered
+    /// with `Response::Side`. An older daemon is never asked.
     SIDE_QUESTIONS = 160,
-    /// Managed external MCP servers and their private proxy control channel.
+    /// MCP servers the daemon manages for every agent: `Request::Mcp`,
+    /// the settings' list of them and what's done to one, answered with
+    /// `Response::Mcp`, and `Request::McpProxy`, how the process standing
+    /// between an agent and a server asks the daemon whether it may,
+    /// answered with `Response::McpConnection`. An older daemon is never
+    /// asked either.
     MANAGED_MCP = 161,
     /// Signing in to managed MCP servers from where they're needed:
     /// `McpServerInfo`'s `signing_in`, and a chat's servers that need a
@@ -509,7 +543,10 @@ gates! {
     /// which an older peer is never sent, as it has no button to sign in
     /// with.
     MCP_SIGN_IN = 162,
-    /// Permission engine controls and recent rule decisions in daemon settings.
+    /// Rules for what agents may do unasked: `Request::SetPermissionRules`,
+    /// which an older daemon is never asked, and `DaemonSettings`'
+    /// `permission_history`, the rules' latest decisions, which an older
+    /// window is never sent.
     PERMISSIONS = 163,
 }
 
@@ -716,6 +753,66 @@ impl Since for ChatPatch {
             Self::Branches(_) => CHAT_BRANCHES,
             Self::Retrying(_) => CHAT_FACTS,
             Self::McpSignIn(_) => MCP_SIGN_IN,
+        }
+    }
+}
+
+/// What's attached to a message is in fields no peer older than
+/// [`CONTEXT`] is sent (a turn's `context`, a chat's `draft_context`), and
+/// in answers no older one asks for: the kinds it came with are what
+/// every peer that reads them has.
+impl Since for ContextRef {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Owned { source, .. } => source.since(),
+            Self::File { .. }
+            | Self::Symbol { .. }
+            | Self::Diagnostics { .. }
+            | Self::Command { .. }
+            | Self::Terminal { .. }
+            | Self::Change { .. }
+            | Self::Chat { .. }
+            | Self::Board { .. }
+            | Self::Project { .. }
+            | Self::Retained { .. } => EARLIER,
+        }
+    }
+}
+
+/// As for [`ContextRef`], beside which it travels.
+impl Since for ContextMode {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Contents | Self::Reference => EARLIER,
+        }
+    }
+}
+
+/// How signing in to a chat's server is going is in a field no peer
+/// older than [`MCP_SIGN_IN`] is sent (a chat's `mcp_sign_in`), and in
+/// [`ChatPatch::McpSignIn`], which none is: the states it came with are
+/// what every peer that reads them has.
+impl Since for McpSignInState {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Needed | Self::SigningIn | Self::SignedIn | Self::Failed(_) => EARLIER,
+        }
+    }
+}
+
+/// A managed server's state is in answers no peer older than
+/// [`MANAGED_MCP`] asks for: the states it came with are what every peer
+/// that reads them has.
+impl Since for McpState {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Disabled
+            | Self::Disconnected
+            | Self::Starting
+            | Self::Connected
+            | Self::NeedsLogin
+            | Self::Error
+            | Self::Ready => EARLIER,
         }
     }
 }
@@ -943,9 +1040,12 @@ pub fn newest(message: &ServerMessage) -> u32 {
             Response::Specialists(_) | Response::SpecialistSaved => SPECIALIST_SETTINGS,
             Response::SpecialistFiles(_) => SPECIALIST_FILES,
             Response::Work(_) => WORK,
-            Response::Context(_) => CONTEXT,
+            Response::Context(reply) => CONTEXT.max(newest_in_context_reply(reply)),
             Response::Side(_) => SIDE_QUESTIONS,
-            Response::Mcp(_) | Response::McpConnection(_) => MANAGED_MCP,
+            Response::Mcp(reply) => (reply.servers.iter())
+                .map(|server| server.state.since())
+                .fold(MANAGED_MCP, u32::max),
+            Response::McpConnection(_) => MANAGED_MCP,
             _ => EARLIER,
         },
         ServerMessage::Event(event) => {
@@ -1236,6 +1336,8 @@ fn newest_in_node(node: &Node) -> u32 {
             .map(newest_in_turn)
             .chain([newest_in_settings(&chat.settings)])
             .chain([newest_in_question(chat.question.as_ref())])
+            .chain((chat.draft_context.iter()).map(newest_in_selection))
+            .chain([newest_in_sign_ins(&chat.mcp_sign_in)])
             .max()
             .unwrap_or(EARLIER),
         Node::Grid(grid) => node.since().max(grid.state.modes.mouse_encoding.since()),
@@ -1259,9 +1361,38 @@ fn newest_in_question(question: Option<&crate::Question>) -> u32 {
 }
 
 fn newest_in_turn(turn: &Turn) -> u32 {
-    turn.items
-        .iter()
+    (turn.items.iter())
         .map(newest_in_item)
+        .chain(turn.context.iter().map(newest_in_snapshot))
+        .max()
+        .unwrap_or(EARLIER)
+}
+
+fn newest_in_snapshot(snapshot: &ContextSnapshot) -> u32 {
+    snapshot.source.since().max(snapshot.mode.since())
+}
+
+fn newest_in_selection(selection: &ContextSelection) -> u32 {
+    selection.source.since().max(selection.mode.since())
+}
+
+fn newest_in_context_reply(reply: &ContextReply) -> u32 {
+    match reply {
+        ContextReply::Draft { context, .. } => (context.iter())
+            .map(newest_in_selection)
+            .max()
+            .unwrap_or(EARLIER),
+        ContextReply::Candidates { items, .. } => (items.iter())
+            .map(|item| item.source.since())
+            .max()
+            .unwrap_or(EARLIER),
+        ContextReply::Snapshot(snapshot) => newest_in_snapshot(snapshot),
+    }
+}
+
+fn newest_in_sign_ins(servers: &[McpSignIn]) -> u32 {
+    (servers.iter())
+        .map(|server| server.state.since())
         .max()
         .unwrap_or(EARLIER)
 }
@@ -1286,6 +1417,7 @@ fn newest_in_patch(patch: &ChatPatch) -> u32 {
         ChatPatch::History { turns, .. } => {
             turns.iter().map(newest_in_turn).max().unwrap_or(EARLIER)
         }
+        ChatPatch::McpSignIn(servers) => newest_in_sign_ins(servers),
         _ => EARLIER,
     };
     patch.since().max(inside)
@@ -2800,7 +2932,7 @@ mod tests {
     #[test]
     fn chat_previews_round_trip_and_are_omitted_for_older_peers() {
         fn encode<T: serde::Serialize>(wire: u32, value: &T) -> Vec<u8> {
-            speaking(wire, || postcard::to_stdvec(value).unwrap())
+            speaking(wire, || postcard::to_allocvec(value).unwrap())
         }
         fn read<T: serde::de::DeserializeOwned>(wire: u32, bytes: &[u8]) -> T {
             speaking(wire, || postcard::from_bytes(bytes).unwrap())

@@ -602,6 +602,7 @@ pub struct ChatDelivery {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessage {
     /// Number of captured text attachments, whose bodies stay in the daemon.
+    /// First, though it's the newest field: see `wire::CONTEXT`.
     #[serde(
         default,
         skip_serializing_if = "wire::before::<{ wire::CONTEXT }, _>",
@@ -1072,7 +1073,8 @@ impl Setting {
 /// A message the user sent, and what the agent did with it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
-    /// Immutable context actually included with this message.
+    /// Immutable context actually included with this message. First,
+    /// though it's the newest field: see `wire::CONTEXT`.
     #[serde(
         default,
         skip_serializing_if = "wire::before::<{ wire::CONTEXT }, _>",
