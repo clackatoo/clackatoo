@@ -288,6 +288,19 @@ const SERVER_CHOICES: [(&str, &str, ChoiceKind); 3] = [
     ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
+/// The answers to a question about a message to a chat whose agent may do
+/// more than this one's. Allowing always is for messages to that chat,
+/// from this one: nothing else is allowed by it.
+const CHAT_CHOICES: [(&str, &str, ChoiceKind); 3] = [
+    ("allow", "Allow", ChoiceKind::AllowOnce),
+    (
+        "chat",
+        "Always allow messages to this chat",
+        ChoiceKind::AllowAlways,
+    ),
+    ("reject", "Reject", ChoiceKind::RejectOnce),
+];
+
 /// Which answers a tool's question offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Choices {
@@ -304,6 +317,10 @@ pub(crate) enum Choices {
     /// managed MCP server without asking for the rest of the chat, and
     /// Reject (see `chat/managed.rs`).
     Server,
+    /// Allow, Always allow messages to this chat, which lets its agent
+    /// message that chat without asking for as long as both are open, and
+    /// Reject (see `chat/relations.rs`).
+    Chat,
 }
 
 /// A message kept intact while the agent opens or reloads its session.
@@ -658,6 +675,14 @@ pub(crate) struct HostedChat {
     /// the daemon's number for each call, and the server. Not handed
     /// over: the daemon takes them back before an upgrade.
     server_calls: Vec<(u64, String)>,
+    /// The questions waiting that are about a message to a chat whose
+    /// agent may do more: the daemon's number for each call, and the chat.
+    /// Not handed over, as `server_calls` isn't.
+    chat_calls: Vec<(u64, TerminalId)>,
+    /// The chats whose agents may do more that the user has let this one's
+    /// message without asking. Not handed over, nor saved, nor copied: an
+    /// upgrade or a restart asks again, and a copy of the chat is asked.
+    allowed_chats: Vec<TerminalId>,
     /// Its agent's account's limits, as the daemon last heard them from
     /// any of that agent's chats, shown with the context it fills. Not
     /// handed over: after an upgrade they come again with the next that
@@ -925,6 +950,8 @@ impl HostedChat {
             own_server_lost: false,
             mcp_tokens: VecDeque::new(),
             server_calls: Vec::new(),
+            chat_calls: Vec::new(),
+            allowed_chats: Vec::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
@@ -1685,7 +1712,7 @@ impl HostedChat {
     /// write, behind any others waiting; with [`MAX_INBOX`] waiting
     /// already, it's handed back. Returns what the server must do to send
     /// it, if it went.
-    pub(crate) fn deliver(&mut self, message: Message) -> Result<Vec<Action>, Message> {
+    pub(crate) fn deliver(&mut self, message: Message) -> Result<Vec<Action>, Box<Message>> {
         // While a new branch of the conversation waits for the user's
         // message, what comes waits too: it would show the branch left.
         if self.answering()
@@ -1700,7 +1727,7 @@ impl HostedChat {
                 .filter(|waiting| !waiting.is_notice())
                 .count();
             if waiting >= MAX_INBOX && !message.is_notice() {
-                return Err(message);
+                return Err(Box::new(message));
             }
             self.relations.inbox.push_back(message);
             self.say_held();
@@ -2963,6 +2990,7 @@ impl HostedChat {
             Choices::Once => &ONCE_CHOICES,
             Choices::Browser => &BROWSER_CHOICES,
             Choices::Server => &SERVER_CHOICES,
+            Choices::Chat => &CHAT_CHOICES,
         };
         let choices = (choices.iter())
             .map(|&(id, name, kind)| Choice {
@@ -2994,6 +3022,7 @@ impl HostedChat {
     pub(crate) fn withdraw(&mut self, call: u64) {
         self.asking.retain(|(asker, _)| *asker != Asker::Tool(call));
         self.forget_server_call(call);
+        self.chat_calls.retain(|(asked, _)| *asked != call);
         self.show_question();
     }
 
@@ -3029,6 +3058,11 @@ impl HostedChat {
                 // One about a managed MCP server's call is that server's
                 // to hear, and allows nothing else.
                 if let Some(action) = self.server_answered(call, option) {
+                    return Some(action);
+                }
+                // One about a message to a chat that may do more allows,
+                // always, only messages to that chat.
+                if let Some(action) = self.chat_answered(call, option) {
                     return Some(action);
                 }
                 if option == Some("always") {
@@ -8735,6 +8769,7 @@ pub(crate) mod tests {
             hops,
             cause: None,
             finished: Vec::new(),
+            caution: None,
         }
     }
 

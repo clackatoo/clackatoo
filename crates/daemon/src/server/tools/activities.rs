@@ -450,6 +450,7 @@ impl Daemon {
             hops: 0,
             cause: Some((owner, activity.turn)),
             finished: Vec::new(),
+            caution: None,
         };
         if let Some(chat) = self.chat(owner)
             && let Ok(actions) = chat.deliver(message)

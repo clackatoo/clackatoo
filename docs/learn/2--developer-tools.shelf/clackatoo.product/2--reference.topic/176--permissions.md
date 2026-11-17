@@ -46,7 +46,7 @@ Rules apply to requests that reach Clackatoo:
 | Request | Coverage |
 | --- | --- |
 | Provider tool approvals | Requests the provider sends over ACP, the Agent Client Protocol |
-| Clackatoo's built-in tools | The calls that ask you: running a command, typing into a terminal, showing a file outside the project, and the browser's first page |
+| Clackatoo's built-in tools | The calls that ask you: running a command, typing into a terminal, showing a file outside the project, the browser's first page, and a message to a chat that can do more ([`send_to_chat`](~clackatoo/reference/chats-together)), which no rule allows but a Deny refuses |
 | Managed MCP servers | External tool calls and other operations; connection metadata does not ask |
 
 Clackatoo's other tools, such as `list_panes`, `read_chat` and

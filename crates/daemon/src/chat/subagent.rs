@@ -447,6 +447,18 @@ impl HostedChat {
         (setting.choices.iter()).position(|choice| choice.value == setting.value)
     }
 
+    /// Its agent's mode, by the name the agent gives it: the mode it's
+    /// in, or before its session opens, the one it will ask for. `None` if
+    /// it has none, or none is known yet.
+    pub(crate) fn mode_name(&self) -> Option<String> {
+        match self.setting_of(SettingKind::Mode) {
+            Some(setting) => (setting.choices.iter())
+                .find(|choice| choice.value == setting.value)
+                .map(|choice| choice.name.clone()),
+            None => self.mode_to_come().map(str::to_owned),
+        }
+    }
+
     /// How much its agent's mode lets it do unasked, on the scale every
     /// agent clackatoo knows shares (see `modes::level`): the mode it's in,
     /// or before its session opens, the one it will ask for. `None` if the

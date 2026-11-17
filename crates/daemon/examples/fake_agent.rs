@@ -26,6 +26,7 @@
 //! | `run PATH`, a line's end, then text | Writes the text to the file in a command, as `sed -i` would, saying nothing of what it changed, and says `ran` |
 //! | `stream N`, and anything after a space | Says the numbers from 0 to N − 1, each followed by a space, in N updates, all in one write, as an agent streaming fast; then `done` |
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
+//! | `framing`, from another chat | Says, after `framing: `, what clackatoo put before the message: who sent it, and anything it said beside it |
 //! | `background` | Runs `npm run dev` in the background, as Claude Code's adapter says one to a client that asked for AIR's `asyncTasks`: a command that finishes at once, then a task, `t1`, "Serve the docs", that goes on; and says `started`, or `no tasks` to a client that didn't ask |
 //! | `finish` | Says task `t1` completed, then `finished` |
 //! | `background-out DIR` | As `background`, to a client that asked for AIR's `asyncTasks`, but writes `listening on :3000` to `DIR/tasks/t1.output`, DIR an absolute path (or `tmp`, a folder of its own in `$TMPDIR/claude-UID`), and says that's where `t1`'s output goes in a progress beat after the spawn; then spawns `t2`, "Watch", whose output it says is `/etc/passwd`; then `started` |
@@ -1816,7 +1817,17 @@ impl Fake {
             });
             return true;
         }
+        let whole = text;
         let (sender, text) = from_chat(text);
+        // What clackatoo said before the message, in its own words.
+        if let (Some(_), "framing") = (sender, text) {
+            let before = whole
+                .split_once("\n--- message ")
+                .map_or(whole, |(before, _)| before);
+            say(&session, &format!("framing: {before}\n"));
+            done(&id, "end_turn");
+            return true;
+        }
         if let (Some(sender), "bounce") = (sender, text) {
             self.bounce(id, session, sender);
             return true;

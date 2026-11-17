@@ -1691,6 +1691,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Permission rules: Deny and Ask match a command by its first words; a change cancels nothing waiting",
     },
+    News {
+        id: "talk-ask",
+        date: "2026-11-17",
+        lesson: "agents",
+        what: "Agents message chats that may do more once you allow it; Claude's Auto and Codex's Auto review are as one",
+    },
 ];
 
 impl News {

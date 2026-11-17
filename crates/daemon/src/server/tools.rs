@@ -1181,8 +1181,12 @@ impl Daemon {
         };
         let call = self.tools.next_call;
         self.tools.next_call += 1;
-        let asked = (self.chat(chat))
-            .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref(), shown));
+        let asked = (self.chat(chat)).is_some_and(|hosted| match &tool {
+            Tool::SendToChat { chat: to, message } if shown == Choices::Chat => {
+                hosted.ask_for_chat(call, *to, &what, message)
+            }
+            _ => hosted.ask_for_tool(call, &what, whole.as_deref(), shown),
+        });
         if !asked {
             let refused = "too many questions are waiting for the user: wait for their answers";
             self.answer_tool(token, &id, Err(refused.to_owned()));
@@ -1267,6 +1271,20 @@ impl Daemon {
     ) -> Option<(String, Option<String>, Choices)> {
         let with = |choices| move |(what, whole)| (what, whole, choices);
         match tool {
+            // To a chat whose agent may do more, whatever this one's Tools
+            // setting: Allow lets it act, not act through another chat.
+            Tool::SendToChat { chat: to, message } => {
+                let own = self.chat_ref(chat)?;
+                let more = self.may_do_more(own, chat, *to);
+                if more.is_empty() || own.allows_messages_to(*to) {
+                    return None;
+                }
+                let what = format!(
+                    "send chat {to} this message, though its agent may do more than this one: {}",
+                    talk::More::told_to_sender(&more)
+                );
+                Some((what, Some(message.clone()), Choices::Chat))
+            }
             Tool::RunInTerminal { command, cwd, .. } => {
                 if tools == AgentTools::Allow {
                     return None;
@@ -2501,6 +2519,13 @@ impl Daemon {
         self.answer_finished(terminal, true);
         self.tools.commanded.remove(&terminal);
         self.tools.talk.forget(terminal);
+        // No chat may message it without asking any more: a chat of that
+        // number never comes again in this run, but its leave goes with it.
+        for slot in self.terminals.values_mut() {
+            if let Some(chat) = slot.terminal.chat() {
+                chat.forget_allowed_chat(terminal);
+            }
+        }
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
         self.tools.explorers.remove(&terminal);

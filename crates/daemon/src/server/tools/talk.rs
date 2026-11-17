@@ -93,6 +93,7 @@ use crate::chat::{Cause, HostedChat, MAX_INBOX, Message, TurnUid};
 use crate::handover;
 use crate::mcp::{NewChat, Tool};
 use crate::server::Daemon;
+use crate::specialists::Limits;
 
 /// The most `read_chat` and `wait_for_chat` give back, in bytes.
 const MAX_READ: usize = 16 * 1024;
@@ -169,6 +170,104 @@ impl Talk {
 struct CutWait {
     chats: Vec<TerminalId>,
     first: bool,
+}
+
+/// A way the agent of one chat may do more than that of a chat sending
+/// it a message (see [`Daemon::may_do_more`]), worded for either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum More {
+    /// Its Tools setting is looser.
+    Tools {
+        ours: AgentTools,
+        theirs: AgentTools,
+    },
+    /// Its limits are fewer, its mode's included.
+    Limits { ours: Limits, theirs: Limits },
+    /// Its mode lets it do more unasked: each mode by its name, if known.
+    Mode {
+        ours: Option<String>,
+        theirs: Option<String>,
+    },
+    /// More of the chats it starts may work at once.
+    Subagents,
+    /// Its browser is on.
+    Browser,
+    /// It may open pages without asking.
+    Browsing,
+    /// A window has given it access.
+    Window,
+}
+
+impl More {
+    /// Each of `more`, as the chat sending the message is told it: of the
+    /// other chat, "it", and itself, "this chat".
+    pub(super) fn told_to_sender(more: &[Self]) -> String {
+        let told: Vec<String> = (more.iter())
+            .map(|more| match more {
+                Self::Tools { ours, theirs } => format!(
+                    "its Tools setting is {}, this chat's {}",
+                    tools_name(*theirs),
+                    tools_name(*ours)
+                ),
+                Self::Limits { ours, theirs } => format!(
+                    "it's limited to {}, this chat to {}",
+                    theirs.name(),
+                    ours.name()
+                ),
+                Self::Mode { ours, theirs } => format!(
+                    "it's in {}, this chat in {}",
+                    mode_shown(theirs.as_deref()),
+                    mode_shown(ours.as_deref())
+                ),
+                Self::Subagents => "more of its subagents may work at once".to_owned(),
+                Self::Browser => "its browser is on".to_owned(),
+                Self::Browsing => "it may open pages without asking".to_owned(),
+                Self::Window => "it has access to a window".to_owned(),
+            })
+            .collect();
+        told.join("; ")
+    }
+
+    /// Each of `more`, as the chat the message goes to is told it: of the
+    /// sender, "it", and itself, "you".
+    pub(super) fn told_to_receiver(more: &[Self]) -> String {
+        let told: Vec<String> = (more.iter())
+            .map(|more| match more {
+                Self::Tools { ours, theirs } => format!(
+                    "its Tools setting is {}, yours {}",
+                    tools_name(*ours),
+                    tools_name(*theirs)
+                ),
+                Self::Limits { ours, theirs } => {
+                    format!("it's limited to {}, you to {}", ours.name(), theirs.name())
+                }
+                Self::Mode { ours, theirs } => format!(
+                    "it's in {}, you in {}",
+                    mode_shown(ours.as_deref()),
+                    mode_shown(theirs.as_deref())
+                ),
+                Self::Subagents => "more of your subagents may work at once".to_owned(),
+                Self::Browser => "your browser is on, and its isn't".to_owned(),
+                Self::Browsing => "you may open pages without asking".to_owned(),
+                Self::Window => "you have access to a window".to_owned(),
+            })
+            .collect();
+        told.join("; ")
+    }
+}
+
+/// The Tools setting `tools`, as the chat's settings name it.
+fn tools_name(tools: AgentTools) -> &'static str {
+    match tools {
+        AgentTools::Off => "Off",
+        AgentTools::Ask => "Ask",
+        AgentTools::Allow => "Allow",
+    }
+}
+
+/// A mode, by its name, or said to be one not known.
+fn mode_shown(name: Option<&str>) -> &str {
+    name.unwrap_or("a mode not known")
 }
 
 /// How much `tools` lets an agent do, to compare: more is looser.
@@ -766,17 +865,9 @@ impl Daemon {
 
     /// Why the chat `chat`, which is `own`, can't message the chat `to`,
     /// if it can't: it isn't another chat, it's out of sight, it isn't of
-    /// this one's family and works outside its project, or its agent may
-    /// do more, which this one's would gain through it. More is a looser
-    /// Tools setting, fewer limits, its mode's included, a mode later
-    /// among those its agent offers, the first being the safest, a larger
-    /// Subagents cap, the browser where this one has none (or has yet to
-    /// be let open pages), or access to a window of the user's. Ranks
-    /// compare only within one agent's modes: a chat with another agent is
-    /// no looser only in its first. An agent offering no modes is no
-    /// looser only if it's this one's, and this one's offers none either.
-    /// A chat whose session hasn't opened is ranked by the mode it will
-    /// ask for, if this one's agent offers it, or else waited for.
+    /// this one's family and works outside its project, or it isn't ready
+    /// to be judged yet. Whether its agent may do more is another matter,
+    /// which the user is asked about (see [`Self::may_do_more`]).
     pub(super) fn unmessageable(
         &self,
         own: &HostedChat,
@@ -802,22 +893,63 @@ impl Daemon {
                 ours.display()
             ));
         }
+        let ranked = target.mode_rank().is_some()
+            || target.mode_level().is_some()
+            || (target.mode_to_come()).is_some_and(|coming| {
+                target.agent() == own.agent() && own.rank_of_mode(coming).is_some()
+            });
+        if !ranked && target.session().is_none() {
+            return Some(format!(
+                "chat {to} isn't ready yet: wait for it, then try again"
+            ));
+        }
+        None
+    }
+
+    /// How the agent of the chat `to` may do more than that of the chat
+    /// `chat`, which is `own`, so `chat`'s would gain through it what it
+    /// may not do itself: nothing, if it may not. More is a looser Tools
+    /// setting, fewer limits, its mode's included, a mode that lets it do
+    /// more unasked, a larger Subagents cap, the browser where this one has
+    /// none (or has yet to be let open pages), or access to a window of
+    /// the user's. Modes clackatoo knows compare on one scale, whichever
+    /// agents they're of (see `modes::level`); others only within one
+    /// agent's modes, by the order it lists them, the first being the
+    /// safest, and a chat with another such agent is no looser only in
+    /// its first. A chat whose session hasn't opened is judged by the mode
+    /// it will ask for.
+    pub(super) fn may_do_more(
+        &self,
+        own: &HostedChat,
+        chat: TerminalId,
+        to: TerminalId,
+    ) -> Vec<More> {
+        let Some(target) = self.chat_ref(to) else {
+            return Vec::new();
+        };
+        let mut more = Vec::new();
+        if reach(target.tools()) > reach(own.tools()) {
+            more.push(More::Tools {
+                ours: own.tools(),
+                theirs: target.tools(),
+            });
+        }
+        if target.all_limits() < own.all_limits() {
+            more.push(More::Limits {
+                ours: own.all_limits(),
+                theirs: target.all_limits(),
+            });
+        }
         let same = target.agent() == own.agent();
         let rank = (target.mode_rank()).or_else(|| {
             let coming = target.mode_to_come()?;
             same.then(|| own.rank_of_mode(coming)).flatten()
         });
-        if rank.is_none() && target.mode_level().is_none() && target.session().is_none() {
-            return Some(format!(
-                "chat {to} isn't ready yet: wait for it, then try again"
-            ));
-        }
-        let limits = HostedChat::all_limits;
         // Known modes compare by what they let the agent do, whichever
         // agents they're of; others, only as the same agent lists them,
-        // and another agent's only in its first.
-        // A mode that changes nothing and one that asks about all it does
-        // may do as much as each other unasked: nothing.
+        // and another agent's only in its first. A mode that changes
+        // nothing and one that asks about all it does may do as much as
+        // each other unasked: nothing.
         let unasked = |level: u8| level.max(1);
         let mode_looser = match (own.mode_level(), target.mode_level()) {
             (Some(own), Some(theirs)) => unasked(theirs) > unasked(own),
@@ -829,10 +961,18 @@ impl Daemon {
                 (true, own, None) => own.is_some(),
             },
         };
+        if mode_looser {
+            more.push(More::Mode {
+                ours: own.mode_name(),
+                theirs: target.mode_name(),
+            });
+        }
         // Each of the user's own chats has a budget of its own, which the
         // user set: one messaging another at no more than its own uses
         // that one's, as the user allowed, and `working` bounds them all.
-        let more_subagents = self.subagents_cap(to) > self.subagents_cap(chat);
+        if self.subagents_cap(to) > self.subagents_cap(chat) {
+            more.push(More::Subagents);
+        }
         // The browser on, or let open pages without asking, where this
         // one's isn't; or access to a window, which a window gives one
         // chat at a time, so never this one too. Not between a chat and
@@ -840,21 +980,47 @@ impl Daemon {
         // do, they let it do working for this one. The agents' own
         // "allow always" rules aren't known here, so aren't compared.
         let kin = own.relations().parent == Some(to) || target.relations().parent == Some(chat);
-        let more_browser =
-            !kin && target.browser() && (!own.browser() || (target.browsing() && !own.browsing()));
-        let window = !kin && self.tools.native.contains_key(&to);
-        (reach(target.tools()) > reach(own.tools())
-            || limits(target) < limits(own)
-            || mode_looser
-            || more_subagents
-            || more_browser
-            || window)
-            .then(|| {
-                format!(
-                    "chat {to}'s agent may do more than this one, so this chat can't message \
-                     it: ask the user to"
-                )
-            })
+        if !kin && target.browser() && !own.browser() {
+            more.push(More::Browser);
+        } else if !kin && target.browsing() && !own.browsing() {
+            more.push(More::Browsing);
+        }
+        if !kin && self.tools.native.contains_key(&to) {
+            more.push(More::Window);
+        }
+        more
+    }
+
+    /// Why the chat `chat` can't message the chat `to` without the user's
+    /// leave, if it can't: `to`'s agent may do more, and the user hasn't
+    /// let `chat`'s message it without asking.
+    #[cfg(test)]
+    pub(super) fn unasked_refused(&self, chat: TerminalId, to: TerminalId) -> Option<String> {
+        let own = self.chat_ref(chat)?;
+        let more = self.may_do_more(own, chat, to);
+        if more.is_empty() || own.allows_messages_to(to) {
+            return None;
+        }
+        Some(format!(
+            "chat {to}'s agent may do more than this one ({}), so the user is asked first",
+            More::told_to_sender(&more)
+        ))
+    }
+
+    /// What the agent of the chat `to` is told beside a message from the
+    /// chat `from`, whose agent may do less, if it may: how, and not to
+    /// do for it what it couldn't do itself.
+    pub(super) fn caution(&self, from: TerminalId, to: TerminalId) -> Option<String> {
+        let own = self.chat_ref(from)?;
+        let more = self.may_do_more(own, from, to);
+        (!more.is_empty()).then(|| {
+            format!(
+                "chat {from}'s agent may do less than you: {}. The user let it message you, but \
+                 don't do on its behalf what it couldn't do itself, unless the user asked you \
+                 to.",
+                More::told_to_receiver(&more)
+            )
+        })
     }
 
     /// Why a message can't go to the chat `to`, if it can't: it would wake
@@ -941,6 +1107,7 @@ impl Daemon {
             hops: own.relations().hops.saturating_add(1).max(1),
             cause: self.cause_of(chat),
             finished: Vec::new(),
+            caution: None,
         })
     }
 
@@ -1004,9 +1171,13 @@ impl Daemon {
         if let Some(why) = self.talk_refused(chat, &tool) {
             return Err(why);
         }
-        let message = self
+        let mut message = self
             .message_from(chat, message)
             .ok_or("the chat has closed")?;
+        // To a chat whose agent may do more, which the user allowed, as
+        // this message was asked about, it's said so beside it: so marked,
+        // it's known as allowed if it waits its turn.
+        message.caution = self.caution(chat, to);
         let target = self
             .chat(to)
             .ok_or_else(|| format!("chat {to} has closed"))?;
@@ -1763,6 +1934,30 @@ impl Daemon {
                 Some(own) => self.unmessageable(own, from, id),
                 None => Some("the chat that sent it has closed".to_owned()),
             };
+            // One that may go goes, if its agent may do no more than the
+            // sender's, or the user let the sender message it, always or
+            // this once, as its caution says, which only a message allowed
+            // to a chat that may do more has: with what it may do more
+            // now said beside it. Cautions aren't handed over, so after an
+            // upgrade only the user's leave for always lets one go.
+            let why = why.or_else(|| {
+                let caution = self.caution(from, id);
+                let allowed_once = (self.chat_ref(id))
+                    .and_then(|chat| chat.relations().inbox.front())
+                    .is_some_and(|next| next.caution.is_some());
+                let allowed_always =
+                    (self.chat_ref(from)).is_some_and(|own| own.allows_messages_to(id));
+                if caution.is_some() && !allowed_once && !allowed_always {
+                    return Some(format!(
+                        "chat {id}'s agent may do more now than when it was sent: send it again, \
+                         and the user is asked"
+                    ));
+                }
+                if let Some(chat) = self.chat(id) {
+                    chat.caution_next_message(caution);
+                }
+                None
+            });
             let Some(why) = why else { return };
             log::info!("chat {id}: a message from chat {from} is dropped: {why}");
             if let Some(chat) = self.chat(id) {
@@ -2542,17 +2737,24 @@ mod tests {
 
     /// A chat whose Subagents setting, and those above it, let more work
     /// under it than this one's may do more, so this one can't message it.
+    /// Why the chat `from` can't message the chat `to` as `send_to_chat`
+    /// is called, or without asking the user: as `talk_refused`, or as
+    /// `unasked_refused`.
+    fn messaging_refused(daemon: &Daemon, from: TerminalId, to: TerminalId) -> Option<String> {
+        (daemon.talk_refused(from, &send(to))).or_else(|| daemon.unasked_refused(from, to))
+    }
+
     #[test]
     fn a_chat_that_may_start_more_may_do_more() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, _) = daemon_with_chat(dir.path());
         let pm = idle_chat(&mut daemon, 2);
         let builder = answered_chat(&mut daemon, 3, (pm, pm, 1));
-        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        assert_eq!(messaging_refused(&daemon, builder, pm), None);
         daemon.set_subagents(builder, "2");
-        let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
+        let refused = messaging_refused(&daemon, builder, pm).unwrap();
         assert!(refused.contains("may do more than this one"), "{refused}");
-        assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+        assert_eq!(messaging_refused(&daemon, pm, builder), None);
     }
 
     /// A chat with the browser on, or let open pages without asking, may
@@ -2568,19 +2770,19 @@ mod tests {
         let parent = idle_chat(&mut daemon, 2);
         let builder = answered_chat(&mut daemon, 3, (parent, parent, 1));
         let pm = answered_chat(&mut daemon, 4, (parent, parent, 1));
-        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        assert_eq!(messaging_refused(&daemon, builder, pm), None);
         let browser = |on: &str| ChatAction::Set {
             setting: "clackatoo.browser".into(),
             value: on.into(),
         };
         drop(daemon.chat(pm).unwrap().act(browser("on")));
-        let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
+        let refused = messaging_refused(&daemon, builder, pm).unwrap();
         assert!(refused.contains("may do more than this one"), "{refused}");
-        assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
-        assert_eq!(daemon.talk_refused(parent, &send(pm)), None, "its own");
+        assert_eq!(messaging_refused(&daemon, pm, builder), None);
+        assert_eq!(messaging_refused(&daemon, parent, pm), None, "its own");
         // Both on, but one let open pages without asking.
         drop(daemon.chat(builder).unwrap().act(browser("on")));
-        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        assert_eq!(messaging_refused(&daemon, builder, pm), None);
         let chat = daemon.chat(pm).unwrap();
         chat.ask_for_tool(
             4,
@@ -2594,20 +2796,20 @@ mod tests {
             option: Some("browse".into()),
         }));
         assert!(daemon.chat_ref(pm).unwrap().browsing());
-        assert!(daemon.talk_refused(builder, &send(pm)).is_some());
+        assert!(messaging_refused(&daemon, builder, pm).is_some());
         // A window's access, which only one chat has.
         drop(daemon.chat(pm).unwrap().act(browser("off")));
         drop(daemon.chat(builder).unwrap().act(browser("off")));
-        assert_eq!(daemon.talk_refused(builder, &send(pm)), None);
+        assert_eq!(messaging_refused(&daemon, builder, pm), None);
         (daemon.tools.native).insert(pm, (mio::Token(7), NativeAccess::Inspect));
-        let refused = daemon.talk_refused(builder, &send(pm)).unwrap();
+        let refused = messaging_refused(&daemon, builder, pm).unwrap();
         assert!(refused.contains("may do more than this one"), "{refused}");
-        assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+        assert_eq!(messaging_refused(&daemon, pm, builder), None);
         // Between a chat and one it started, either way, it doesn't count.
-        assert_eq!(daemon.talk_refused(parent, &send(pm)), None);
+        assert_eq!(messaging_refused(&daemon, parent, pm), None);
         (daemon.tools.native).insert(parent, (mio::Token(8), NativeAccess::Control));
-        assert_eq!(daemon.talk_refused(pm, &send(parent)), None);
-        assert!(daemon.talk_refused(builder, &send(parent)).is_none());
+        assert_eq!(messaging_refused(&daemon, pm, parent), None);
+        assert!(messaging_refused(&daemon, builder, parent).is_none());
     }
 
     /// Shows the chat `id` in a workspace of its own.
@@ -2822,7 +3024,9 @@ mod tests {
         // Not started yet: the mode each asks for ranks it.
         let own = daemon.chat_ref(a).unwrap();
         assert_eq!(daemon.unmessageable(own, a, kids[0]), None);
-        let looser = daemon.unmessageable(own, a, kids[1]).unwrap();
+        assert_eq!(daemon.unasked_refused(a, kids[0]), None);
+        assert_eq!(daemon.unmessageable(own, a, kids[1]), None);
+        let looser = daemon.unasked_refused(a, kids[1]).unwrap();
         assert!(looser.contains("may do more than this one"), "{looser}");
         let waiting = daemon.unmessageable(own, a, kids[2]).unwrap();
         assert!(
@@ -2875,22 +3079,22 @@ mod tests {
         let plan = add(13, "claude", "plan");
         let workspace = add(14, "codex", "workspace-write");
         let full = add(15, "codex", "agent-full-access");
-        let refused = |daemon: &Daemon, from: TerminalId, to: TerminalId| {
-            let own = daemon.chat_ref(from).unwrap();
-            daemon.unmessageable(own, from, to)
-        };
-        assert_eq!(refused(&daemon, claude_auto, codex_auto), None);
-        assert_eq!(refused(&daemon, codex_auto, claude_auto), None);
-        assert_eq!(refused(&daemon, manual, plan), None, "Plan does less");
+        assert_eq!(messaging_refused(&daemon, claude_auto, codex_auto), None);
+        assert_eq!(messaging_refused(&daemon, codex_auto, claude_auto), None);
+        assert_eq!(
+            messaging_refused(&daemon, manual, plan),
+            None,
+            "Plan does less"
+        );
         // Plan is held to reading, as limits are: the other way, it's the
         // limits that may do more, not the mode.
-        assert!(refused(&daemon, plan, manual).is_some());
-        assert_eq!(refused(&daemon, workspace, manual), None);
-        let looser = refused(&daemon, manual, workspace).unwrap();
+        assert!(messaging_refused(&daemon, plan, manual).is_some());
+        assert_eq!(messaging_refused(&daemon, workspace, manual), None);
+        let looser = messaging_refused(&daemon, manual, workspace).unwrap();
         assert!(looser.contains("may do more than this one"), "{looser}");
-        let looser = refused(&daemon, codex_auto, full).unwrap();
+        let looser = messaging_refused(&daemon, codex_auto, full).unwrap();
         assert!(looser.contains("may do more than this one"), "{looser}");
-        assert_eq!(refused(&daemon, full, claude_auto), None);
+        assert_eq!(messaging_refused(&daemon, full, claude_auto), None);
     }
 
     #[test]
@@ -2972,6 +3176,7 @@ mod tests {
             hops: 1,
             cause: None,
             finished: Vec::new(),
+            caution: None,
         }
     }
 
@@ -3862,6 +4067,7 @@ mod tests {
             hops: 0,
             cause: None,
             finished: Vec::new(),
+            caution: None,
         };
         drop(daemon.chat(pm).unwrap().deliver(notice).unwrap());
         assert_eq!(daemon.chat_ref(pm).unwrap().node().turns.len(), 2);
@@ -3982,6 +4188,7 @@ mod tests {
             hops: 0,
             cause: Some((a, 0)),
             finished: Vec::new(),
+            caution: None,
         };
         assert!(daemon.chat(a).unwrap().deliver(notice).unwrap().is_empty());
         daemon.watch_chat_queue(a);

@@ -15888,15 +15888,41 @@ fn a_message_waiting_its_turn_is_dropped_if_it_may_no_longer_go_and_its_sender_t
     assert!(
         words.contains(&format!(
             "Your last message to chat {b} waited its turn, and wasn't sent: chat {b}'s agent \
-             may do more than this one"
+             may do more now than when it was sent: send it again, and the user is asked"
         )),
         "{words}"
     );
     assert_eq!(chat_now(&mut client, b).turns.len(), 1, "never sent");
+
+    // One the user allowed, waiting its turn, goes as that comes, said to
+    // be from a chat that may do less (CLACKA-257).
+    client.chat(b, ChatAction::Send("ask".to_owned())).unwrap();
+    wait_for_chat(&mut client, b, |node| node.question.is_some());
+    let framing = format!("mcp send_to_chat {{\"chat\":{b},\"message\":\"framing\"}}");
+    client.chat(a, ChatAction::Send(framing)).unwrap();
+    wait_for_chat(&mut client, a, |node| node.question.is_some());
+    answer(&mut client, a, Some("allow".to_owned()));
+    wait_for_chat(&mut client, a, |node| {
+        last_words(node).contains(&format!("send_to_chat: Sent. Chat {b} is busy answering"))
+    });
+    answer(&mut client, b, None);
+    let told = last_words(&wait_for_chat_for(
+        &mut client,
+        b,
+        Duration::from_secs(10),
+        |node| node.turns.len() == 3 && last_outcome(node).is_some(),
+    ));
+    assert!(
+        told.contains(&format!(
+            "[From clackatoo: chat {a}'s agent may do less than you: its Tools setting is Ask, \
+             yours Allow."
+        )),
+        "{told}"
+    );
 }
 
 #[test]
-fn a_chat_is_messaged_only_in_this_project_and_another_agents_only_in_its_first_mode() {
+fn a_chat_is_messaged_only_in_this_project_and_one_that_may_do_more_as_the_user_allows() {
     let fake = |flags: &[&str]| -> Vec<std::ffi::OsString> {
         std::iter::once(fake_agent().into_os_string())
             .chain(flags.iter().map(Into::into))
@@ -15923,6 +15949,9 @@ fn a_chat_is_messaged_only_in_this_project_and_another_agents_only_in_its_first_
         tooled(AgentTools::Allow, None, Some(&other)),
     );
     let send = |to: TerminalId| format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"x\"}}");
+    // A message its agent answers with what clackatoo put before it.
+    let framing =
+        |to: TerminalId| format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"framing\"}}");
     let words = last_words(&ask_for(&mut client, a, &send(b), Duration::from_secs(10)));
     assert!(
         words.contains(&format!(
@@ -15942,25 +15971,78 @@ fn a_chat_is_messaged_only_in_this_project_and_another_agents_only_in_its_first_
         "{words}"
     );
 
-    // Another agent's chat at the same rank among its modes as this
-    // one's: ranks say nothing across agents, so only its first goes.
+    // Another agent's chat, in a mode that lets it do no more unasked than
+    // this one's: Auto and Auto review are as one (CLACKA-257).
     set_chat(&mut client, a, "mode", "auto");
     let c = start_chat_beside(
         &mut client,
         a,
         tooled(AgentTools::Allow, Some("codex"), Some(&mine)),
     );
-    set_chat(&mut client, c, "mode", "workspace-write");
-    let words = last_words(&ask_for(&mut client, a, &send(c), Duration::from_secs(10)));
-    assert!(
-        words.contains(&format!(
-            "send_to_chat: failed: chat {c}'s agent may do more than this one"
-        )),
-        "{words}"
-    );
-    set_chat(&mut client, c, "mode", "read-only");
+    set_chat(&mut client, c, "mode", "agent");
     let words = last_words(&ask_for(&mut client, a, &send(c), Duration::from_secs(10)));
     assert!(words.contains("send_to_chat: Sent"), "{words}");
+    wait_for_chat(&mut client, c, |node| last_outcome(node).is_some());
+
+    // One that may do more: the user is asked, in the chat sending it,
+    // whatever its Tools setting, with the message shown in full.
+    set_chat(&mut client, c, "mode", "agent-full-access");
+    let ask_to_send = |client: &mut Client| {
+        client.chat(a, ChatAction::Send(send(c))).unwrap();
+        let asking = wait_for_chat(client, a, |node| node.question.is_some());
+        asking.question.unwrap()
+    };
+    let question = ask_to_send(&mut client);
+    assert_eq!(
+        question.title,
+        format!(
+            "send chat {c} this message, though its agent may do more than this one: it's in \
+             Full access, this chat in Auto"
+        )
+    );
+    let ids: Vec<&str> = (question.choices.iter())
+        .map(|choice| choice.id.as_str())
+        .collect();
+    assert_eq!(ids, ["allow", "chat", "reject"]);
+    answer(&mut client, a, Some("reject".to_owned()));
+    let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    assert!(
+        last_words(&node).contains("send_to_chat: failed: the user said no"),
+        "{}",
+        last_words(&node)
+    );
+    // Allowed once, it goes, and the chat it goes to is told how the
+    // sender may do less, beside it, in clackatoo's words.
+    client.chat(a, ChatAction::Send(framing(c))).unwrap();
+    wait_for_chat(&mut client, a, |node| node.question.is_some());
+    answer(&mut client, a, Some("allow".to_owned()));
+    let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    assert!(
+        last_words(&node).contains("send_to_chat: Sent"),
+        "{}",
+        last_words(&node)
+    );
+    let told = last_words(&wait_for_chat(&mut client, c, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    }));
+    assert!(
+        told.contains(&format!(
+            "[From clackatoo: chat {a}'s agent may do less than you: it's in Auto, you in Full \
+             access."
+        )),
+        "{told}"
+    );
+    // Allowed always, it isn't asked about again.
+    ask_to_send(&mut client);
+    answer(&mut client, a, Some("chat".to_owned()));
+    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    let node = ask_for(&mut client, a, &send(c), Duration::from_secs(10));
+    assert_eq!(node.question, None);
+    assert!(
+        last_words(&node).contains("send_to_chat: Sent"),
+        "{}",
+        last_words(&node)
+    );
 }
 
 #[test]

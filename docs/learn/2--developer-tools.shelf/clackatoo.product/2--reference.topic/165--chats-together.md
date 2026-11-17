@@ -195,9 +195,10 @@ kept waiting: it's told why. A chat held so stays held through an upgrade; if
 the upgrade stopped what its agent ran, the notice that says so waits for you
 too, then goes after your message.
 
-Starting and messaging chats never asks you first. Instead, what an agent
-can't do through another chat is refused, and the agent is told to ask you, so
-it can never gain, through another chat, what its own chat isn't allowed:
+Starting and messaging chats asks you first only where an agent would gain,
+through another chat, what its own chat isn't allowed: a message to a chat
+that can do more. Otherwise, what an agent can't do through another chat is
+refused, and the agent is told to ask you:
 
 - An agent lists, messages, reads, and waits for only chats in its own
   workspace or family: the chat that started it, the chats it started, and the
@@ -205,10 +206,24 @@ it can never gain, through another chat, what its own chat isn't allowed:
   of its sight, a workspace lent to another machine included.
 - A chat outside its family must work inside the sender's project, the git
   repository its folder is in, or else that folder, to be messaged.
-- A message to a chat that can do more is refused: one whose Tools setting is
-  looser than the sender's, whose [limits](#specialists) are fewer, counting what
-  each one's mode rules out, or whose mode lets its agent do more without
-  asking. The modes of Claude Code and Codex compare on one scale, whichever
+- A message to a chat that can do more asks you first, in the chat sending
+  it: one whose Tools setting is looser than the sender's, whose
+  [limits](#specialists) are fewer, counting what each one's mode rules out,
+  or whose mode lets its agent do more without asking. The question shows the
+  message in full and says how the other chat can do more. **Allow** sends
+  it; **Always allow messages to this chat** sends it and every later one
+  from this chat to that one, for as long as both are open, but not after
+  the daemon upgrades or restarts, nor from a copy of the chat; **Reject**
+  tells the agent you said no. It's asked whatever the sender's Tools setting
+  is: Allow lets an agent act, not act through another chat. Under
+  [clackatoo's rules](~clackatoo/reference/permissions), no rule allows it,
+  and a Deny on `clackatoo/send_to_chat` refuses it.
+
+  The chat it goes to is told, in clackatoo's words beside the message, how
+  the sender can do less, and not to do on its behalf what it couldn't do
+  itself, unless you asked it to. A message you allowed that waits its turn
+  still goes when that comes; one that had no need to ask when it was sent,
+  but would by then, is dropped, and the sender told to send it again. The modes of Claude Code and Codex compare on one scale, whichever
   agent each chat runs:
 
   | What it does unasked | Claude Code | Codex |
