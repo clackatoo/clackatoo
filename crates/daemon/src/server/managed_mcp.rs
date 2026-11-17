@@ -567,8 +567,13 @@ impl Daemon {
     /// they must, so the agent's own question about one is answered at
     /// once, as for clackatoo's own tools.
     pub(super) fn serves_managed(&self, chat: TerminalId, server: &str) -> bool {
-        (self.managed_mcp.proxies.iter())
-            .any(|proxy| proxy.chat == chat && proxy.server == server && proxy.ending.is_none())
+        let watching = (self.managed_mcp.proxies.iter())
+            .any(|proxy| proxy.chat == chat && proxy.server == server && proxy.ending.is_none());
+        // One waiting for its grant, as after a restart, has shown the
+        // chat's secret already, and asks as soon as it's granted.
+        let opening = (self.managed_mcp.opening.iter())
+            .any(|opening| opening.chat == chat && opening.server == server);
+        watching || opening
     }
 
     /// The option that lets `tool` go ahead once, if the chat `chat`'s
@@ -1208,18 +1213,23 @@ impl Daemon {
         };
         let (chat, server) = (permission.chat, permission.server.clone());
         let identity = permission.identity.clone();
+        let always = !self.uses_permission_rules(chat);
         if request.len() > MOST_SHOWN {
+            // What would let it through without being shown.
+            let instead = if always {
+                "The user can allow this server for the chat, or you can send less at a time."
+            } else {
+                "A permission rule can allow this tool, or you can send less at a time."
+            };
             let why = format!(
                 "This call's parameters are {} KiB, more than the {} KiB the user can be shown \
-                 to allow it, so it was not sent. They can allow this server for the chat, or \
-                 you can send less at a time.",
+                 to allow it, so it was not sent. {instead}",
                 request.len().div_ceil(1024),
                 MOST_SHOWN / 1024
             );
             self.settle_mcp_call(call, Err(why));
             return;
         }
-        let always = !self.uses_permission_rules(chat);
         let whole = (!request.is_empty()).then_some(request);
         let asked = (self.chat(chat))
             .is_some_and(|own| own.ask_for_server(call, &identity, title, whole, always));
@@ -1249,7 +1259,46 @@ impl Daemon {
                     .to_owned(),
             ),
         };
+        let asked = (self.managed_mcp.permissions.iter())
+            .find(|waiting| waiting.call == call)
+            .map(|waiting| (waiting.chat, waiting.identity.clone()));
         self.settle_mcp_call(call, outcome);
+        if let (McpAnswer::Allowed, Some((chat, identity))) = (answer, asked) {
+            self.allow_waiting_mcp_calls(chat, &identity);
+        }
+    }
+
+    /// The user answered a question about the server that is `identity`
+    /// by allowing it, perhaps for the rest of the chat `chat`. If so,
+    /// that answers the chat's other questions about it too: an agent
+    /// that made four calls at once isn't answered four times. What the
+    /// chat keeps as allowed is tidied on the way.
+    fn allow_waiting_mcp_calls(&mut self, chat: TerminalId, identity: &str) {
+        if !(self.chat_ref(chat)).is_some_and(|own| own.server_allowed(identity)) {
+            return;
+        }
+        let live: Vec<String> = (self.skill_catalogue(chat).into_iter())
+            .flat_map(|catalogue| catalogue.managed_mcp.servers.values())
+            .map(Bound::grant)
+            .collect();
+        if let Some(own) = self.chat(chat) {
+            own.keep_allowed_servers(&live);
+        }
+        let others: Vec<u64> = (self.managed_mcp.permissions.iter())
+            .filter(|waiting| {
+                waiting.chat == chat
+                    && waiting.identity == identity
+                    && matches!(waiting.waits, Waits::Person)
+            })
+            .map(|waiting| waiting.call)
+            .collect();
+        for call in others {
+            if let Some(own) = self.chat(chat) {
+                own.withdraw(call);
+            }
+            self.settle_mcp_call(call, Ok(()));
+        }
+        self.collect_damage(chat);
     }
 
     /// An answer about one of clackatoo's own tools' calls, numbered

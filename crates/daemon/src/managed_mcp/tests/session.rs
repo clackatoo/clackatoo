@@ -621,15 +621,91 @@ fn what_cant_be_read_or_passed_on_is_told_of_never_just_dropped() {
     session.agent_said(json!({"jsonrpc":"2.0","id":"big","result":{}}), start);
     assert_eq!(session.effects(), []);
 
-    // And a server can't have the agent hold requests without end.
+    // A server can't have the agent hold requests without end, nor does
+    // an agent that never answers cost it its requests for good: past
+    // the most, the oldest gives way, and both are told.
     for id in 0..64 {
         session.server_said(json!({"jsonrpc":"2.0","id":id,"method":"ping"}), start);
     }
     session.effects();
-    session.server_said(json!({"jsonrpc":"2.0","id":64,"method":"ping"}), start);
+    let next = json!({"jsonrpc":"2.0","id":64,"method":"ping"});
+    session.server_said(next.clone(), start);
     let effects = session.effects();
     assert!(
-        matches!(&effects[..], [Effect::Server(refused)] if refused["id"] == 64 && refused["error"].is_object()),
+        matches!(&effects[0], Effect::Server(given_up) if given_up["id"] == 0 && given_up["error"].is_object()),
+        "{effects:?}"
+    );
+    assert!(
+        matches!(&effects[1], Effect::Agent(told) if told["method"] == "notifications/cancelled" && told["params"]["requestId"] == 0),
+        "{effects:?}"
+    );
+    assert_eq!(effects[2], Effect::Agent(next));
+    // One the server cancels itself makes room.
+    let cancel =
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}});
+    session.server_said(cancel.clone(), start);
+    assert_eq!(session.effects(), [Effect::Agent(cancel)]);
+    let another = json!({"jsonrpc":"2.0","id":65,"method":"ping"});
+    session.server_said(another.clone(), start);
+    assert_eq!(session.effects(), [Effect::Agent(another)]);
+}
+
+#[test]
+fn a_proxy_ended_while_initialize_is_at_the_server_answers_it_once() {
+    let start = Instant::now();
+    let mut session = Session::new(grant(30, 600, 0));
+    session.agent_said(initialize(0), start);
+    session.connected(Ok(()), start);
+    session.effects();
+    session.refused("this chat's tools are off".into());
+    let answers = (session.effects().iter())
+        .filter(|effect| matches!(effect, Effect::Agent(message) if message["id"] == 0))
+        .count();
+    assert_eq!(answers, 1);
+
+    // Sent again to a server that came back, it's the agent's already:
+    // ending answers nothing for it.
+    let mut session = connected(30, 600, start);
+    session.lost(Lost::Failed("gone".into()), start);
+    session.connected(Ok(()), start);
+    session.effects();
+    session.refused("this chat's tools are off".into());
+    let effects = session.effects();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Agent(_))),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn what_a_server_wrote_that_couldnt_be_read_stays_its_detail_while_it_is_connected() {
+    let start = Instant::now();
+    let mut session = Session::new(grant(30, 600, 0));
+    session.agent_said(initialize(0), start);
+    session.connected(Ok(()), start);
+    // A banner before it answers, as some print.
+    session.server_garbled("It wrote a line that isn't a JSON message: Welcome".into());
+    session.server_said(initialized(0), start);
+    let effects = session.effects();
+    assert!(
+        effects.iter().any(
+            |effect| matches!(effect, Effect::Report { state: McpState::Connected, detail, .. }
+            if detail.ends_with("Welcome"))
+        ),
+        "{effects:?}"
+    );
+    // The next connection starts clean.
+    session.lost(Lost::Failed("gone".into()), start);
+    session.connected(Ok(()), start);
+    session.server_said(initialized(0), start);
+    let effects = session.effects();
+    assert!(
+        effects.iter().any(
+            |effect| matches!(effect, Effect::Report { state: McpState::Connected, detail, .. }
+            if detail.is_empty())
+        ),
         "{effects:?}"
     );
 }

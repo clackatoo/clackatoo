@@ -407,6 +407,7 @@ fn quick(give_up: Duration) -> Pace {
         longest_retry: Duration::from_millis(40),
         give_up,
         greeting: Duration::from_millis(200),
+        asking: Duration::from_millis(600),
         opening: Duration::from_secs(5),
     }
 }

@@ -135,9 +135,10 @@ life of the agent's session, whatever happens on either side of it:
 | The server can't be started or reached | As for a sign-in, with the reason; the proxy keeps trying. |
 | You save a change to the definition, choose **Reconnect**, or change a credential it uses | Calls waiting or in flight fail with an error, and the same proxy connects again with the new definition. |
 | The daemon restarts or upgrades | Calls are refused with an error saying to try again, since they can't be checked. Everything else carries on, and the server's connection is untouched. The proxy gives up only after two minutes without the daemon. |
+| The daemon is there but doesn't answer | A call waits up to 30 seconds for the daemon to take it, then fails with the same error. |
 | An answer is over 4 MiB | That call fails with an error giving the size. |
 | A command server writes a line over 32 MiB | The line can't be read, so its connection is given up: calls in flight fail with that reason, and the proxy connects again. |
-| A command server writes a line that isn't a JSON message | The line is passed over. The first on each connection is logged and shown as the server's detail in Settings, and given as the reason if the server then fails to initialize. A command server must write one message a line, and nothing else, on its standard output. |
+| A command server writes a line that isn't a JSON message | The line is passed over. The first on each connection is logged, and shown as the server's detail in Settings for as long as that connection lasts; it's given as the reason if the server then fails to initialize. A command server must write one message a line, and nothing else, on its standard output. |
 | An HTTP server answers 401 to an `Authorization` header from its definition | The server shows as an error naming that header. No sign-in is offered, since none would help. |
 
 A proxy ends only when:
@@ -224,14 +225,15 @@ servers. With **Tools: Allow**, calls go straight to the server. With
 | Answer | Effect |
 |---|---|
 | **Allow** | This call goes ahead. |
-| **Always allow this server** | This call goes ahead, and the chat stops asking about this server. Other servers, and the built-in tools, still ask. |
+| **Always allow this server** | This call goes ahead, with any other calls to this server already waiting for an answer, and the chat stops asking about this server. Other servers, and the built-in tools, still ask. |
 | **Reject** | The call fails, and the agent is told you refused it. |
 
 **Always allow this server** belongs to the chat, whichever agent or branch
 it's on, and to the server as it's defined now. A server defined otherwise
 under the same name asks again: after any change to its definition, or when a
 project's definition takes over from a personal one. A copy of the chat
-starts with no servers allowed. Setting the chat's **Tools** again, to any
+starts with no servers allowed, and so does a chat that comes back with its
+workspace after the daemon restarts; an upgrade keeps them. Setting the chat's **Tools** again, to any
 value, takes back every server allowed this way.
 
 Under **clackatoo's rules** the rules decide instead. A managed
