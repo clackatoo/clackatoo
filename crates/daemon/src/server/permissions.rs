@@ -15,6 +15,7 @@
 //! answer in time asks the user, and the worker is left to it: the checks
 //! behind it go to a fresh one.
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -222,6 +223,9 @@ struct Pending {
     /// Whether that turn was being answered when it asked. One that has
     /// ended since is not gone on with.
     turn_open: bool,
+    /// The running agent whose own request it checks, if it's one: when
+    /// that agent has gone, no one is left to answer.
+    asker: Option<AgentId>,
     /// What is checked, kept to evaluate again.
     action: Action,
     context: Context,
@@ -309,12 +313,14 @@ impl Daemon {
         }
         let action = Action::provider(&asked.name, &cwd.to_string_lossy(), &asked.tool);
         if rules && checked.is_none() && !interaction {
-            self.check_permission(id, action, move |daemon, checked| match checked {
+            let agent = Some(asked.agent);
+            let resume = move |daemon: &mut Self, checked| match checked {
                 Checked::Decided(verdict) => daemon.provider_permission(asked, Some(verdict)),
                 // Nothing was decided: the request is cancelled, not
                 // rejected.
                 Checked::Cancelled(_) => daemon.answer_provider(&asked, None),
-            });
+            };
+            self.queue_check(id, agent, action, false, Box::new(resume));
             return;
         }
         if let Some(verdict) = checked {
@@ -386,12 +392,39 @@ impl Daemon {
         action: Action,
         resume: impl FnOnce(&mut Self, Checked) + Send + 'static,
     ) {
-        self.queue_check(chat, action, false, Box::new(resume));
+        self.queue_check(chat, None, action, false, Box::new(resume));
     }
 
-    /// Queues a check, as [`Self::check_permission`] does: `again` for
-    /// one of a question the user is already asked.
-    fn queue_check(&mut self, chat: TerminalId, action: Action, again: bool, resume: Resume) {
+    /// The places where a read or an edit always asks, whole: clackatoo's
+    /// own config, state and data, where they really are, and the
+    /// credential stores under the user's config and data directories,
+    /// where those aren't the usual `~/.config` and `~/.local/share`.
+    fn places_that_ask_whole(&self) -> Vec<PathBuf> {
+        let own = self.config.own_config.iter().flat_map(|own| {
+            std::iter::once(own.dirs.config().to_owned()).chain(own.dirs.state.clone())
+        });
+        let data = crate::data_dir();
+        let config = crate::config_dir().and_then(|own| own.parent().map(Path::to_owned));
+        let mut places: Vec<PathBuf> = own.collect();
+        places.extend(data.as_ref().map(|data| data.join("clackatoo")));
+        places.extend(crate::permissions::stores_at(
+            config.as_deref(),
+            data.as_deref(),
+        ));
+        places
+    }
+
+    /// Queues a check, as [`Self::check_permission`] does: for the agent
+    /// `asker`'s own request, if it's one, and `again` for one of a
+    /// question the user is already asked.
+    fn queue_check(
+        &mut self,
+        chat: TerminalId,
+        asker: Option<AgentId>,
+        action: Action,
+        again: bool,
+        resume: Resume,
+    ) {
         let Some(own) = self.chat_ref(chat) else {
             resume(self, Checked::Cancelled(Cancelled::ChatChanged));
             return;
@@ -401,20 +434,19 @@ impl Daemon {
             resume(self, Checked::Decided(busy));
             return;
         }
-        let own_dirs = self.config.own_config.iter().flat_map(|own| {
-            std::iter::once(own.dirs.config().to_owned()).chain(own.dirs.state.clone())
-        });
+        let protected = self.places_that_ask_whole();
         let pending = Pending {
             chat,
             session: own.session().map(str::to_owned),
             agent: own.agent().to_owned(),
             turn: own.last_uid(),
             turn_open: own.answering(),
+            asker,
             action,
             context: Context {
                 project: own.project().to_owned(),
                 home: self.config.home.clone(),
-                protected: own_dirs.collect(),
+                protected,
             },
             rules: Vec::new(),
             due: Instant::now(),
@@ -578,6 +610,10 @@ impl Daemon {
         if chat.session() != pending.session.as_deref() || chat.agent() != pending.agent {
             return Some(Cancelled::ChatChanged);
         }
+        let gone = |agent: &AgentId| !self.agents.running.contains_key(agent);
+        if pending.asker.as_ref().is_some_and(gone) {
+            return Some(Cancelled::AgentGone);
+        }
         // A turn the agent takes later by itself is another turn: only
         // the turn that was stopped stays stopped.
         let ended = pending.turn_open && !chat.answering();
@@ -673,8 +709,12 @@ impl Daemon {
                 continue;
             }
             let (chat, action) = (asked.chat, asked.action.clone());
+            let asker = match &asked.question {
+                Question::Provider(request) => Some(request.agent),
+                Question::Tool(_) => None,
+            };
             let resume = move |daemon: &mut Self, checked| daemon.asked_again(asked, &checked);
-            self.queue_check(chat, action, true, Box::new(resume));
+            self.queue_check(chat, asker, action, true, Box::new(resume));
         }
     }
 
@@ -1196,6 +1236,12 @@ mod tests {
         settle(&mut daemon);
         assert!(!asks(&mut daemon, chat), "no one would get its answer");
         assert!(daemon.permissions.asked.is_empty());
+        let record = daemon.permissions.history.front().unwrap();
+        assert_eq!(
+            (record.decision.as_str(), record.reason.as_str()),
+            ("Cancelled", Cancelled::AgentGone.reason()),
+            "never noted with the verdict of rules that answered no one"
+        );
 
         // The turn it asked in ends while its request is checked.
         let dir = tempfile::tempdir().unwrap();

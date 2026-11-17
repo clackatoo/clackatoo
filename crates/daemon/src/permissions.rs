@@ -317,8 +317,10 @@ pub(crate) struct Context {
     pub(crate) project: PathBuf,
     /// The user's home, which `~` in a rule's target stands for.
     pub(crate) home: PathBuf,
-    /// Clackatoo's own config and state: a read or an edit there always
-    /// asks.
+    /// Places where a read or an edit always asks, whole: clackatoo's
+    /// own config, state and data, and the credential stores kept under
+    /// the user's config and data directories where those aren't the
+    /// usual ones (see [`stores_at`]).
     pub(crate) protected: Vec<PathBuf>,
 }
 
@@ -652,6 +654,8 @@ pub(crate) enum Cancelled {
     TurnEnded,
     /// The chat closed, or went on to another session or agent.
     ChatChanged,
+    /// The agent that asked stopped running.
+    AgentGone,
 }
 
 impl Cancelled {
@@ -664,6 +668,7 @@ impl Cancelled {
             Self::Stopped => "You stopped the turn it was asked in",
             Self::TurnEnded => "The turn it was asked in ended",
             Self::ChatChanged => "The chat closed or changed its session",
+            Self::AgentGone => "The agent that asked stopped running",
         }
     }
 
@@ -682,6 +687,12 @@ impl Cancelled {
             }
             Self::ChatChanged => {
                 "Clackatoo cancelled this permission check: the chat's session changed. \
+                 Nobody refused it; ask again if it is still needed."
+            }
+            // No agent is left to be told: this is for a tool connection
+            // that outlives it.
+            Self::AgentGone => {
+                "Clackatoo cancelled this permission check: the agent that asked stopped. \
                  Nobody refused it; ask again if it is still needed."
             }
         }
@@ -744,6 +755,18 @@ impl Config {
             let Some(real) = real else {
                 return Verdict::ask("The file path could not be resolved safely");
             };
+            // A rule that asks or refuses, but names no place that can
+            // be told, might have been about this file.
+            let unplaced = self.rules.iter().any(|rule| {
+                rule.kind == *kind
+                    && rule.decision != Decision::Allow
+                    && rule_root(&rule.target, context).is_none()
+            });
+            if unplaced {
+                return Verdict::ask(
+                    "A rule that restricts files names a place that can't be told here",
+                );
+            }
             if let Some(why) = guarded(*kind, written, real, context) {
                 return Verdict::ask(why);
             }
@@ -848,14 +871,16 @@ fn simple_command(command: &str) -> bool {
 // `[".config", "gh"]` is the folder `gh` in `.config`, and everything in
 // it. To guard something new, add it to the list whose class it is.
 
-/// Whether the filesystems of this system take `AGENTS.md` and
-/// `agents.md` for one file.
-const FOLDS_CASE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+/// Folders that hold the worktrees an agent's tool makes for it, each a
+/// project of its own: `worktrees` in one of these. A project in such a
+/// worktree is not guarded for lying in the tool's folder (see
+/// [`Roots::folder_names`]).
+const WORKTREE_HOLDERS: [&str; 3] = [".claude", ".codex", ".cursor"];
 
 /// Agents' own instructions and settings, as folders or files anywhere
 /// along a path: what an agent is told to do, and what it may do, when it
 /// next starts there. Edits ask.
-const AGENT_PLACES: [&[&str]; 16] = [
+const AGENT_PLACES: [&[&str]; 17] = [
     &[".clackatoo"],
     &[".claude"],
     &[".codex"],
@@ -867,6 +892,7 @@ const AGENT_PLACES: [&[&str]; 16] = [
     &[".roo"],
     &[".continue"],
     &[".opencode"],
+    &[".clinerules"],
     &[".github", "copilot-instructions.md"],
     &[".github", "instructions"],
     &[".github", "prompts"],
@@ -874,34 +900,31 @@ const AGENT_PLACES: [&[&str]; 16] = [
     &[".claude.json"],
 ];
 
-/// Agents' instruction files that are known by a name in capitals, in
-/// whatever folder, as written: on a filesystem that tells cases apart,
-/// `agents.md` is some other file. Edits ask.
-const AGENT_FILES_AS_WRITTEN: [&str; 5] = [
-    "CLAUDE.md",
-    "CLAUDE.local.md",
-    "AGENTS.md",
-    "AGENT.md",
-    "GEMINI.md",
-];
-
-/// Agents' other instruction and settings files, by name, in whatever
-/// folder. Edits ask.
-const AGENT_FILES: [&str; 7] = [
+/// Agents' instruction and settings files, by name, in whatever folder.
+/// Edits ask.
+const AGENT_FILES: [&str; 15] = [
+    "claude.md",
+    "claude.local.md",
+    "agents.md",
+    "agents.override.md",
+    "agent.md",
+    "gemini.md",
     ".mcp.json",
     ".cursorrules",
     ".windsurfrules",
-    ".clinerules",
+    ".roorules",
+    ".roomodes",
     ".rules",
     ".aider.conf.yml",
     "opencode.json",
+    "opencode.jsonc",
 ];
 
 /// Folders and files anywhere along a path that run code when a project
 /// is opened, built, committed or pushed: git's own folder with its hooks
-/// and config, editors' tasks, dev containers, hook managers, CI and
-/// cargo's config. Edits ask.
-const TOOLING_PLACES: [&[&str]; 14] = [
+/// and config, editors' tasks, dev containers, hook managers, package
+/// managers' plugins, CI and cargo's config. Edits ask.
+const TOOLING_PLACES: [&[&str]; 18] = [
     &[".git"],
     &[".githooks"],
     &[".vscode"],
@@ -910,10 +933,14 @@ const TOOLING_PLACES: [&[&str]; 14] = [
     &[".devcontainer"],
     &[".husky"],
     &[".mise"],
+    &[".yarn"],
     &[".circleci"],
     &[".buildkite"],
     &[".github", "workflows"],
     &[".github", "actions"],
+    &[".forgejo", "workflows"],
+    &[".gitea", "workflows"],
+    &[".config", "mise.toml"],
     &[".cargo", "config.toml"],
     &[".cargo", "config"],
 ];
@@ -921,18 +948,22 @@ const TOOLING_PLACES: [&[&str]; 14] = [
 /// Files that do the same, by name, in whatever folder: environments
 /// loaded on entering a folder, hook managers', version managers' and
 /// package managers' configs, CI pipelines, git's submodules. Edits ask.
-const TOOLING_FILES: [&str; 19] = [
+const TOOLING_FILES: [&str; 28] = [
     ".envrc",
     ".devcontainer.json",
     ".pre-commit-config.yaml",
     "lefthook.yml",
     "lefthook.yaml",
+    "lefthook.toml",
     ".lefthook.yml",
+    ".lefthook.yaml",
     "lefthook-local.yml",
+    "lefthook-local.yaml",
     ".gitmodules",
     "mise.toml",
     ".mise.toml",
     "mise.local.toml",
+    ".mise.local.toml",
     ".tool-versions",
     ".yarnrc",
     ".yarnrc.yml",
@@ -940,6 +971,11 @@ const TOOLING_FILES: [&str; 19] = [
     ".pnpmfile.cjs",
     "bunfig.toml",
     ".gitlab-ci.yml",
+    ".gitpod.yml",
+    ".travis.yml",
+    ".drone.yml",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
     "jenkinsfile",
 ];
 
@@ -947,11 +983,11 @@ const TOOLING_FILES: [&str; 19] = [
 /// workspace, which names tasks to run. Edits ask.
 const TOOLING_EXTENSIONS: [&str; 1] = ["code-workspace"];
 
-/// What runs as the user logs in, opens a shell, an editor or a terminal,
-/// or uses git, from their home: startup files, git's config, systemd
-/// user units, desktop entries, version managers, and their own programs.
-/// Edits ask.
-const STARTUP_PLACES: [&[&str]; 30] = [
+/// What runs as the user logs in, opens a shell, an editor, a terminal or
+/// a desktop, or uses git, from their home: startup files, git's config,
+/// systemd user units, desktop entries and services, version managers,
+/// and the folders their own programs are found in. Edits ask.
+const STARTUP_PLACES: [&[&str]; 47] = [
     &[".bashrc"],
     &[".bash_profile"],
     &[".bash_login"],
@@ -962,16 +998,27 @@ const STARTUP_PLACES: [&[&str]; 30] = [
     &[".zshenv"],
     &[".zprofile"],
     &[".zlogin"],
+    &[".zlogout"],
     &[".xprofile"],
     &[".xsessionrc"],
+    &[".xsession"],
+    &[".xinitrc"],
     &[".pam_environment"],
     &[".vimrc"],
+    &[".vim"],
+    &[".emacs"],
+    &[".emacs.d"],
     &[".tmux.conf"],
     &[".tool-versions"],
     &[".gitconfig"],
     &[".config", "fish"],
     &[".config", "git"],
     &[".config", "nvim"],
+    &[".config", "emacs"],
+    &[".config", "tmux"],
+    &[".config", "sway"],
+    &[".config", "hypr"],
+    &[".config", "i3"],
     &[".config", "direnv"],
     &[".config", "mise"],
     &[".config", "environment.d"],
@@ -979,48 +1026,75 @@ const STARTUP_PLACES: [&[&str]; 30] = [
     &[".config", "autostart"],
     &[".local", "share", "systemd", "user"],
     &[".local", "share", "applications"],
+    &[".local", "share", "dbus-1", "services"],
     &[".local", "bin"],
     &[".cargo", "bin"],
+    &[".cargo", "env"],
+    &[".bun", "bin"],
+    &[".npm-global", "bin"],
+    &["go", "bin"],
     &["bin"],
+    &["library", "launchagents"],
 ];
 
 /// The user's credential stores, from their home: cloud, registry and
 /// database sign-ins, password stores, the agents' own sign-ins, shell
-/// histories, browser profiles, and all clackatoo keeps for itself (its
-/// browser's profile, its web devices, the agents' adapters). Reads and
-/// edits ask.
-const SECRET_PLACES: [&[&str]; 31] = [
+/// and program histories, browser and mail profiles, and all clackatoo
+/// keeps for itself. Reads and edits ask.
+///
+/// Those in `.config` and `.local/share` are guarded too where the user
+/// keeps their config and data elsewhere (see [`stores_at`]).
+const SECRET_PLACES: [&[&str]; 50] = [
     &[".docker"],
     &[".azure"],
+    &[".pulumi"],
     &[".password-store"],
     &[".terraform.d"],
+    &[".terraformrc"],
     &[".mozilla"],
+    &[".thunderbird"],
     &[".vault-token"],
     &[".pgpass"],
     &[".my.cnf"],
-    &[".npmrc"],
+    &[".yarnrc.yml"],
     &[".claude.json"],
     &[".bash_history"],
     &[".zsh_history"],
+    &[".python_history"],
+    &[".psql_history"],
+    &[".var", "app"],
+    &["snap", "firefox"],
     &[".config", "gh"],
+    &[".config", "glab-cli"],
+    &[".config", "github-copilot"],
     &[".config", "gcloud"],
     &[".config", "sops"],
     &[".config", "op"],
     &[".config", "rclone"],
+    &[".config", "pip"],
     &[".config", "google-chrome"],
     &[".config", "chromium"],
+    &[".config", "bravesoftware"],
+    &[".config", "microsoft-edge"],
+    &[".config", "code"],
     &[".config", "git", "credentials"],
     &[".config", "containers", "auth.json"],
     &[".local", "share", "keyrings"],
+    &[".local", "share", "atuin"],
     &[".local", "share", "fish", "fish_history"],
     &[".local", "share", "clackatoo"],
     &[".claude", ".credentials.json"],
     &[".codex", "auth.json"],
+    &[".gemini", "oauth_creds.json"],
     &[".cargo", "credentials.toml"],
     &[".cargo", "credentials"],
+    &[".composer", "auth.json"],
     &[".m2", "settings.xml"],
     &[".gradle", "gradle.properties"],
     &[".gem", "credentials"],
+    &["library", "keychains"],
+    &["library", "application support", "google"],
+    &["library", "application support", "firefox"],
 ];
 
 /// Folders that hold keys wherever they are, as in a backup or another
@@ -1031,24 +1105,46 @@ const SECRET_FOLDERS: [&str; 5] = [".ssh", ".aws", ".gnupg", ".kube", "mcp-priva
 /// Files that hold credentials, by name, in whatever folder. Reads and
 /// edits ask. `.env` files are known by their pattern (see
 /// [`env_file`]).
-const SECRET_FILES: [&str; 8] = [
+const SECRET_FILES: [&str; 12] = [
     ".netrc",
     ".git-credentials",
+    ".npmrc",
     ".pypirc",
     ".envrc",
     ".dev.vars",
     "id_rsa",
-    "id_ed25519",
+    "id_dsa",
     "id_ecdsa",
+    "id_ecdsa_sk",
+    "id_ed25519",
+    "id_ed25519_sk",
 ];
 
-/// Files that hold keys or secret values, by the end of their name.
-/// Reads and edits ask.
-const SECRET_EXTENSIONS: [&str; 4] = ["pem", "key", "tfvars", "tfstate"];
+/// Files that hold keys or secret values, by how their names end: keys
+/// and certificates, key stores, password databases, and Terraform's
+/// variables and state. Reads and edits ask.
+const SECRET_ENDINGS: [&str; 12] = [
+    ".pem",
+    ".key",
+    ".ppk",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".kdbx",
+    ".tfvars",
+    ".tfvars.json",
+    ".tfstate",
+    ".tfstate.backup",
+];
 
 /// The endings of `.env` files that hold no secrets: the ones checked in
 /// to show what to set.
 const ENV_EXAMPLES: [&str; 3] = [".example", ".sample", ".template"];
+
+/// Where the kernel shows what programs hold, their environments
+/// included, as `/proc/PID/environ`. Reads and edits ask.
+const KERNEL_PLACES: [&str; 2] = ["/proc", "/sys"];
 
 /// The names along `path`, in lower case: guarded names are compared so
 /// on every filesystem, as one that ignores case would open `.GIT` as
@@ -1092,19 +1188,48 @@ fn env_file(name: &str) -> bool {
     named && !example
 }
 
+/// Whether a file called `name`, in lower case, holds credentials
+/// whatever folder it's in.
+fn secret_file(name: &str) -> bool {
+    env_file(name)
+        || SECRET_FILES.contains(&name)
+        || SECRET_ENDINGS.iter().any(|ending| name.ends_with(ending))
+}
+
 /// Whether `glob`, which says which files a search reads, picks out files
-/// that hold credentials: it spells a name or an ending of theirs. A
-/// guard rail, as a glob can match a name without spelling it.
+/// that hold credentials: one of its parts, with its wildcards left out,
+/// is a name of theirs, as `.env*` or `*.pem`.
+///
+/// It goes by spelling alone, and is a guard rail: `id_rs?` and
+/// `*.{pem,crt}` match the same files and spell nothing.
 fn glob_names_secrets(glob: &str) -> bool {
     let glob = glob.to_lowercase();
-    let spells_name = SECRET_FILES
-        .iter()
-        .chain(&SECRET_FOLDERS)
-        .any(|name| glob.contains(name));
-    let spells_ending = SECRET_EXTENSIONS
-        .iter()
-        .any(|ending| glob.ends_with(&format!(".{ending}")));
-    spells_name || spells_ending || glob.contains(".env")
+    glob.split('/')
+        .map(|part| part.replace(['*', '?'], ""))
+        .any(|spelt| secret_file(&spelt) || SECRET_FOLDERS.contains(&spelt.as_str()))
+}
+
+/// The credential stores the user would have under `config`, their
+/// config directory, and `data`, their data directory: those
+/// [`SECRET_PLACES`] names in `~/.config` and `~/.local/share`, at where
+/// those really are for a user who keeps them elsewhere.
+pub(crate) fn stores_at(config: Option<&Path>, data: Option<&Path>) -> Vec<PathBuf> {
+    let below = |root: Option<&Path>, usual: &[&str]| -> Vec<PathBuf> {
+        let Some(root) = root else {
+            return Vec::new();
+        };
+        SECRET_PLACES
+            .iter()
+            .filter_map(|place| place.strip_prefix(usual))
+            .map(|rest| {
+                rest.iter()
+                    .fold(root.to_owned(), |path, name| path.join(name))
+            })
+            .collect()
+    };
+    let mut stores = below(config, &[".config"]);
+    stores.extend(below(data, &[".local", "share"]));
+    stores
 }
 
 /// The chat's project and the user's home, as given and as they really
@@ -1115,7 +1240,8 @@ struct Roots {
     homes: Vec<PathBuf>,
     /// The chat's project.
     projects: Vec<PathBuf>,
-    /// Clackatoo's own config and state, as they really are.
+    /// The places that ask whole, as they really are (see
+    /// [`Context::protected`]).
     own: Vec<PathBuf>,
 }
 
@@ -1148,17 +1274,19 @@ impl Roots {
     /// them, from the root of the filesystem, so that where a chat is
     /// started never unguards what lies there.
     ///
-    /// But for one run. Claude Code keeps the worktrees its agents work
-    /// in under `.claude/worktrees`, each a project of its own. For a
-    /// file in a project that is in such a worktree, that `.claude` is
-    /// passed over, and left blank here. Any other on the way still
-    /// counts, as one inside the worktree does.
+    /// But for one run. Agents' tools keep the worktrees their agents
+    /// work in under their own folders, as `.claude/worktrees`, each a
+    /// project of its own (see [`WORKTREE_HOLDERS`]). For a file in a
+    /// project that is in such a worktree, that folder's name is passed
+    /// over, and left blank here. Any other on the way still counts, as
+    /// one inside the worktree does.
     fn folder_names(&self, path: &Path) -> Vec<String> {
         let mut all = names(path);
         for project in self.projects.iter().filter(|root| path.starts_with(root)) {
             let own = names(project);
             for at in 0..own.len().saturating_sub(2) {
-                if own[at] == ".claude" && own[at + 1] == "worktrees" {
+                let holds_worktrees = WORKTREE_HOLDERS.contains(&own[at].as_str());
+                if holds_worktrees && own[at + 1] == "worktrees" {
                     all[at].clear();
                 }
             }
@@ -1174,12 +1302,6 @@ impl Roots {
             .iter()
             .chain(&TOOLING_PLACES)
             .any(|place| passes_through(&folders, place));
-        let as_written = path.file_name().and_then(std::ffi::OsStr::to_str);
-        let instructions = as_written.is_some_and(|name| {
-            AGENT_FILES_AS_WRITTEN
-                .iter()
-                .any(|file| *file == name || FOLDS_CASE && file.eq_ignore_ascii_case(name))
-        });
         let is_file = folders.last().is_some_and(|name| {
             AGENT_FILES.contains(&name.as_str())
                 || TOOLING_FILES.contains(&name.as_str())
@@ -1190,30 +1312,27 @@ impl Roots {
                 .iter()
                 .any(|place| begins_with(&from_home, place))
         });
-        in_place || instructions || is_file || at_startup
+        in_place || is_file || at_startup
     }
 
     /// Whether `path` is in one of the user's credential stores, or is a
     /// file that holds credentials wherever it is.
     fn holds_secrets(&self, path: &Path) -> bool {
         let all = names(path);
-        let is_file = all.last().is_some_and(|name| {
-            env_file(name)
-                || SECRET_FILES.contains(&name.as_str())
-                || has_extension(name, &SECRET_EXTENSIONS)
-        });
+        let is_file = all.last().is_some_and(|name| secret_file(name));
         let in_folder = all
             .iter()
             .any(|name| SECRET_FOLDERS.contains(&name.as_str()));
+        let kernel = KERNEL_PLACES.iter().any(|place| path.starts_with(place));
         let in_store = self.below_home(path).is_some_and(|from_home| {
             SECRET_PLACES
                 .iter()
                 .any(|place| begins_with(&from_home, place))
         });
-        is_file || in_folder || in_store
+        is_file || in_folder || kernel || in_store
     }
 
-    /// Whether `path` is in clackatoo's own config or state.
+    /// Whether `path` is in a place that asks whole.
     fn is_own(&self, path: &Path) -> bool {
         self.own.iter().any(|root| path.starts_with(root))
     }
@@ -1250,9 +1369,12 @@ fn guarded(kind: Kind, written: &Path, real: &Path, context: &Context) -> Option
     if roots.holds_secrets(written) || roots.holds_secrets(real) {
         return Some("Credential stores and .env files require your direct approval");
     }
-    // Its state holds this machine's keys, so reading it asks too.
+    // Clackatoo's state holds this machine's keys, so reading it asks
+    // too.
     if roots.is_own(real) {
-        return Some("Clackatoo's own config and state require your direct approval");
+        return Some(
+            "Clackatoo's own files and your credential stores require your direct approval",
+        );
     }
     if kind == Kind::Edit && (roots.instructs_or_runs(written) || roots.instructs_or_runs(real)) {
         return Some(
@@ -1747,9 +1869,16 @@ mod tests {
             (".GIT/hooks/pre-commit", Ask),
             (".Cargo/Config.toml", Ask),
             (".MCP.json", Ask),
-            // An instruction file in capitals is told from a file of the
-            // same letters where the filesystem tells them apart.
-            ("docs/agents.md", if FOLDS_CASE { Ask } else { Allow }),
+            // In any letter case: a mount that ignores it would open
+            // this as the instruction file.
+            ("docs/agents.md", Ask),
+            ("AGENTS.override.md", Ask),
+            (".clinerules/01-style.md", Ask),
+            (".roomodes", Ask),
+            (".yarn/plugins/x.cjs", Ask),
+            (".forgejo/workflows/ci.yml", Ask),
+            (".travis.yml", Ask),
+            ("lefthook.toml", Ask),
             // Names that only resemble guarded ones are ordinary files.
             ("notes/CLAUDE.md.txt", Allow),
             ("cargo/config.toml", Allow),
@@ -1803,6 +1932,16 @@ mod tests {
             // Checked in to show what to set, with nothing set.
             ("src/project/.env.example", Allow),
             ("src/project/deploy.pem", Ask),
+            ("src/project/.npmrc", Ask),
+            ("src/project/release.keystore", Ask),
+            ("src/project/terraform.tfstate.backup", Ask),
+            ("src/project/prod.tfvars.json", Ask),
+            ("src/project/id_ed25519_sk", Ask),
+            (".gemini/oauth_creds.json", Ask),
+            (".config/github-copilot/hosts.json", Ask),
+            (".pulumi/credentials.json", Ask),
+            (".local/share/atuin/history.db", Ask),
+            ("Library/Keychains/login.keychain-db", Ask),
             ("src/project/prod.tfvars", Ask),
             ("src/project/id_ed25519", Ask),
             ("backup/laptop/.ssh/config", Ask),
@@ -1854,6 +1993,12 @@ mod tests {
             (".config/systemd/user/sync.service", Ask),
             (".config/autostart/app.desktop", Ask),
             (".local/bin/tool", Ask),
+            (".vim/plugin/x.vim", Ask),
+            (".emacs.d/init.el", Ask),
+            (".config/sway/config", Ask),
+            (".cargo/env", Ask),
+            ("go/bin/tool", Ask),
+            (".zlogout", Ask),
             (".cargo/bin/tool", Ask),
             ("bin/tool", Ask),
             (".bash_aliases", Ask),
@@ -1954,6 +2099,159 @@ mod tests {
                 "{}",
                 project.display()
             );
+        }
+    }
+
+    #[test]
+    fn other_tools_worktrees_are_projects_like_claude_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let rules = policy(r#"[{"decision":"allow","kind":"edit","target":"{project}"}]"#);
+        for (holder, wanted) in [
+            (".claude", Allow),
+            (".codex", Allow),
+            (".cursor", Allow),
+            (".gemini", Ask),
+            (".git", Ask),
+        ] {
+            let worktree = home.join(holder).join("worktrees/fix");
+            std::fs::create_dir_all(&worktree).unwrap();
+            let mut context = context(&worktree);
+            context.home = home.clone();
+            let request = file_action("Write", Kind::Edit, &worktree.join("src/main.rs"));
+            assert_eq!(
+                rules.decide(&request, &context).decision,
+                wanted,
+                "{holder}"
+            );
+            // What is guarded inside it stays guarded.
+            let request = file_action("Write", Kind::Edit, &worktree.join(".codex/config.toml"));
+            assert_eq!(rules.decide(&request, &context).decision, Ask, "{holder}");
+        }
+    }
+
+    #[test]
+    fn a_rule_that_restricts_files_but_names_no_place_makes_them_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(home.join("nowhere"), home.join("dangling")).unwrap();
+        let read = |path: &str| file_action("Read", Kind::Read, &home.join(path));
+        let edit = |path: &str| file_action("Write", Kind::Edit, &home.join(path));
+        let mut in_project = context(&project);
+        in_project.home = home.clone();
+        // A chat started in the home directory, where `{project}` names
+        // nothing.
+        let mut in_home = context(&home);
+        in_home.home = home.clone();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"claude/Read"},
+            {"decision":"allow","kind":"tool","target":"claude/Write"},
+            {"decision":"deny","kind":"read","target":"{project}/secrets"}
+        ]"#,
+        );
+        for (request, context, wanted) in [
+            (read("project/secrets/key"), &in_project, Deny),
+            (read("project/notes.txt"), &in_project, Allow),
+            // The Deny can't be placed, so it isn't known what it was
+            // about: every read asks, and never passes for allowed.
+            (read("secrets/key"), &in_home, Ask),
+            (read("notes.txt"), &in_home, Ask),
+            // It was about reads only.
+            (edit("notes.txt"), &in_home, Allow),
+        ] {
+            assert_eq!(
+                rules.decide(&request, context).decision,
+                wanted,
+                "{:?}",
+                request.file
+            );
+        }
+        // So with an Ask, and with a target that is a dangling link.
+        for rule in [
+            r#"{"decision":"ask","kind":"read","target":"{project}/secrets"}"#,
+            r#"{"decision":"deny","kind":"read","target":"~/dangling"}"#,
+        ] {
+            let rules = policy(&format!(
+                r#"[{{"decision":"allow","kind":"tool","target":"claude/Read"}},{rule}]"#
+            ));
+            assert_eq!(
+                rules.decide(&read("notes.txt"), &in_home).decision,
+                Ask,
+                "{rule}"
+            );
+        }
+        // An Allow that can't be placed just matches nothing.
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"claude/Read"},
+            {"decision":"allow","kind":"read","target":"{project}/secrets"}
+        ]"#,
+        );
+        assert_eq!(rules.decide(&read("notes.txt"), &in_home).decision, Allow);
+    }
+
+    #[test]
+    fn what_the_kernel_shows_of_programs_always_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut context = context(&dir.path().join("project"));
+        context.home = dir.path().join("home");
+        let rules = policy(r#"[{"decision":"allow","kind":"tool","target":"claude/Read"}]"#);
+        for (path, wanted) in [
+            ("/proc/self/environ", Ask),
+            ("/proc/1/cmdline", Ask),
+            ("/sys/kernel/notes", Ask),
+            ("/etc/hostname", Allow),
+        ] {
+            let request = file_action("Read", Kind::Read, Path::new(path));
+            assert_eq!(rules.decide(&request, &context).decision, wanted, "{path}");
+        }
+    }
+
+    #[test]
+    fn credential_stores_are_guarded_where_the_users_config_and_data_really_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let (config, data) = (home.join(".xdg/config"), home.join(".xdg/data"));
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let mut context = context(&home.join("project"));
+        context.home = home.clone();
+        context.protected = stores_at(Some(&config), Some(&data));
+        context.protected.push(data.join("clackatoo"));
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"read","target":"~"},
+            {"decision":"allow","kind":"tool","target":"claude/Grep"}
+        ]"#,
+        );
+        for (path, wanted) in [
+            (".xdg/config/gh/hosts.yml", Ask),
+            (".xdg/config/git/credentials", Ask),
+            (".xdg/config/git/config", Allow),
+            (".xdg/config/nvim/init.lua", Allow),
+            (".xdg/data/keyrings/login.keyring", Ask),
+            (".xdg/data/clackatoo/web/devices", Ask),
+            (".xdg/data/other/notes.txt", Allow),
+            // The usual places are guarded all the same.
+            (".config/gh/hosts.yml", Ask),
+        ] {
+            let request = file_action("Read", Kind::Read, &home.join(path));
+            assert_eq!(rules.decide(&request, &context).decision, wanted, "{path}");
+        }
+        // A search of a folder they lie beneath asks too.
+        let cwd = home.join("project").display().to_string();
+        for (path, wanted) in [
+            (".xdg", Ask),
+            (".xdg/data", Ask),
+            (".xdg/data/other", Allow),
+        ] {
+            let input = json!({"pattern":"token","path":home.join(path)});
+            let wire = json!({"toolCallId":"1","name":"Grep","kind":"search","rawInput":input});
+            let request = Action::provider("claude", &cwd, &serde_json::from_value(wire).unwrap());
+            assert_eq!(rules.decide(&request, &context).decision, wanted, "{path}");
         }
     }
 
@@ -2066,7 +2364,21 @@ mod tests {
                 Ask,
             ),
             (search("Glob", json!({"pattern":"**/id_rsa"})), Ask),
-            (search("Glob", json!({"pattern":"**/.npmrc"})), Allow),
+            (search("Glob", json!({"pattern":"**/.npmrc"})), Ask),
+            (
+                search("Grep", json!({"pattern":"KEY","glob":"src/**/*.env"})),
+                Ask,
+            ),
+            (search("Glob", json!({"pattern":"**/.ssh/*"})), Ask),
+            // By its parts, not by letters that happen to be in it.
+            (
+                search("Glob", json!({"pattern":"**/*.environment.ts"})),
+                Allow,
+            ),
+            (
+                search("Grep", json!({"pattern":"x","glob":"*.keys.rs"})),
+                Allow,
+            ),
             // A glob can leave the folder searched.
             (search("Glob", json!({"pattern":at(".ssh/*")})), Ask),
             (search("Glob", json!({"pattern":"../../.ssh/*"})), Ask),
