@@ -31,6 +31,28 @@ fn ranked(agent: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// How much the mode `value` lets `agent` do without asking, on one scale
+/// for every agent clackatoo knows, so modes of different agents compare:
+///
+/// 0. Nothing is changed: Claude Code's Plan, Codex's Read-only.
+/// 1. Edits and commands are asked about: Claude Code's Manual.
+/// 2. Edits go ahead, and commands are asked about, or kept in a sandbox:
+///    Claude Code's Accept edits, Codex's Workspace access.
+/// 3. An automatic reviewer decides what's asked: Claude Code's Auto,
+///    Codex's Auto review.
+/// 4. Nothing is asked: Claude Code's Bypass permissions, Codex's Full
+///    access.
+///
+/// `None` if clackatoo doesn't know the mode.
+pub(super) fn level(agent: &str, value: &str) -> Option<u8> {
+    let levels: &[u8] = match agent {
+        "claude" => &[0, 1, 2, 3, 4],
+        "codex" => &[0, 2, 3, 4],
+        _ => return None,
+    };
+    levels.get(rank(agent, value)?).copied()
+}
+
 /// Where the mode `value` is among `agent`'s modes, from 0, the one that
 /// may do least, if clackatoo knows it.
 pub(super) fn rank(agent: &str, value: &str) -> Option<usize> {
@@ -112,6 +134,32 @@ mod tests {
         assert_eq!(safest("mine", ["yolo", "careful"].into_iter()), None);
         assert_eq!(leaving_plan_for("claude", "exit-plan-auto"), Some("auto"));
         assert_eq!(leaving_plan_for("codex", "implement_plan"), None);
+    }
+
+    /// Every mode clackatoo knows has a level, which compares across
+    /// agents: the two automatic modes are the same (CLACKA-257).
+    #[test]
+    fn every_known_mode_has_a_level_that_compares_across_agents() {
+        for agent in ["claude", "codex"] {
+            let modes = ranked(agent).unwrap();
+            let levels: Vec<u8> = (modes.iter())
+                .map(|mode| level(agent, mode).unwrap())
+                .collect();
+            assert!(levels.is_sorted(), "{agent}: {levels:?}");
+        }
+        assert_eq!(level("claude", "plan"), level("codex", "read-only"));
+        assert_eq!(level("claude", "auto"), level("codex", "agent"));
+        assert_eq!(
+            level("claude", "bypassPermissions"),
+            level("codex", "agent-full-access")
+        );
+        assert!(level("claude", "default") < level("codex", "workspace-write"));
+        assert_eq!(
+            level("claude", "acceptEdits"),
+            level("codex", "workspace-write")
+        );
+        assert_eq!(level("mine", "read-only"), None);
+        assert_eq!(level("claude", "unheard-of"), None);
     }
 
     #[test]

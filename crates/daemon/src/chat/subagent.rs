@@ -447,6 +447,18 @@ impl HostedChat {
         (setting.choices.iter()).position(|choice| choice.value == setting.value)
     }
 
+    /// How much its agent's mode lets it do unasked, on the scale every
+    /// agent clackatoo knows shares (see `modes::level`): the mode it's in,
+    /// or before its session opens, the one it will ask for. `None` if the
+    /// mode isn't known.
+    pub(crate) fn mode_level(&self) -> Option<u8> {
+        let value = match self.setting_of(SettingKind::Mode) {
+            Some(setting) => setting.value.as_str(),
+            None => self.mode_to_come()?,
+        };
+        super::modes::level(&self.agent, value)
+    }
+
     /// It's started as the specialist `specialist`, with `limits`: `role` goes
     /// before its first message, and it asks for `wanted` as its first
     /// session opens.

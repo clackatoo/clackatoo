@@ -207,12 +207,25 @@ it can never gain, through another chat, what its own chat isn't allowed:
   repository its folder is in, or else that folder, to be messaged.
 - A message to a chat that can do more is refused: one whose Tools setting is
   looser than the sender's, whose [limits](#specialists) are fewer, counting what
-  each one's mode rules out, or whose mode comes later among those its agent
-  offers, the first, such as Manual or Read-only, being the safest. Modes of
-  different agents can't be compared, so a chat with another agent is messaged
-  only in its first mode, and not at all if that agent offers no modes. A chat
-  whose agent hasn't started yet is judged by the mode it will start in, where
-  that's known, and otherwise the sender is told to wait for it.
+  each one's mode rules out, or whose mode lets its agent do more without
+  asking. The modes of Claude Code and Codex compare on one scale, whichever
+  agent each chat runs:
+
+  | What it does unasked | Claude Code | Codex |
+  |---|---|---|
+  | Nothing: it changes nothing, or asks about all it does | Plan, Manual | Read-only |
+  | Edits, and asks about commands or keeps them in a sandbox | Accept edits | Workspace access |
+  | What an automatic reviewer lets it | Auto | Auto review |
+  | Everything | Bypass permissions | Full access |
+
+  So a chat in Auto and one in Auto review message each other, whichever
+  agent each runs. Plan is held to reading by its limits as well, so a chat in
+  Plan still can't message one in Manual. The modes of other agents compare
+  only by the order that agent lists them, the first being the safest, and a
+  chat with another such agent is messaged only in its first mode, or not at
+  all if it offers none. A chat whose agent hasn't started yet is judged by
+  the mode it will start in, where that's known, and otherwise the sender is
+  told to wait for it.
 - A message that waits its turn is checked again as its turn comes. If it
   can't go by then, it's dropped, and the sender is told as it waits for that
   chat.

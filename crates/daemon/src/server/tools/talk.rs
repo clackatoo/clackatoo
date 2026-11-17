@@ -807,17 +807,27 @@ impl Daemon {
             let coming = target.mode_to_come()?;
             same.then(|| own.rank_of_mode(coming)).flatten()
         });
-        if rank.is_none() && target.session().is_none() {
+        if rank.is_none() && target.mode_level().is_none() && target.session().is_none() {
             return Some(format!(
                 "chat {to} isn't ready yet: wait for it, then try again"
             ));
         }
         let limits = HostedChat::all_limits;
-        let mode_looser = match (same, own.mode_rank(), rank) {
-            (false, _, theirs) => theirs != Some(0),
-            (true, Some(own), Some(theirs)) => theirs > own,
-            (true, None, Some(theirs)) => theirs > 0,
-            (true, own, None) => own.is_some(),
+        // Known modes compare by what they let the agent do, whichever
+        // agents they're of; others, only as the same agent lists them,
+        // and another agent's only in its first.
+        // A mode that changes nothing and one that asks about all it does
+        // may do as much as each other unasked: nothing.
+        let unasked = |level: u8| level.max(1);
+        let mode_looser = match (own.mode_level(), target.mode_level()) {
+            (Some(own), Some(theirs)) => unasked(theirs) > unasked(own),
+            (None, Some(theirs)) => unasked(theirs) > unasked(0),
+            _ => match (same, own.mode_rank(), rank) {
+                (false, _, theirs) => theirs != Some(0),
+                (true, Some(own), Some(theirs)) => theirs > own,
+                (true, None, Some(theirs)) => theirs > 0,
+                (true, own, None) => own.is_some(),
+            },
         };
         // Each of the user's own chats has a budget of its own, which the
         // user set: one messaging another at no more than its own uses
@@ -2819,6 +2829,68 @@ mod tests {
             waiting.contains("isn't ready yet: wait for it"),
             "{waiting}"
         );
+    }
+
+    /// Modes compare by what they let an agent do unasked, whichever
+    /// agent's they are: Claude Code in Auto and Codex in Auto review
+    /// message each other, and a chat in Manual one in Plan, which Claude
+    /// Code's adapter lists after it; one that edits unasked still may do
+    /// more than one that asks (CLACKA-257).
+    #[test]
+    fn modes_of_different_agents_compare_by_what_they_let_them_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let parent = idle_chat(&mut daemon, 2);
+        let size = Size::new(40, 10).unwrap();
+        // A chat of `agent`'s that `parent` started, in the mode `mode`.
+        let mut add = |id: u32, agent: &str, mode: &str| {
+            let config = crate::AgentConfig::default();
+            let spec = config.find(agent).unwrap();
+            let mut chat = HostedChat::new(
+                TerminalId(id),
+                size,
+                "/".into(),
+                &spec,
+                AgentTools::Ask,
+                true,
+                false,
+            );
+            chat.started_by(parent, parent, 1, None);
+            let options = serde_json::from_value(serde_json::json!([
+                { "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+                  "currentValue": mode,
+                  "options": [{ "value": mode, "name": mode }] },
+            ]))
+            .unwrap();
+            chat.connected(Opened {
+                session: format!("s{id}"),
+                settings: Some(options),
+            });
+            daemon.add_chat(chat);
+            TerminalId(id)
+        };
+        let claude_auto = add(10, "claude", "auto");
+        let codex_auto = add(11, "codex", "agent");
+        let manual = add(12, "claude", "default");
+        let plan = add(13, "claude", "plan");
+        let workspace = add(14, "codex", "workspace-write");
+        let full = add(15, "codex", "agent-full-access");
+        let refused = |daemon: &Daemon, from: TerminalId, to: TerminalId| {
+            let own = daemon.chat_ref(from).unwrap();
+            daemon.unmessageable(own, from, to)
+        };
+        assert_eq!(refused(&daemon, claude_auto, codex_auto), None);
+        assert_eq!(refused(&daemon, codex_auto, claude_auto), None);
+        assert_eq!(refused(&daemon, manual, plan), None, "Plan does less");
+        // Plan is held to reading, as limits are: the other way, it's the
+        // limits that may do more, not the mode.
+        assert!(refused(&daemon, plan, manual).is_some());
+        assert_eq!(refused(&daemon, workspace, manual), None);
+        let looser = refused(&daemon, manual, workspace).unwrap();
+        assert!(looser.contains("may do more than this one"), "{looser}");
+        let looser = refused(&daemon, codex_auto, full).unwrap();
+        assert!(looser.contains("may do more than this one"), "{looser}");
+        assert_eq!(refused(&daemon, full, claude_auto), None);
     }
 
     #[test]
