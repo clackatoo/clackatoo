@@ -1,28 +1,56 @@
-# Managed MCP browser, exact configuration review, drafts and private values.
+# The MCP Servers page: its list, a server's form with what can be done
+# about its connection, a change waiting to be saved and the question
+# before it's thrown away, a field with something wrong, a private
+# credential, and the list and a form in narrow windows.
 size 1280x900
 file .agents/mcp.json <<END
-{"servers":{"docs":{"url":"https://mcp.example.org/mcp","headers":{"Authorization":{"secret":"docs-token"}}},"search":{"command":"search-server","args":["--stdio"],"read_only":true}}}
+{"servers":{"docs":{"url":"https://mcp.example.org/mcp","headers":{"Authorization":{"secret":"docs-token"}}},"search":{"command":"search-server","args":["--stdio","--root","/srv/my notes"],"read_only":true}}}
 END
 keys <C-;>:Settings<CR>
 wait-for Appearance
 keys }}}}}}}}
-wait-for Add MCP server
+wait-for Add a server
 shot mcp-servers
-keys G<CR>
-wait-for Server definition
-shot mcp-review
-keys ggjjjjjj<CR>
-wait-for Command or URL
-shot mcp-editor
-keys ggjjj<CR>
-type --changed
-shot mcp-draft
-size 560x780
-shot mcp-narrow
+# The second server, which runs a command.
+keys j<CR>
+wait-for Connects by
+shot mcp-server
+# Down to its command, and something typed after it.
+keys <Tab><Tab><Tab><Tab>
+type -changed
+shot mcp-typing
+keys <CR>
+shot mcp-changed
+# Esc asks before the change goes.
 keys <Esc>
-keys G<CR>
-keys ggjjjj<CR>
-wait-for Credential value
-keys ggj<CR>
+shot mcp-discard
+# A timeout that's no number says so under its field.
+keys <Tab><Tab><Tab><Tab>
+type x
+keys <Tab>
+shot mcp-wrong
+keys <Esc><Esc>
+wait-for Add a server
+# A server to add, by its button.
+keys a
+wait-for New server
+shot mcp-new
+keys <Esc>
+# A private credential, drawn as dots.
+keys jj<CR>
+wait-for Private credential
+type docs-token
+keys <Tab>
 type never-show-this-private-value
 shot mcp-private-credential
+keys <Esc><Esc><Esc>
+wait-for Add a server
+size 800x780
+shot mcp-800
+keys ggj<CR>
+wait-for Connects by
+shot mcp-server-800
+size 640x780
+shot mcp-server-640
+keys <Esc>
+shot mcp-640

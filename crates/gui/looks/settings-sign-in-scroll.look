@@ -25,16 +25,16 @@ wait-for Appearance
 scroll 800 450 -4
 shot easy-scrolled
 keys }}}}}}}}
-wait-for Add MCP server
-# The server's details: approve its definition, then test it, which the
-# server refuses for want of a login.
-keys G<CR>
-wait-for Server definition
-keys ggjjjjjjjjjjjj<CR>
-wait-for Approved
-keys ggjjjjjjj<CR>
-sleep 2000
-keys gg<CR>
-keys G
+wait-for Add a server
+# The server's form: enable it, as it's the project's, then test it,
+# which the server refuses for want of a sign in.
+keys <CR>
+wait-for Review and enable
+keys <CR>
+wait-for Connects to it
+keys <CR>
 wait-for Needs sign in
+shot mcp-needs-sign-in
+keys <Esc>
+wait-for Add a server
 shot mcp-sign-in

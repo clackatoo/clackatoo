@@ -1,4 +1,5 @@
-# Shared skills, their sources and invocation controls, grouped Settings.
+# The Skills page: shared skills, where each is from and who starts it;
+# found by a search; and the page with none.
 size 1280x800
 file .agents/skillsets/database/skillset.toml <<END
 format = 1
@@ -37,3 +38,6 @@ wait-for /migrate-db
 shot skills
 keys /migration
 shot skills-search
+keys <Esc><Esc>
+size 640x700
+shot skills-640

@@ -710,7 +710,7 @@ impl Desk {
     /// Settles the terminals' guesses at the echo of what's typed whose
     /// time is up at `now`. Returns whether the window must be redrawn.
     pub(crate) fn tick_panes(&mut self, now: std::time::Instant) -> bool {
-        self.tick_mcp_settings(now)
+        self.tick_settings(now)
             | (self.panes.values_mut()).fold(false, |redraw, pane| pane.tick(now) | redraw)
     }
 
@@ -724,7 +724,7 @@ impl Desk {
                 self.settings
                     .as_ref()
                     .filter(|_| self.connected)
-                    .and_then(crate::settings::SettingsMenu::mcp_wake),
+                    .and_then(crate::settings::SettingsMenu::wake),
             )
             .min()
     }
@@ -1620,6 +1620,7 @@ impl Desk {
         self.watch_chats();
         self.connect_config_hosts();
         self.tutor_connected();
+        self.settings_reconnected();
         // A new daemon, or one that lost the last connection, doesn't know.
         self.pairing = clackatoo_protocol::PairingState::default();
         if !self.unfocused {
@@ -1643,6 +1644,7 @@ impl Desk {
         self.connected = false;
         self.work_changed(Vec::new());
         self.forget_asked();
+        self.settings_lost();
         // A chat's agent may have long finished by the time it's back:
         // none says it's working, nor counts, meanwhile.
         self.chats_offline(true);
@@ -3342,6 +3344,7 @@ mod tests {
     mod restored;
     mod scrolling;
     mod settings;
+    mod settings_forms;
     mod settings_menu;
     mod settings_scroll;
     mod shared;

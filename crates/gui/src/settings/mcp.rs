@@ -1,700 +1,632 @@
-//! Managed server browser and drafts. Credentials remain masked while editing.
-use super::{
-    Mode, Outcome, SettingsMenu,
-    view::{ControlView, Part, RowView},
-};
-use crate::{options::easy::Page, render::Ink, vim::Stroke};
-use clackatoo_protocol::{McpAction, McpImport, McpReply, McpScope, McpServerInfo, McpState};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+//! The settings menu's MCP Servers page: the servers clackatoo connects
+//! chats to, as the daemon lists them for the project Settings opened in.
+//!
+//! Its list has a row for each server, saying how it's connected, then
+//! what else there is to do: keep a private credential, or copy servers
+//! over from an agent's own settings. A server opens as a form (see
+//! [`server`]): how it's connected and what can be done about that, its
+//! fields, and its tools. A credential's value, and the address a sign in
+//! ends on, are drawn as dots and never said back.
+//!
+//! The list is read as the page is shown and every couple of seconds
+//! after, as chats connect and sign ins finish by themselves. A read
+//! never takes away what an action came to, nor anything typed. Each
+//! thing asked of the daemon has a number, so an answer to something no
+//! longer waited for, as after the connection was lost, changes nothing.
+
+mod server;
+
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-static NEXT: AtomicU64 = AtomicU64::new(1);
+use clackatoo_protocol::{McpAction, McpImport, McpReply, McpServerInfo, McpState};
+
+use self::server::{Field, ServerForm};
+use super::form::{self, Catalogue, Did, FormView, Listing, MOST_TEXT, Notice, Text, Typing};
+use super::view::{ButtonView, ControlView, FieldView, Look, Part, RowView};
+use super::{Outcome, SettingsMenu};
+use crate::render::Ink;
+
+/// How long after the list was read it's read again, while its page is
+/// shown.
+const READ_EVERY: Duration = Duration::from_secs(2);
+
+/// What numbers the next thing asked of a daemon, in any window's menu.
+static ASKED: AtomicU64 = AtomicU64::new(1);
+
+/// An agent whose own servers can be copied over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Provider {
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    /// What the daemon knows it as.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// What it's called.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    /// The one the daemon knows as `name`.
+    fn named(name: &str) -> Option<Self> {
+        [Self::Claude, Self::Codex]
+            .into_iter()
+            .find(|provider| provider.name() == name)
+    }
+}
+
+/// A row of the page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Row {
+    /// A server in the list, by its name.
+    Server(String),
+    /// Adds a private credential.
+    Credential,
+    /// Copies servers over from an agent's own settings.
+    Import(Provider),
+    /// In a server's form: how it's connected.
+    Status,
+    /// Allows a server from the project or a package to run.
+    Review,
+    Test,
+    Reconnect,
+    SignIn,
+    /// Finishes a sign in whose browser was on another machine.
+    FinishSignIn,
+    ForgetLogin,
+    /// One of the server's fields.
+    Field(Field),
+    /// One of its tools, by its place.
+    Tool(usize),
+    Remove,
+    /// In a credential's form: its name, and its value.
+    CredentialName,
+    CredentialValue,
+    /// The address a sign in's browser ended on.
+    CallbackUrl,
+    /// A server that can be copied over, by its place.
+    Candidate(usize),
+}
+
+/// What the page shows.
+#[derive(Debug)]
+enum View {
+    List,
+    Server(Box<ServerForm>),
+    Credential {
+        name: String,
+        value: String,
+    },
+    /// Finishing server `form`'s sign in, which its form comes back to.
+    Callback {
+        form: Box<ServerForm>,
+        url: String,
+    },
+    Import {
+        provider: Provider,
+        candidates: Vec<McpImport>,
+        /// Those picked, by their place.
+        picked: Vec<bool>,
+    },
+}
+
+/// Something asked of the daemon, not yet answered.
+struct Asked {
+    number: u64,
+    action: McpAction,
+    /// The form it was asked from is still the one shown: its answer
+    /// closes that, and no other.
+    from_form: bool,
+}
+
+/// A server's last test from here, which the daemon doesn't keep: shown
+/// while the server is as it was tested and no chat has connected to it.
+#[derive(Debug)]
+struct Tested {
+    revision: String,
+    state: McpState,
+    detail: String,
+    tools: Vec<clackatoo_protocol::McpToolInfo>,
+}
+
+/// The MCP Servers page's state.
 pub(super) struct Mcp {
-    pub(super) id: u64,
-    pub(super) entries: Vec<McpServerInfo>,
-    pub(super) status: String,
+    /// The servers, by name, as the daemon last listed them.
+    servers: Vec<McpServerInfo>,
+    listing: Listing,
+    /// What's wrong with the servers' files, as the daemon says with its
+    /// list.
+    problems: String,
     view: View,
-    pending: Option<McpAction>,
-    next_poll: Instant,
-    removing: Option<(String, String)>,
+    typing: Option<Typing>,
+    /// The read of the list asked for, by its number.
+    reading: Option<u64>,
+    asked: Option<Asked>,
+    /// When the list is to be read next.
+    due: Option<Instant>,
+    notice: Option<Notice>,
     /// The servers signed in to from here, each with why it failed, if
     /// it did: their rows say how it went.
     sign_ins: BTreeMap<String, Option<String>>,
-    /// The button the keys are on, of the row of buttons that's this
-    /// row of the page's.
-    button: (usize, usize),
-    /// Answers to come to polls an action went ahead of, which are let
-    /// go: the daemon answers in turn, and the next poll reads again.
-    skip: usize,
+    tested: BTreeMap<String, Tested>,
+    /// The button the keys are on in a server's row of the list, if not
+    /// its last: the server's name, and the button's place.
+    button: Option<(String, usize)>,
+    /// A credential's form says where it's kept: the daemon's machine, if
+    /// it isn't this one.
+    pub(super) machine: Option<String>,
+    /// The home directory on the daemon's machine, which files' paths are
+    /// said from, once the daemon's said it.
+    pub(super) home: String,
 }
+
 impl std::fmt::Debug for Mcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never a credential's value, nor an address that signs in.
         f.debug_struct("Mcp")
-            .field("entries", &self.entries.len())
-            .field("pending", &self.pending.is_some())
+            .field("servers", &self.servers.len())
+            .field("listing", &self.listing)
+            .field("asked", &self.asked.is_some())
             .finish_non_exhaustive()
     }
 }
-enum View {
-    List,
-    Details(String),
-    Edit(Editor),
-    Secret(Editor),
-    Callback(String, Editor),
-    Import {
-        provider: String,
-        entries: Vec<McpImport>,
-        selected: BTreeSet<String>,
-    },
-}
-pub(super) struct Editor {
-    fields: Vec<String>,
-    editing: Option<Text>,
-    original: Option<McpServerInfo>,
-    scope: McpScope,
-}
-struct Text {
-    field: usize,
-    cursor: usize,
-    before: String,
-}
-
-#[derive(Clone)]
-enum Row {
-    Add,
-    Secret,
-    Import(&'static str),
-    Refresh,
-    Server(String),
-    Back,
-    Status,
-    Source,
-    Definition,
-    Enabled,
-    ReadOnly,
-    Edit,
-    Test,
-    Reconnect,
-    Login,
-    Callback,
-    Forget,
-    Trust,
-    Remove,
-    Tool(usize),
-    Field(usize),
-    Save,
-    Cancel,
-    ImportToggle(usize),
-    ImportCommit,
-}
-
-const FIELDS: &[(&str, &str)] = &[
-    (
-        "Name",
-        "Stable name, using letters, digits, underscores and hyphens.",
-    ),
-    (
-        "Scope",
-        "Personal applies across projects. Project writes .agents/mcp.json.",
-    ),
-    (
-        "Transport",
-        "A local command over stdio, or a Streamable HTTP endpoint.",
-    ),
-    (
-        "Command or URL",
-        "Command executable, without shell expansion; or HTTPS URL. Loopback HTTP is also supported.",
-    ),
-    (
-        "Arguments",
-        "JSON array of command arguments. Each value is passed literally.",
-    ),
-    (
-        "Environment",
-        "JSON object. Use {\"secret\":\"name\"} for private values, or {\"env\":\"VARIABLE\"} for inherited values.",
-    ),
-    (
-        "HTTP headers",
-        "JSON object. Store credentials privately, then refer to them with {\"secret\":\"name\"}.",
-    ),
-    (
-        "Enabled",
-        "Connect when an eligible chat needs this server.",
-    ),
-    (
-        "Read-only server",
-        "Your classification: read-only specialists may use this server. This does not sandbox the upstream process.",
-    ),
-    (
-        "Request timeout (seconds)",
-        "1–600 seconds. Timed-out tool calls are cancelled and never automatically replayed.",
-    ),
-    (
-        "OAuth required",
-        "Require a saved browser login before connecting. Public servers may leave this off and sign in later if needed.",
-    ),
-    (
-        "OAuth client ID",
-        "Optional registered public client. Blank uses server-supported client registration.",
-    ),
-    (
-        "OAuth scopes",
-        "Space-separated requested scopes. Blank uses the authorization server's defaults.",
-    ),
-];
 
 impl Mcp {
     pub(super) fn new() -> Self {
         Self {
-            id: NEXT.fetch_add(1, Ordering::Relaxed),
-            entries: Vec::new(),
-            status: "Reading MCP servers…".into(),
+            servers: Vec::new(),
+            listing: Listing::Reading,
+            problems: String::new(),
             view: View::List,
-            pending: None,
-            next_poll: Instant::now(),
-            removing: None,
+            typing: None,
+            reading: None,
+            asked: None,
+            due: Some(Instant::now()),
+            notice: None,
             sign_ins: BTreeMap::new(),
-            button: (0, 0),
-            skip: 0,
+            tested: BTreeMap::new(),
+            button: None,
+            machine: None,
+            home: String::new(),
         }
     }
-    fn rows(&self) -> Vec<Row> {
-        match &self.view {
-            View::List => [
-                Row::Add,
-                Row::Secret,
-                Row::Import("claude"),
-                Row::Import("codex"),
-                Row::Refresh,
-            ]
-            .into_iter()
-            .chain(self.entries.iter().map(|s| Row::Server(s.name.clone())))
-            .collect(),
-            View::Details(name) => {
-                let mut rows = vec![
-                    Row::Back,
-                    Row::Status,
-                    Row::Source,
-                    Row::Definition,
-                    Row::Enabled,
-                    Row::ReadOnly,
-                    Row::Edit,
-                    Row::Test,
-                    Row::Reconnect,
-                    Row::Login,
-                    Row::Callback,
-                    Row::Forget,
-                    Row::Trust,
-                ];
-                if let Some(server) = self.entries.iter().find(|s| &s.name == name) {
-                    if server.editable {
-                        rows.push(Row::Remove);
-                    }
-                    rows.extend((0..server.tools.len()).map(Row::Tool));
-                }
-                rows
-            }
-            View::Edit(_) => (0..FIELDS.len())
-                .map(Row::Field)
-                .chain([Row::Save, Row::Cancel])
-                .collect(),
-            View::Secret(_) => (0..2)
-                .map(Row::Field)
-                .chain([Row::Save, Row::Cancel])
-                .collect(),
-            View::Callback(..) => vec![Row::Field(0), Row::Save, Row::Cancel],
-            View::Import { entries, .. } => [Row::Back]
-                .into_iter()
-                .chain((0..entries.len()).map(Row::ImportToggle))
-                .chain([Row::ImportCommit])
-                .collect(),
-        }
-    }
-    pub(super) fn editor(&self) -> Option<&Editor> {
-        match &self.view {
-            View::Edit(e) | View::Secret(e) | View::Callback(_, e) => Some(e),
-            _ => None,
-        }
-    }
-    fn editor_mut(&mut self) -> Option<&mut Editor> {
-        match &mut self.view {
-            View::Edit(e) | View::Secret(e) | View::Callback(_, e) => Some(e),
-            _ => None,
-        }
-    }
-    fn selected(&self) -> Option<&McpServerInfo> {
-        if let View::Details(name) = &self.view {
-            self.entries.iter().find(|s| &s.name == name)
-        } else {
-            None
-        }
-    }
-    fn secret_field(&self, field: usize) -> bool {
-        matches!(self.view, View::Secret(_)) && field == 1
-            || matches!(self.view, View::Callback(..))
-    }
-}
 
-impl SettingsMenu {
-    pub(crate) fn mcp_id(&self) -> u64 {
-        self.mcp.id
+    /// The servers listed, by name.
+    pub(super) fn servers(&self) -> &[McpServerInfo] {
+        &self.servers
     }
-    pub(crate) fn mcp_loading(&mut self) {
-        self.mcp.pending = Some(McpAction::List);
+
+    /// What the page knows of its list.
+    pub(super) fn listing(&self) -> &Listing {
+        &self.listing
     }
-    pub(crate) fn mcp_poll_due(&self, now: Instant) -> bool {
-        self.mcp_wake().is_some_and(|due| due <= now)
+
+    /// What the last action came to.
+    pub(super) fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
     }
-    pub(crate) fn mcp_wake(&self) -> Option<Instant> {
-        (self.mcp_page() && self.mcp.pending.is_none()).then_some(self.mcp.next_poll)
+
+    /// What's wrong with the servers' files, if anything is.
+    pub(super) fn problems(&self) -> Option<&str> {
+        (!self.problems.is_empty()).then_some(&*self.problems)
     }
-    pub(super) fn mcp_page(&self) -> bool {
-        self.mode == Mode::Easy
-            && self.easy.page() == Page::Mcp
-            && !self.searching()
-            && !self.typing
+
+    /// When the list is next to be read, if it's to be and isn't being.
+    pub(super) fn due(&self) -> Option<Instant> {
+        self.due.filter(|_| self.reading.is_none())
     }
-    pub(super) fn mcp_browser(&self) -> bool {
-        matches!(self.mcp.view, View::List)
-    }
-    pub(super) fn mcp_subtitle(&self) -> String {
-        if self.mcp.editor().is_some() {
-            "Changes stay in this draft until Save. Esc cancels a field edit.".into()
-        } else {
-            self.mcp.status.clone()
+
+    /// The list is to be read now, as its page is shown, or the
+    /// connection's back: unless it's being read, which is as good.
+    pub(super) fn read_now(&mut self) {
+        if self.reading.is_none() {
+            self.due = Some(Instant::now());
         }
     }
-    pub(super) fn mcp_title(&self) -> String {
-        match &self.mcp.view {
-            View::List => "MCP Servers".into(),
-            View::Details(name) => format!("MCP · {name}"),
-            View::Edit(editor) => editor.original.as_ref().map_or_else(
-                || "Add MCP server".into(),
-                |s| format!("Edit MCP · {}", s.name),
-            ),
-            View::Secret(_) => "Private credential".into(),
-            View::Callback(name, _) => format!("Sign in · {name}"),
-            View::Import { provider, .. } => format!("Import MCP · {provider}"),
+
+    /// The list is being read: the number its answer is known by.
+    pub(super) fn reading(&mut self) -> u64 {
+        let number = ASKED.fetch_add(1, Ordering::Relaxed);
+        self.reading = Some(number);
+        self.due = None;
+        number
+    }
+
+    /// The list can't be read, and `why`: the page says so until it can.
+    pub(super) fn unavailable(&mut self, why: String) {
+        self.reading = None;
+        self.due = None;
+        self.listing = Listing::Unavailable(why);
+    }
+
+    /// The connection was lost: what was asked will never be answered,
+    /// and nothing's read until it's back.
+    pub(super) fn lost(&mut self) {
+        self.reading = None;
+        self.due = None;
+        if self.asked.take().is_some() {
+            self.notice = Some(Notice::Failed(super::LOST_ASKING.into()));
         }
     }
-    pub(super) fn mcp_rows(&self) -> usize {
-        self.mcp.rows().len()
+
+    /// The server called `name`, as listed.
+    fn server(&self, name: &str) -> Option<&McpServerInfo> {
+        self.servers.iter().find(|server| server.name == name)
     }
-    pub(super) fn mcp_editing(&self) -> bool {
-        self.mcp_page() && self.mcp.editor().is_some_and(|e| e.editing.is_some())
+
+    /// Whether `action` is what's been asked and not answered.
+    fn asking(&self, is: impl Fn(&McpAction) -> bool) -> bool {
+        self.asked.as_ref().is_some_and(|asked| is(&asked.action))
     }
-    pub(super) fn finish_mcp_field(&mut self) {
-        if let Some(editor) = self.mcp.editor_mut() {
-            editor.editing = None;
-        }
-    }
-    pub(crate) fn mcp_came(&mut self, id: u64, result: Result<McpReply, String>) -> Option<String> {
-        if id != self.mcp.id {
-            return None;
-        }
-        if self.mcp.skip > 0 {
-            self.mcp.skip -= 1;
-            return None;
-        }
-        let pending = self.mcp.pending.take();
-        self.mcp.next_poll = Instant::now() + Duration::from_secs(2);
-        // A sign in that never got as far as the browser failed.
-        if let Some(McpAction::Authenticate { name }) = &pending {
-            let failed = match &result {
-                Err(why) => Some(why.clone()),
-                Ok(reply) if reply.login_url.is_none() => Some(reply.notice.clone()),
-                Ok(_) => None,
-            };
-            self.mcp.sign_ins.insert(name.clone(), failed);
-        }
-        match result {
-            Err(why) => {
-                self.mcp.status.clone_from(&why);
-                self.said = Some((why, true));
-                None
-            }
-            Ok(reply) => {
-                let preserve = matches!(
-                    pending,
-                    Some(McpAction::Authenticate { .. } | McpAction::CompleteLogin { .. })
-                );
-                if !preserve {
-                    self.mcp.entries = reply.servers;
-                    self.mcp.entries.sort_by(|a, b| a.name.cmp(&b.name));
-                }
-                if let Some(McpAction::Import { provider, names }) = &pending
-                    && names.is_empty()
-                {
-                    self.mcp.view = View::Import {
-                        provider: provider.clone(),
-                        entries: reply.imports,
-                        selected: BTreeSet::new(),
-                    };
-                    self.specialist_focus(0, None);
-                }
-                if let Some(McpAction::Save { name, .. }) = pending {
-                    self.mcp.view = View::Details(name);
-                    self.specialist_focus(0, None);
-                } else if matches!(
-                    pending,
-                    Some(
-                        McpAction::Secret { .. }
-                            | McpAction::Remove { .. }
-                            | McpAction::CompleteLogin { .. }
-                    )
-                ) || matches!(pending,Some(McpAction::Import{ref names,..}) if !names.is_empty())
-                {
-                    self.mcp.view = View::List;
-                    self.specialist_focus(0, None);
-                }
-                if let View::Details(name) = &self.mcp.view
-                    && !self.mcp.entries.iter().any(|s| &s.name == name)
-                {
-                    self.mcp.view = View::List;
-                    self.specialist_focus(0, None);
-                }
-                self.mcp.status = if reply.notice.is_empty() {
-                    format!(
-                        "{} managed servers. Connections belong to their chat and workspace.",
-                        self.mcp.entries.len()
-                    )
-                } else {
-                    reply.notice.clone()
-                };
-                if !reply.notice.is_empty() {
-                    self.said_saved = Some((reply.notice, false));
-                }
-                reply.login_url
-            }
-        }
-    }
-    fn mcp_request(&mut self, action: McpAction) -> Outcome {
-        // An action goes ahead of a poll, whose answer is let go, rather
-        // than a click or Enter doing nothing while it's read.
-        match &self.mcp.pending {
-            Some(McpAction::List) if !matches!(action, McpAction::List) => self.mcp.skip += 1,
-            Some(_) => return Outcome::Nothing,
-            None => {}
+
+    /// Asks the daemon for `action`, saying `working` meanwhile. One
+    /// thing is asked at a time: while one waits, nothing more is.
+    fn ask(&mut self, action: McpAction, working: &str) -> Did {
+        if self.asked.is_some() {
+            return Did::Nothing;
         }
         if let McpAction::Authenticate { name } = &action {
-            self.mcp.sign_ins.insert(name.clone(), None);
+            self.sign_ins.insert(name.clone(), None);
         }
-        self.mcp.pending = Some(action.clone());
-        self.said = None;
-        Outcome::Mcp {
-            action,
-            id: self.mcp.id,
-        }
+        let number = ASKED.fetch_add(1, Ordering::Relaxed);
+        self.notice = Some(Notice::Working(working.to_owned()));
+        self.asked = Some(Asked {
+            number,
+            action: action.clone(),
+            from_form: !matches!(self.view, View::List),
+        });
+        Did::Outcome(Outcome::Mcp { action, id: number })
     }
-    pub(super) fn mcp_row(&self, at: usize) -> RowView {
-        let row = |label: String, help: String, control| RowView {
-            label,
-            help,
-            control,
-            notes: Vec::new(),
-            lock: None,
-        };
-        let button = |label: &str, help: &str, action: &'static str| {
-            row(label.into(), help.into(), ControlView::Button(action))
-        };
-        let pending = self.mcp.pending.is_some();
-        match self.mcp.rows()[at].clone() {
-            Row::Add=>button("Add MCP server","Connect a local stdio process or a remote HTTP service.","Add"),
-            Row::Secret=>button("Private credentials","Store a credential separately from project configuration.","Store credential"),
-            Row::Import(provider)=>button(if provider=="claude"{"Import from Claude Code"}else{"Import from Codex"},"Review servers before importing. Existing provider files are never changed.","Preview import"),
-            Row::Refresh=>button("Refresh","Read changed configuration and current connection status.",if pending{"Working…"}else{"Refresh"}),
-            Row::Server(name)=>{
-                let server=self.mcp.entries.iter().find(|s|s.name==name).expect("listed server");
-                let control=match self.sign_in_button(server){
-                    Some(sign_in)=>ControlView::Buttons{buttons:vec![sign_in,("Manage",true)],at:self.mcp_button(at)},
-                    None=>ControlView::Button("Manage"),
-                };
-                let mut view=row(server.name.clone(),format!("{} · {} · {} tools",state_name(server.state),server.source,server.tools.len()),control);
-                if let Some(failed)=self.sign_in_failed(server){view.notes.push((failed,Ink::Warning));}
-                else if !server.detail.is_empty(){view.notes.push((server.detail.clone(),if server.state==McpState::Error{Ink::Warning}else{Ink::Muted}));}view
-            },
-            Row::Back=>button("Back to servers","Return to the server browser.","Back"),
-            Row::Status=>{let server=self.mcp.selected().expect("server detail");row("Connection".into(),server.detail.clone(),ControlView::Field{text:state_name(server.state).into(),editing:false})},
-            Row::Source=>{let server=self.mcp.selected().expect("server detail");row("Configuration source".into(),server.path.clone(),ControlView::Field{text:server.source.clone(),editing:false})},
-            Row::Definition=>{let server=self.mcp.selected().expect("server detail");row("Server definition".into(),"Review this exact transport and its arguments before approving it.".into(),ControlView::Paragraph{text:server.settings.clone(),editing:false})},
-            Row::Enabled=>row("Enabled".into(),"Bundled entries get a personal override when changed here.".into(),ControlView::Toggle(self.mcp.selected().is_some_and(|s|s.enabled))),
-            Row::ReadOnly=>row("Read-only server".into(),"Your classification allows read-only specialists to use this server; it is not an OS sandbox.".into(),ControlView::Toggle(self.mcp.selected().is_some_and(|s|serde_json::from_str::<Value>(&s.settings).ok().and_then(|v|v.get("read_only").and_then(Value::as_bool))==Some(true)))),
-            Row::Edit=>button("Server configuration","Edit transport, arguments, credential references and timeouts. Bundled definitions are copied to personal configuration.","Edit"),
-            Row::Test=>button("Test connection","Initialize the server and inspect its tools without running any tools.",if pending{"Working…"}else{"Test"}),
-            Row::Reconnect=>button("Reconnect","Reconnect active proxies. Interrupted calls are never replayed. Reopen a chat if its provider already disconnected the proxy.","Reconnect"),
-            Row::Login=>button("Browser sign in","Use OAuth with this server. Command servers take credentials through their environment.","Sign in"),
-            Row::Callback=>button("Complete a remote sign in","If the daemon is on another machine, paste the full callback URL from your browser's address bar.","Paste callback URL"),
-            Row::Forget=>button("Forget browser login","Remove this server's saved OAuth credentials and cancel a pending login.","Forget login"),
-            Row::Trust=>{let s=self.mcp.selected().expect("server detail");button("Approve this definition","Review its configuration before allowing a project or packaged command to start.",if s.trusted{"Approved"}else{"Approve"})},
-            Row::Remove=>button("Remove configuration","Remove this source's entry. A lower-priority definition may become visible.",if self.mcp.removing.is_some(){"Confirm remove"}else{"Remove"}),
-            Row::Tool(index)=>{let tool=&self.mcp.selected().expect("server detail").tools[index];row(tool.name.clone(),tool.description.clone(),ControlView::Field{text:"Tool".into(),editing:false})},
-            Row::Field(field)=>{
-                let editor=self.mcp.editor().expect("editor");
-                if matches!(self.mcp.view,View::Edit(_)) {
-                    let (label,help)=FIELDS[field];
-                    let control=match field {
-                        1=>ControlView::Segmented{labels:vec!["Personal","Project"],picked:Some(usize::from(editor.scope==McpScope::Project))},
-                        2=>ControlView::Segmented{labels:vec!["Command","HTTP"],picked:Some(usize::from(editor.fields[2]=="http"))},
-                        7|8|10=>ControlView::Toggle(editor.fields[field]=="true"),
-                        4..=6=>ControlView::Paragraph{text:display(editor,field,false),editing:editor.editing.as_ref().is_some_and(|e|e.field==field)},
-                        _=>ControlView::Field{text:display(editor,field,false),editing:false},
-                    };row(label.into(),help.into(),control)
-                }else{
-                    let (label,help)=if matches!(self.mcp.view,View::Callback(..)){("Callback URL","Paste the complete redirect URL. It is validated against this login attempt and never logged.")}
-                        else if field==0{("Credential name","Reference it in env or headers with {\"secret\":\"name\"}.")}
-                        else{("Credential value","Masked and saved with owner-only permissions. For an Authorization header, include the Bearer prefix.")};
-                    row(label.into(),help.into(),ControlView::Field{text:display(editor,field,self.mcp.secret_field(field)),editing:false})
+
+    /// Takes in the daemon's answer numbered `number`. Returns a sign in's
+    /// address, to open in the browser, and the row the keys go to, if
+    /// the page shows something else for it.
+    pub(super) fn came(
+        &mut self,
+        number: u64,
+        result: Result<McpReply, String>,
+    ) -> (Option<String>, Option<usize>) {
+        if self.reading == Some(number) {
+            self.reading = None;
+            self.due = Some(Instant::now() + READ_EVERY);
+            match result {
+                Ok(reply) => {
+                    self.problems = reply.notice;
+                    self.listed(reply.servers);
                 }
-            },
-            Row::Save=>button("Save","Validate and save this draft.",if pending{"Saving…"}else{"Save"}),
-            Row::Cancel=>button("Cancel","Discard this draft.","Cancel"),
-            Row::ImportToggle(index)=>{
-                let View::Import{entries,selected,..}=&self.mcp.view else{unreachable!()};let entry=&entries[index];
-                row(entry.name.clone(),entry.description.clone(),ControlView::Toggle(selected.contains(&entry.name)))
-            },
-            Row::ImportCommit=>button("Import selected servers","Store transport credentials privately and create personal definitions. Existing server names are never overwritten.",if pending{"Importing…"}else{"Import selected"}),
+                Err(why) => self.listing = Listing::Unavailable(why),
+            }
+            return (None, None);
+        }
+        let Some(asked) = self.asked.take_if(|asked| asked.number == number) else {
+            // An answer nothing waits for any more.
+            return (None, None);
+        };
+        // Whatever it did, the list is read again: it says what the
+        // servers' files are like now.
+        self.due = Some(Instant::now());
+        match result {
+            Ok(reply) => self.answered(asked, reply),
+            Err(why) => {
+                if let McpAction::Authenticate { name } = &asked.action {
+                    self.sign_ins.insert(name.clone(), Some(why.clone()));
+                }
+                self.notice = Some(Notice::Failed(why));
+                (None, None)
+            }
         }
     }
-    pub(super) fn mcp_act(&mut self, at: usize) -> Outcome {
-        self.mcp_act_part(at, None)
-    }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one arm per server browser, draft or import control"
-    )]
-    pub(super) fn mcp_act_part(&mut self, at: usize, part: Option<Part>) -> Outcome {
-        let Some(row) = self.mcp.rows().get(at).cloned() else {
-            return Outcome::Nothing;
-        };
-        // While an action's asked, only going back or elsewhere; a poll
-        // stops nothing.
-        if (self.mcp.pending.as_ref()).is_some_and(|p| !matches!(p, McpAction::List))
-            && !matches!(row, Row::Back | Row::Cancel | Row::Server(_))
+
+    /// Takes in the servers as the daemon lists them, and what a test
+    /// from here found of each that's still as it was tested.
+    fn listed(&mut self, mut servers: Vec<McpServerInfo>) {
+        servers.sort_by(|a, b| a.name.cmp(&b.name));
+        for server in &mut servers {
+            let Some(tested) = self.tested.get(&server.name) else {
+                continue;
+            };
+            let untouched =
+                tested.revision == server.revision && server.state == McpState::Disconnected;
+            if untouched {
+                server.state = tested.state;
+                server.detail.clone_from(&tested.detail);
+                server.tools.clone_from(&tested.tools);
+            } else if tested.revision != server.revision {
+                self.tested.remove(&server.name);
+            }
+        }
+        self.servers = servers;
+        self.listing = Listing::Ready;
+        // A server's form follows how it's connected; one whose server
+        // has gone goes back to the list.
+        if let View::Server(form) = &mut self.view
+            && let Some(original) = &form.original
         {
-            return Outcome::Nothing;
+            match self
+                .servers
+                .iter()
+                .find(|server| server.name == original.name)
+            {
+                Some(server) => form.follow(server),
+                None if !form.changed() => self.view = View::List,
+                None => {}
+            }
         }
-        match row {
-            Row::Back | Row::Cancel => {
-                self.mcp.view = View::List;
-                self.mcp.removing = None;
-            }
-            Row::Add => self.mcp.view = View::Edit(Editor::new(None)),
-            Row::Secret => self.mcp.view = View::Secret(Editor::plain(2)),
-            Row::Import(provider) => {
-                return self.mcp_request(McpAction::Import {
-                    provider: provider.into(),
-                    names: Vec::new(),
-                });
-            }
-            Row::Refresh => return self.mcp_request(McpAction::List),
-            Row::Server(name) => {
-                // Its Sign in button, if it has one, is the first.
-                let sign_in = (self.mcp.entries.iter())
-                    .find(|s| s.name == name)
-                    .and_then(|server| self.sign_in_button(server));
-                match (sign_in, part) {
-                    (Some((_, true)), Some(Part::Segment(0))) => {
-                        return self.mcp_request(McpAction::Authenticate { name });
-                    }
-                    (Some(_), Some(Part::Segment(0))) => return Outcome::Nothing,
-                    _ => {}
-                }
-                self.mcp.view = View::Details(name);
-                self.mcp.removing = None;
-            }
-            Row::Edit => self.mcp.view = View::Edit(Editor::new(self.mcp.selected().cloned())),
-            Row::Enabled | Row::ReadOnly => {
-                let Some(server) = self.mcp.selected().cloned() else {
-                    return Outcome::Nothing;
-                };
-                let mut settings: Value =
-                    serde_json::from_str(&server.settings).unwrap_or_default();
-                let key = if matches!(row, Row::Enabled) {
-                    "enabled"
-                } else {
-                    "read_only"
-                };
-                settings[key] = json!(!settings.get(key).and_then(Value::as_bool).unwrap_or(false));
-                return self.mcp_request(McpAction::Save {
-                    name: server.name,
-                    settings: settings.to_string(),
-                    scope: if server.editable {
-                        server.scope
-                    } else {
-                        McpScope::Personal
-                    },
-                    expected: Some(server.revision),
-                });
-            }
-            Row::Test
-            | Row::Reconnect
-            | Row::Login
-            | Row::Forget
-            | Row::Trust
-            | Row::Remove
-            | Row::Callback => {
-                let Some(server) = self.mcp.selected().cloned() else {
-                    return Outcome::Nothing;
-                };
-                let action = match row {
-                    Row::Test => McpAction::Test { name: server.name },
-                    Row::Reconnect => McpAction::Reconnect { name: server.name },
-                    Row::Login => McpAction::Authenticate { name: server.name },
-                    Row::Forget => McpAction::ForgetAuth { name: server.name },
-                    Row::Trust => {
-                        if server.trusted {
-                            return Outcome::Nothing;
-                        }
-                        McpAction::Trust {
-                            name: server.name,
-                            expected: server.revision,
-                        }
-                    }
-                    Row::Remove => {
-                        if self.mcp.removing.as_ref()
-                            != Some(&(server.name.clone(), server.revision.clone()))
-                        {
-                            self.mcp.removing = Some((server.name, server.revision));
-                            self.said=Some(("Remove this definition? Press Confirm remove, or go Back to cancel.".into(),true));
-                            return Outcome::Changed;
-                        }
-                        self.mcp.removing = None;
-                        McpAction::Remove {
-                            name: server.name,
-                            expected: server.revision,
-                        }
-                    }
-                    Row::Callback => {
-                        self.mcp.view = View::Callback(server.name, Editor::plain(1));
-                        self.specialist_focus(0, None);
-                        return Outcome::Changed;
-                    }
-                    _ => unreachable!(),
-                };
-                return self.mcp_request(action);
-            }
-            Row::Field(field) => {
-                let edit = matches!(self.mcp.view, View::Edit(_));
-                let editor = self.mcp.editor_mut().expect("editor");
-                if edit {
-                    match field {
-                        0 if editor.original.as_ref().is_some_and(|s| s.editable) => {
-                            return Outcome::Nothing;
-                        }
-                        1 => {
-                            if editor.original.as_ref().is_some_and(|s| s.editable) {
-                                return Outcome::Nothing;
-                            }
-                            editor.scope = if matches!(part, Some(Part::Segment(1)))
-                                || part.is_none() && editor.scope == McpScope::Personal
-                            {
-                                McpScope::Project
-                            } else {
-                                McpScope::Personal
-                            };
-                            return Outcome::Changed;
-                        }
-                        2 => {
-                            editor.fields[2] = if matches!(part, Some(Part::Segment(1)))
-                                || part.is_none() && editor.fields[2] == "stdio"
-                            {
-                                "http"
-                            } else {
-                                "stdio"
-                            }
-                            .into();
-                            return Outcome::Changed;
-                        }
-                        7 | 8 | 10 => {
-                            editor.fields[field] = (editor.fields[field] != "true").to_string();
-                            return Outcome::Changed;
-                        }
-                        _ => {}
-                    }
-                }
-                editor.editing = Some(Text {
-                    field,
-                    cursor: editor.fields[field].len(),
-                    before: editor.fields[field].clone(),
-                });
-                return Outcome::Changed;
-            }
-            Row::Save => {
-                let action = match &self.mcp.view {
-                    View::Edit(editor) => editor.action(),
-                    View::Secret(editor) => Ok(McpAction::Secret {
-                        name: editor.fields[0].trim().into(),
-                        value: editor.fields[1].clone(),
-                    }),
-                    View::Callback(name, editor) => Ok(McpAction::CompleteLogin {
-                        name: name.clone(),
-                        url: editor.fields[0].trim().into(),
-                    }),
-                    _ => return Outcome::Nothing,
-                };
-                return match action {
-                    Ok(action) => self.mcp_request(action),
-                    Err(why) => {
-                        self.said = Some((why, true));
-                        Outcome::Changed
-                    }
-                };
-            }
-            Row::ImportToggle(index) => {
-                let View::Import {
-                    entries, selected, ..
-                } = &mut self.mcp.view
-                else {
-                    return Outcome::Nothing;
-                };
-                let entry = &entries[index];
-                if entry.description.starts_with("Cannot import") {
-                    self.said = Some((entry.description.clone(), true));
-                    return Outcome::Changed;
-                }
-                if !selected.remove(&entry.name) {
-                    selected.insert(entry.name.clone());
-                }
-                return Outcome::Changed;
-            }
-            Row::ImportCommit => {
-                let View::Import {
-                    provider, selected, ..
-                } = &self.mcp.view
-                else {
-                    return Outcome::Nothing;
-                };
-                if selected.is_empty() {
-                    self.said = Some(("Select at least one server to import.".into(), true));
-                    return Outcome::Changed;
-                }
-                return self.mcp_request(McpAction::Import {
-                    provider: provider.clone(),
-                    names: selected.iter().cloned().collect(),
-                });
-            }
-            Row::Status | Row::Source | Row::Definition | Row::Tool(_) => return Outcome::Nothing,
-        }
-        self.specialist_focus(0, None);
-        Outcome::Changed
     }
+
+    /// Takes in what `asked` came to, the daemon having done it.
+    fn answered(&mut self, asked: Asked, reply: McpReply) -> (Option<String>, Option<usize>) {
+        let Asked {
+            action, from_form, ..
+        } = asked;
+        let mut went = None;
+        match action {
+            McpAction::List => {}
+            McpAction::Save { name, .. } => {
+                self.listed(reply.servers);
+                self.notice = Some(Notice::Done(format!(
+                    "Saved {name}. Chats started from now on use it as it is now."
+                )));
+                went = self.back_to_list(from_form, Some(&name));
+            }
+            McpAction::Remove { name, .. } => {
+                self.listed(reply.servers);
+                self.notice = Some(Notice::Done(format!("Removed {name}.")));
+                went = self.back_to_list(from_form, None);
+            }
+            McpAction::Secret { name, value } => {
+                self.listed(reply.servers);
+                self.notice = Some(Notice::Done(if value.is_empty() {
+                    format!("Removed the private credential {name}.")
+                } else {
+                    format!("Saved the private credential {name}.")
+                }));
+                went = self.back_to_list(from_form, None);
+            }
+            McpAction::Import { provider, names } if names.is_empty() => {
+                self.notice = None;
+                if let Some(provider) = Provider::named(&provider) {
+                    self.view = View::Import {
+                        provider,
+                        picked: vec![false; reply.imports.len()],
+                        candidates: reply.imports,
+                    };
+                    self.typing = None;
+                    went = Some(0);
+                }
+            }
+            McpAction::Import { names, .. } => {
+                self.listed(reply.servers);
+                self.notice = Some(Notice::Done(format!(
+                    "Copied {} over. The agent's own settings are as they were.",
+                    form::counted(names.len(), "server", "servers")
+                )));
+                went = self.back_to_list(from_form, names.first().map(String::as_str));
+            }
+            McpAction::Test { name } | McpAction::Reconnect { name } => {
+                // The daemon answers with the one server, as the test left it.
+                let found = reply.servers.into_iter().find(|server| server.name == name);
+                if let Some(server) = found {
+                    self.tested(server);
+                }
+            }
+            McpAction::Trust { name, .. } => {
+                self.listed(reply.servers);
+                self.notice = Some(Notice::Done(format!(
+                    "{name} is enabled on this machine, as it is now."
+                )));
+            }
+            McpAction::ForgetAuth { name } => {
+                self.listed(reply.servers);
+                self.sign_ins.remove(&name);
+                self.notice = Some(Notice::Done(format!("Forgot the sign in for {name}.")));
+            }
+            McpAction::Authenticate { name } => {
+                // One that never got as far as the browser failed.
+                let Some(url) = reply.login_url else {
+                    self.sign_ins.insert(name, Some(reply.notice.clone()));
+                    self.notice = Some(Notice::Failed(reply.notice));
+                    return (None, None);
+                };
+                self.notice = Some(Notice::Done(format!(
+                    "Finish signing in to {name} in your browser."
+                )));
+                return (Some(url), None);
+            }
+            McpAction::CompleteLogin { name, .. } => {
+                self.notice = Some(Notice::Done(format!("Signed in to {name}.")));
+                if from_form && let View::Callback { .. } = &self.view {
+                    let View::Callback { form, .. } = std::mem::replace(&mut self.view, View::List)
+                    else {
+                        unreachable!("it was just seen")
+                    };
+                    self.view = View::Server(form);
+                    self.typing = None;
+                    went = Some(0);
+                }
+            }
+        }
+        (None, went)
+    }
+
+    /// Takes in `server` as a test from here left it: how it went is
+    /// said, and kept to show while the server is as it was tested, since
+    /// the daemon keeps none of it; the other servers stay as listed.
+    fn tested(&mut self, server: McpServerInfo) {
+        let name = server.name.clone();
+        self.notice = Some(match server.state {
+            McpState::Ready => Notice::Done(format!(
+                "{name} answered, with {}.",
+                form::counted(server.tools.len(), "tool", "tools")
+            )),
+            McpState::NeedsLogin => {
+                Notice::Done(format!("{name} answered that it needs a sign in."))
+            }
+            _ => Notice::Failed(format!("{name} didn't answer: {}", server.detail)),
+        });
+        self.tested.insert(
+            name.clone(),
+            Tested {
+                revision: server.revision.clone(),
+                state: server.state,
+                detail: server.detail.clone(),
+                tools: server.tools.clone(),
+            },
+        );
+        let mut servers = std::mem::take(&mut self.servers);
+        servers.retain(|each| each.name != name);
+        servers.push(server);
+        self.listed(servers);
+    }
+
+    /// Shows the list again, if the form that asked for something is
+    /// still the one shown, `from_form`. Returns the row the keys go to
+    /// then: server `name`'s, if it's given and listed.
+    fn back_to_list(&mut self, from_form: bool, name: Option<&str>) -> Option<usize> {
+        if !from_form {
+            return None;
+        }
+        self.view = View::List;
+        self.typing = None;
+        Some(name.and_then(|name| self.place(name)).unwrap_or(0))
+    }
+
+    /// The sections shown, each its heading, a sentence under it, and its
+    /// rows.
+    fn laid(&self) -> Vec<(&'static str, Option<String>, Vec<Row>)> {
+        match &self.view {
+            View::List => {
+                if self.listing != Listing::Ready {
+                    return Vec::new();
+                }
+                let servers: Vec<Row> = (self.servers.iter())
+                    .map(|server| Row::Server(server.name.clone()))
+                    .collect();
+                let none = servers.is_empty().then(|| {
+                    "No servers yet. Add one, or copy over the ones Claude Code or Codex \
+                     already use."
+                        .to_owned()
+                });
+                vec![
+                    ("Servers", none, servers),
+                    (
+                        "More",
+                        None,
+                        vec![
+                            Row::Credential,
+                            Row::Import(Provider::Claude),
+                            Row::Import(Provider::Codex),
+                        ],
+                    ),
+                ]
+            }
+            View::Server(form) => self.server_laid(form),
+            View::Credential { .. } => {
+                vec![("", None, vec![Row::CredentialName, Row::CredentialValue])]
+            }
+            View::Callback { .. } => vec![("", None, vec![Row::CallbackUrl])],
+            View::Import {
+                provider,
+                candidates,
+                ..
+            } => {
+                let none = candidates
+                    .is_empty()
+                    .then(|| format!("{} has no servers of its own to copy.", provider.title()));
+                vec![(
+                    "Servers to copy",
+                    none,
+                    (0..candidates.len()).map(Row::Candidate).collect(),
+                )]
+            }
+        }
+    }
+
+    /// The sections of a server's form: what can be done about how it's
+    /// connected, by how it's reached and how it is now; its fields; its
+    /// tools; and removing it, if it's the user's to remove.
+    fn server_laid(&self, form: &ServerForm) -> Vec<(&'static str, Option<String>, Vec<Row>)> {
+        let fields: Vec<Row> = form.fields().into_iter().map(Row::Field).collect();
+        let Some(server) = &form.original else {
+            return vec![("", None, fields)];
+        };
+        let mut connection = vec![Row::Status];
+        let http = server::over_http(server);
+        if !server.trusted {
+            connection.push(Row::Review);
+        } else if server.enabled {
+            connection.push(Row::Test);
+            let live = matches!(
+                server.state,
+                McpState::Connected | McpState::Starting | McpState::Error
+            );
+            if live {
+                connection.push(Row::Reconnect);
+            }
+            if http {
+                if self.sign_in_button(server).is_some() || server::signs_in(server) {
+                    connection.push(Row::SignIn);
+                }
+                if server.signing_in {
+                    connection.push(Row::FinishSignIn);
+                }
+                if server.state != McpState::NeedsLogin && !server.signing_in {
+                    connection.push(Row::ForgetLogin);
+                }
+            }
+        }
+        let mut sections = vec![("Connection", None, connection), ("Server", None, fields)];
+        if !server.tools.is_empty() {
+            sections.push((
+                "Tools",
+                None,
+                (0..server.tools.len()).map(Row::Tool).collect(),
+            ));
+        }
+        if server.editable {
+            sections.push(("Remove", None, vec![Row::Remove]));
+        }
+        sections
+    }
+
+    /// Every row shown, in order.
+    fn rows(&self) -> Vec<Row> {
+        (self.laid().into_iter())
+            .flat_map(|(_, _, rows)| rows)
+            .collect()
+    }
+
+    /// Where server `name`'s row is in the list.
+    fn place(&self, name: &str) -> Option<usize> {
+        (self.rows().iter()).position(|row| matches!(row, Row::Server(each) if each == name))
+    }
+
     /// What server `server`'s Sign in button says, and whether it acts:
     /// none unless it needs a sign in, or one from here is going or done.
-    fn sign_in_button(&self, server: &McpServerInfo) -> Option<(&'static str, bool)> {
-        let asked = matches!(
-            &self.mcp.pending,
-            Some(McpAction::Authenticate { name }) if *name == server.name
+    fn sign_in_button(&self, server: &McpServerInfo) -> Option<ButtonView> {
+        let asked = self.asking(
+            |action| matches!(action, McpAction::Authenticate { name } if *name == server.name),
         );
         if server.signing_in || asked {
-            Some(("Signing in…", false))
+            Some(ButtonView::plain("Signing in…").disabled())
         } else if server.state == McpState::NeedsLogin {
-            Some(("Sign in", true))
-        } else if self.mcp.sign_ins.get(&server.name) == Some(&None)
+            Some(ButtonView::main("Sign in"))
+        } else if self.sign_ins.get(&server.name) == Some(&None)
             && matches!(server.state, McpState::Ready | McpState::Connected)
         {
-            Some(("Signed in", false))
+            Some(ButtonView::plain("Signed in").disabled())
         } else {
             None
         }
@@ -706,278 +638,686 @@ impl SettingsMenu {
         if server.signing_in || server.state != McpState::NeedsLogin {
             return None;
         }
-        match self.mcp.sign_ins.get(&server.name)? {
+        match self.sign_ins.get(&server.name)? {
             Some(why) if !why.is_empty() => Some(why.clone()),
             // Failed in the browser, which the daemon says.
             _ => (!server.detail.is_empty()).then(|| server.detail.clone()),
         }
     }
 
-    /// The button the keys are on in row `at`, of a row of buttons.
-    fn mcp_button(&self, at: usize) -> usize {
-        let (row, button) = self.mcp.button;
-        if row == at { button } else { 0 }
+    /// The buttons of server `server`'s row in the list: Sign in, if it
+    /// has one, then Open.
+    fn list_buttons(&self, server: &McpServerInfo) -> Vec<ButtonView> {
+        (self.sign_in_button(server).into_iter())
+            .chain([ButtonView::plain("Open")])
+            .collect()
     }
 
-    /// Enter on row `at`: the button the keys are on, of a row of them.
-    pub(super) fn mcp_enter(&mut self, at: usize) -> Outcome {
-        let buttons = matches!(self.mcp_row(at).control, ControlView::Buttons { .. });
-        let part = buttons.then(|| Part::Segment(u8::try_from(self.mcp_button(at)).unwrap_or(0)));
-        self.mcp_act_part(at, part)
+    /// The button the keys are on, of `server`'s row in the list: Open,
+    /// its last, unless they've been moved.
+    fn button_on(&self, server: &McpServerInfo) -> usize {
+        let buttons = self.list_buttons(server);
+        let last = buttons.len() - 1;
+        match &self.button {
+            // One that can't be pressed any more isn't where the keys stay.
+            Some((name, at))
+                if *name == server.name && buttons.get(*at).is_some_and(|b| b.enabled) =>
+            {
+                *at
+            }
+            _ => last,
+        }
     }
 
-    /// `l` or `h` on row `at`: the keys go to the next of its buttons,
-    /// or the one before.
-    pub(super) fn mcp_step(&mut self, at: usize, by: isize) -> Outcome {
-        let ControlView::Buttons { buttons, .. } = self.mcp_row(at).control else {
-            return Outcome::Nothing;
+    /// Opens server `name`'s form.
+    fn open(&mut self, name: &str) -> Did {
+        let Some(server) = self.server(name).cloned() else {
+            return Did::Nothing;
         };
-        let button = (self.mcp_button(at).saturating_add_signed(by)).min(buttons.len() - 1);
-        if button == self.mcp_button(at) {
-            return Outcome::Nothing;
-        }
-        self.mcp.button = (at, button);
-        Outcome::Changed
+        self.view = View::Server(Box::new(ServerForm::new(Some(server))));
+        self.typing = None;
+        self.notice = None;
+        // To the first thing there is to do: review it, or test it.
+        let first = (self.drawn().iter()).position(|row| row.control != ControlView::None);
+        Did::Went(first.unwrap_or(0))
     }
 
-    pub(super) fn mcp_paste(&mut self, text: &str) -> Outcome {
-        if self
-            .mcp
-            .pending
-            .as_ref()
-            .is_some_and(|p| !matches!(p, McpAction::List))
-        {
-            return Outcome::Nothing;
+    /// Opens server `name`'s form, as a search that found it does.
+    pub(super) fn open_named(&mut self, name: &str) -> Option<usize> {
+        match self.open(name) {
+            Did::Went(row) => Some(row),
+            _ => None,
         }
-        let multi = matches!(self.mcp.view, View::Edit(_));
-        let Some(editor) = self.mcp.editor_mut() else {
-            return Outcome::Nothing;
-        };
-        let Some(edit) = &mut editor.editing else {
-            return Outcome::Nothing;
-        };
-        let text = if multi && (4..=6).contains(&edit.field) {
-            text.replace('\r', "")
-        } else {
-            text.replace(['\r', '\n'], " ")
-        };
-        if editor.fields[edit.field].len() + text.len() > 64 * 1024 {
-            return Outcome::Nothing;
-        }
-        editor.fields[edit.field].insert_str(edit.cursor, &text);
-        edit.cursor += text.len();
-        Outcome::Changed
     }
-    pub(super) fn mcp_key(&mut self, stroke: Stroke) -> Outcome {
-        if self
-            .mcp
-            .pending
-            .as_ref()
-            .is_some_and(|p| !matches!(p, McpAction::List))
-        {
-            return Outcome::Nothing;
-        }
-        let multi = matches!(self.mcp.view, View::Edit(_));
-        let Some(editor) = self.mcp.editor_mut() else {
-            return Outcome::Nothing;
-        };
-        let Some(edit) = &mut editor.editing else {
-            return Outcome::Nothing;
-        };
-        let text = &mut editor.fields[edit.field];
-        let prev = |s: &str, c: usize| s[..c].char_indices().next_back().map_or(0, |(i, _)| i);
-        let next = |s: &str, c: usize| s[c..].chars().next().map_or(c, |ch| c + ch.len_utf8());
-        match stroke {
-            Stroke::Escape => {
-                text.clone_from(&edit.before);
-                editor.editing = None;
-            }
-            Stroke::Enter | Stroke::Tab => editor.editing = None,
-            Stroke::Left => edit.cursor = prev(text, edit.cursor),
-            Stroke::Right => edit.cursor = next(text, edit.cursor),
-            Stroke::Home => edit.cursor = text[..edit.cursor].rfind('\n').map_or(0, |i| i + 1),
-            Stroke::End => {
-                edit.cursor = text[edit.cursor..]
-                    .find('\n')
-                    .map_or(text.len(), |i| edit.cursor + i);
-            }
-            Stroke::Up | Stroke::Down => {
-                edit.cursor =
-                    super::specialists::vertical_cursor(text, edit.cursor, stroke == Stroke::Up);
-            }
-            Stroke::Backspace => {
-                let from = prev(text, edit.cursor);
-                text.drain(from..edit.cursor);
-                edit.cursor = from;
-            }
-            Stroke::Delete => {
-                let to = next(text, edit.cursor);
-                text.drain(edit.cursor..to);
-            }
-            Stroke::Char {
-                ch: 'a',
-                ctrl: true,
-            } => edit.cursor = 0,
-            Stroke::Char {
-                ch: 'e',
-                ctrl: true,
-            } => edit.cursor = text.len(),
-            Stroke::Char {
-                ch: 'u',
-                ctrl: true,
-            } => {
-                text.clear();
-                edit.cursor = 0;
-            }
-            Stroke::Char {
-                ch: 'j',
-                ctrl: true,
-            } if multi && (4..=6).contains(&edit.field) => return self.mcp_paste("\n"),
-            Stroke::Char { ch, ctrl: false } => return self.mcp_paste(&ch.to_string()),
-            _ => {}
-        }
-        Outcome::Changed
-    }
-}
 
-impl Editor {
-    fn plain(count: usize) -> Self {
-        Self {
-            fields: vec![String::new(); count],
-            editing: None,
-            original: None,
-            scope: McpScope::Personal,
+    /// A row of the list, as it's drawn.
+    fn list_row(&self, row: &Row) -> RowView {
+        match row {
+            Row::Server(name) => {
+                let Some(server) = self.server(name) else {
+                    return RowView::new(name.as_str(), "", ControlView::None);
+                };
+                let (state, ink) = server::state_said(server);
+                // Where it's from, its tools once it's said them, and what
+                // it runs or where it is.
+                let tools = (!server.tools.is_empty())
+                    .then(|| form::counted(server.tools.len(), "tool", "tools"));
+                let help = [Some(server::source_said(server)), tools]
+                    .into_iter()
+                    .flatten()
+                    .chain([server::reaches(server)])
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let buttons = self.list_buttons(server);
+                let control = ControlView::Buttons {
+                    at: self.button_on(server),
+                    buttons,
+                };
+                let view = RowView::new(name.as_str(), help, control).with_status(state, ink);
+                if let Some(failed) = self.sign_in_failed(server) {
+                    view.noted(failed, Ink::Warning)
+                } else if server.detail.is_empty() || !server.trusted {
+                    // What needs review says so beside its button.
+                    view
+                } else if server.state == McpState::Error {
+                    view.noted(&server.detail, Ink::Warning)
+                } else {
+                    view.noted(&server.detail, Ink::Muted)
+                }
+            }
+            Row::Credential => RowView::new(
+                "Private credential",
+                format!(
+                    "A token or password a server needs, kept {}, out of the project's files. A \
+                     server's environment or headers name it.",
+                    self.kept_where()
+                ),
+                ControlView::Button(ButtonView::plain("Add")),
+            ),
+            Row::Import(provider) => {
+                let asked = self.asking(|action| {
+                    matches!(action, McpAction::Import { provider: name, .. } if name == provider.name())
+                });
+                RowView::new(
+                    format!("Copy servers from {}", provider.title()),
+                    "Pick which of its own servers to add here. Its settings aren't changed.",
+                    ControlView::Button(server::asking("Choose", "Reading…", asked, Look::Plain)),
+                )
+            }
+            _ => RowView::new("", "", ControlView::None),
         }
     }
-    fn new(original: Option<McpServerInfo>) -> Self {
-        let config = original
-            .as_ref()
-            .and_then(|s| serde_json::from_str::<Value>(&s.settings).ok())
-            .unwrap_or(Value::Null);
-        let http = config.get("url").and_then(Value::as_str).is_some();
-        let serialize = |key: &str, default: Value| {
-            serde_json::to_string_pretty(config.get(key).unwrap_or(&default))
-                .expect("JSON serializes")
+
+    /// Where private credentials are kept, as a row says it.
+    fn kept_where(&self) -> String {
+        match &self.machine {
+            Some(machine) => format!("on {machine}"),
+            None => "on this machine".into(),
+        }
+    }
+
+    /// A row of a server's form that isn't one of its fields, as it's
+    /// drawn.
+    #[allow(clippy::too_many_lines, reason = "each row's words")]
+    fn server_row(&self, form: &ServerForm, row: &Row) -> RowView {
+        let Some(server) = &form.original else {
+            return RowView::new("", "", ControlView::None);
         };
-        let fields = vec![
-            original
-                .as_ref()
-                .map_or_else(String::new, |s| s.name.clone()),
-            String::new(),
-            if http { "http" } else { "stdio" }.into(),
-            config
-                .get(if http { "url" } else { "command" })
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .into(),
-            serialize("args", json!([])),
-            serialize("env", json!({})),
-            serialize("headers", json!({})),
-            config
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true)
-                .to_string(),
-            config
-                .get("read_only")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                .to_string(),
-            config
-                .get("timeout_seconds")
-                .and_then(Value::as_u64)
-                .unwrap_or(30)
-                .to_string(),
-            (!config.get("oauth").unwrap_or(&Value::Null).is_null()).to_string(),
-            config
-                .pointer("/oauth/client_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .into(),
-            config
-                .pointer("/oauth/scopes")
-                .and_then(Value::as_array)
-                .map_or_else(String::new, |scopes| {
-                    scopes
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" ")
+        let name = &server.name;
+        let button = |button: ButtonView| ControlView::Button(button);
+        match row {
+            Row::Status => {
+                let (state, ink) = server::state_said(server);
+                let meaning = if server.detail.is_empty() || !server.trusted {
+                    server::state_meaning(server).to_owned()
+                } else {
+                    server.detail.clone()
+                };
+                let view =
+                    RowView::new("Connection", meaning, ControlView::None).with_status(state, ink);
+                match self.sign_in_failed(server) {
+                    Some(failed) if failed != server.detail => view.noted(failed, Ink::Warning),
+                    _ => view,
+                }
+            }
+            Row::Review => RowView::new(
+                "Review and enable",
+                "It comes from the project or a package, so it runs nothing until you allow it. \
+                 Check what it runs, below, then enable it on this machine as it is now.",
+                button(server::asking(
+                    "Enable",
+                    "Enabling…",
+                    self.asking(|action| matches!(action, McpAction::Trust { .. })),
+                    Look::Main,
+                )),
+            ),
+            Row::Test => RowView::new(
+                "Test",
+                "Connects to it and lists its tools, without using any.",
+                button(server::asking(
+                    "Test",
+                    "Testing…",
+                    self.asking(|action| matches!(action, McpAction::Test { .. })),
+                    Look::Plain,
+                )),
+            ),
+            Row::Reconnect => RowView::new(
+                "Reconnect",
+                "Drops the chats' connections to it, for them to connect again. A call under \
+                 way isn't sent twice.",
+                button(server::asking(
+                    "Reconnect",
+                    "Reconnecting…",
+                    self.asking(|action| matches!(action, McpAction::Reconnect { .. })),
+                    Look::Plain,
+                )),
+            ),
+            Row::SignIn => RowView::new(
+                "Sign in",
+                "Opens its sign in in your browser.",
+                button(
+                    self.sign_in_button(server)
+                        .unwrap_or_else(|| ButtonView::plain("Sign in")),
+                ),
+            ),
+            Row::FinishSignIn => RowView::new(
+                "Finish a sign in from another machine",
+                "If the browser ends on a page that won't load, copy that page's address and \
+                 paste it here.",
+                button(ButtonView::plain("Paste the address")),
+            ),
+            Row::ForgetLogin => RowView::new(
+                "Forget the sign in",
+                format!(
+                    "Removes the login saved for {name} {}. Chats using it are cut off until \
+                     you sign in again.",
+                    self.kept_where()
+                ),
+                button(if form.forgetting {
+                    ButtonView::danger("Really forget")
+                } else {
+                    ButtonView::plain("Forget")
                 }),
-        ];
-        let scope = original
-            .as_ref()
-            .filter(|s| s.editable)
-            .map_or(McpScope::Personal, |s| s.scope);
-        Self {
-            fields,
-            editing: None,
-            original,
-            scope,
+            ),
+            Row::Tool(at) => match server.tools.get(*at) {
+                Some(tool) => RowView::new(
+                    tool.name.as_str(),
+                    tool.description.as_str(),
+                    ControlView::None,
+                ),
+                None => RowView::new("", "", ControlView::None),
+            },
+            Row::Remove => RowView::new(
+                format!("Remove {name}"),
+                format!("Takes it out of {}.", form::tilde(&server.path, &self.home)),
+                button(if form.removing {
+                    ButtonView::danger("Really remove")
+                } else {
+                    ButtonView::plain("Remove")
+                }),
+            ),
+            _ => RowView::new("", "", ControlView::None),
         }
     }
-    fn action(&self) -> Result<McpAction, String> {
-        let f = &self.fields;
-        let name = f[0].trim();
-        if name.is_empty() {
-            return Err("Give the server a name.".into());
-        }
-        let timeout = f[9]
-            .parse::<u32>()
-            .map_err(|_| "Request timeout must be a number")?;
-        let mut config =
-            json!({"enabled":f[7]=="true","read_only":f[8]=="true","timeout_seconds":timeout});
-        if f[2] == "http" {
-            config["url"] = json!(f[3].trim());
-            config["headers"] =
-                serde_json::from_str(&f[6]).map_err(|_| "HTTP headers must be a JSON object")?;
-            if f[10] == "true" {
-                config["oauth"] = json!({"client_id":if f[11].trim().is_empty(){None}else{Some(f[11].trim())},"scopes":f[12].split_whitespace().collect::<Vec<_>>()});
+
+    /// Presses a row of a server's form that isn't one of its fields.
+    fn press_server(&mut self, row: &Row) -> Did {
+        let View::Server(form) = &mut self.view else {
+            return Did::Nothing;
+        };
+        let Some(server) = form.original.clone() else {
+            return Did::Nothing;
+        };
+        let name = server.name.clone();
+        // A second press is only of the button pressed first.
+        let (removing, forgetting) = (form.removing, form.forgetting);
+        form.removing = false;
+        form.forgetting = false;
+        match row {
+            Row::Review => self.ask(
+                McpAction::Trust {
+                    name,
+                    expected: server.revision,
+                },
+                "Enabling it…",
+            ),
+            Row::Test => self.ask(McpAction::Test { name }, "Testing it…"),
+            Row::Reconnect => self.ask(McpAction::Reconnect { name }, "Reconnecting…"),
+            Row::SignIn => self.ask(
+                McpAction::Authenticate { name },
+                "Opening its sign in in your browser…",
+            ),
+            Row::FinishSignIn => {
+                let View::Server(form) = std::mem::replace(&mut self.view, View::List) else {
+                    return Did::Nothing;
+                };
+                self.view = View::Callback {
+                    form,
+                    url: String::new(),
+                };
+                self.typing = None;
+                Did::Went(0)
             }
-        } else {
-            config["command"] = json!(f[3].trim());
-            config["args"] =
-                serde_json::from_str(&f[4]).map_err(|_| "Arguments must be a JSON array")?;
-            config["env"] =
-                serde_json::from_str(&f[5]).map_err(|_| "Environment must be a JSON object")?;
+            Row::ForgetLogin if !forgetting => {
+                form.forgetting = true;
+                self.notice = Some(Notice::Confirm(format!(
+                    "Forget the sign in for {name}? Press Really forget."
+                )));
+                Did::Changed
+            }
+            Row::ForgetLogin => self.ask(McpAction::ForgetAuth { name }, "Forgetting it…"),
+            Row::Remove if !removing => {
+                form.removing = true;
+                self.notice = Some(Notice::Confirm(format!(
+                    "Remove {name}? Press Really remove."
+                )));
+                Did::Changed
+            }
+            Row::Remove => self.ask(
+                McpAction::Remove {
+                    name,
+                    expected: server.revision,
+                },
+                "Removing it…",
+            ),
+            _ => Did::Nothing,
         }
-        Ok(McpAction::Save {
-            name: name.into(),
-            settings: config.to_string(),
-            scope: self.scope,
-            expected: self
-                .original
-                .as_ref()
-                .filter(|s| s.name == name)
-                .map(|s| s.revision.clone()),
+    }
+
+    /// A row of the form to copy servers over, as it's drawn.
+    fn candidate_row(&self, at: usize) -> RowView {
+        let View::Import {
+            candidates, picked, ..
+        } = &self.view
+        else {
+            return RowView::new("", "", ControlView::None);
+        };
+        match candidates.get(at) {
+            Some(candidate) => RowView::new(
+                candidate.name.as_str(),
+                candidate.description.as_str(),
+                ControlView::Toggle(picked.get(at).copied().unwrap_or(false)),
+            ),
+            None => RowView::new("", "", ControlView::None),
+        }
+    }
+
+    /// A box of text that's drawn as dots: `value`, on row `at`.
+    fn masked(&self, value: &str, at: usize, hint: &'static str) -> ControlView {
+        ControlView::Field(FieldView {
+            masked: true,
+            wide: true,
+            hint,
+            ..form::field(value, at, self.typing.as_ref())
         })
     }
 }
-fn display(editor: &Editor, field: usize, secret: bool) -> String {
-    if secret {
-        return if editor.fields[field].is_empty() {
-            String::new()
-        } else {
-            "•".repeat(editor.fields[field].chars().count().min(24))
+
+impl Catalogue for Mcp {
+    fn sections(&self) -> Vec<(&'static str, Option<String>, usize)> {
+        (self.laid().into_iter())
+            .map(|(heading, note, rows)| (heading, note, rows.len()))
+            .collect()
+    }
+
+    fn drawn(&self) -> Vec<RowView> {
+        let typing = self.typing.as_ref();
+        (self.rows().iter().enumerate())
+            .map(|(at, row)| match (&self.view, row) {
+                (View::Server(form), Row::Field(field)) => form.row(*field, at, typing, &self.home),
+                (View::Server(form), row) => self.server_row(form, row),
+                (View::Credential { name, .. }, Row::CredentialName) => RowView::new(
+                    "Name",
+                    "What a server's environment or headers call it, as {\"secret\": \"name\"}.",
+                    ControlView::Field(FieldView {
+                        hint: "docs-token",
+                        ..form::field(name, at, typing)
+                    }),
+                ),
+                (View::Credential { value, .. }, Row::CredentialValue) => RowView::new(
+                    "Value",
+                    "Shown as dots, and never shown again. For an Authorization header, start \
+                     it with Bearer and a blank. Left empty, the credential of that name is \
+                     removed.",
+                    self.masked(value, at, "empty"),
+                ),
+                (View::Callback { url, .. }, Row::CallbackUrl) => RowView::new(
+                    "Address the browser ended on",
+                    "All of it, from the address bar. It's checked against this sign in, shown \
+                     as dots, and kept nowhere.",
+                    self.masked(url, at, "http://127.0.0.1…"),
+                ),
+                (View::Import { .. }, Row::Candidate(candidate)) => self.candidate_row(*candidate),
+                (_, row) => self.list_row(row),
+            })
+            .collect()
+    }
+
+    fn press(&mut self, at: usize, part: Option<Part>) -> Did {
+        let Some(row) = self.rows().get(at).cloned() else {
+            return Did::Nothing;
         };
+        let choice = match part {
+            Some(Part::Segment(choice)) => Some(usize::from(choice)),
+            _ => None,
+        };
+        // A press of anything else takes back the first press of a button
+        // that asks for a second.
+        if let View::Server(form) = &mut self.view
+            && !matches!(row, Row::Remove | Row::ForgetLogin)
+        {
+            form.removing = false;
+            form.forgetting = false;
+        }
+        match row {
+            Row::Server(name) => {
+                let Some(server) = self.server(&name) else {
+                    return Did::Nothing;
+                };
+                let buttons = self.list_buttons(server);
+                let pressed = choice.unwrap_or_else(|| self.button_on(server));
+                // Its last button opens it; the one before signs in.
+                if pressed + 1 >= buttons.len() {
+                    return self.open(&name);
+                }
+                if !buttons[pressed].enabled {
+                    return Did::Nothing;
+                }
+                self.ask(
+                    McpAction::Authenticate { name },
+                    "Opening its sign in in your browser…",
+                )
+            }
+            Row::Credential => {
+                self.view = View::Credential {
+                    name: String::new(),
+                    value: String::new(),
+                };
+                self.typing = None;
+                self.notice = None;
+                Did::Went(0)
+            }
+            Row::Import(provider) => self.ask(
+                McpAction::Import {
+                    provider: provider.name().into(),
+                    names: Vec::new(),
+                },
+                "Reading its servers…",
+            ),
+            Row::Field(field) => match &mut self.view {
+                View::Server(form) => changed(form.press(field, choice)),
+                _ => Did::Nothing,
+            },
+            Row::Candidate(candidate) => {
+                if let View::Import { picked, .. } = &mut self.view
+                    && let Some(picked) = picked.get_mut(candidate)
+                {
+                    *picked = !*picked;
+                    return Did::Changed;
+                }
+                Did::Nothing
+            }
+            row => self.press_server(&row),
+        }
     }
-    let mut text = editor.fields[field].clone();
-    if let Some(edit) = &editor.editing
-        && edit.field == field
-    {
-        text.insert(edit.cursor, '│');
+
+    fn step(&mut self, at: usize, by: isize) -> Did {
+        let Some(row) = self.rows().get(at).cloned() else {
+            return Did::Nothing;
+        };
+        match row {
+            // From one of a server's buttons to the next.
+            Row::Server(name) => {
+                let Some(server) = self.server(&name) else {
+                    return Did::Nothing;
+                };
+                let last = self.list_buttons(server).len() - 1;
+                let on = self.button_on(server);
+                let to = on.saturating_add_signed(by).min(last);
+                if to == on {
+                    return Did::Nothing;
+                }
+                self.button = Some((name, to));
+                Did::Changed
+            }
+            Row::Field(field) => match &mut self.view {
+                View::Server(form) => changed(form.step(field, by)),
+                _ => Did::Nothing,
+            },
+            Row::Candidate(_) => self.press(at, None),
+            _ => Did::Nothing,
+        }
     }
-    text
+
+    fn form(&self) -> Option<FormView> {
+        let saving = self.asked.as_ref().is_some_and(|asked| {
+            asked.from_form
+                && matches!(
+                    asked.action,
+                    McpAction::Save { .. }
+                        | McpAction::Secret { .. }
+                        | McpAction::CompleteLogin { .. }
+                        | McpAction::Import { .. }
+                )
+        });
+        let save =
+            |save: &str, saving_said: &str| if saving { saving_said } else { save }.to_owned();
+        Some(match &self.view {
+            View::List => return None,
+            View::Server(form) => FormView {
+                title: match &form.original {
+                    Some(server) => server.name.clone(),
+                    None => "New server".into(),
+                },
+                subtitle: match &form.original {
+                    Some(_) => "How it's connected, and what it's set up as. A chat started \
+                                after it's saved uses it as it is then."
+                        .into(),
+                    None => "A server to connect chats to: a program on the machine, or one at \
+                             an address."
+                        .into(),
+                },
+                changed: form.changed(),
+                save: save("Save", "Saving…"),
+            },
+            View::Credential { name, value } => FormView {
+                title: "Private credential".into(),
+                subtitle: format!("Kept {}, where only you can read it.", self.kept_where()),
+                changed: !name.is_empty() || !value.is_empty(),
+                save: save("Save", "Saving…"),
+            },
+            View::Callback { form, url } => FormView {
+                title: format!("Finish signing in to {}", form.name()),
+                subtitle: "For a daemon on another machine, whose sign in your browser can't \
+                           get back to."
+                    .into(),
+                changed: !url.is_empty(),
+                save: save("Finish", "Finishing…"),
+            },
+            View::Import {
+                provider, picked, ..
+            } => FormView {
+                title: format!("Copy from {}", provider.title()),
+                subtitle: "Each one picked is added to your personal servers, any credentials \
+                           it holds kept privately. One whose name you already have isn't \
+                           copied."
+                    .into(),
+                changed: picked.contains(&true),
+                save: save("Copy", "Copying…"),
+            },
+        })
+    }
+
+    fn text(&mut self, at: usize) -> Option<Text<'_>> {
+        let row = self.rows().get(at).cloned()?;
+        match (&mut self.view, row) {
+            (View::Server(form), Row::Field(field)) => form.text(field),
+            (View::Credential { name, .. }, Row::CredentialName) => Some(Text {
+                value: name,
+                most: 128,
+            }),
+            (View::Credential { value, .. }, Row::CredentialValue) => Some(Text {
+                value,
+                most: 64 * 1024,
+            }),
+            (View::Callback { url, .. }, Row::CallbackUrl) => Some(Text {
+                value: url,
+                most: 4 * MOST_TEXT,
+            }),
+            _ => None,
+        }
+    }
+
+    fn typing(&self) -> Option<&Typing> {
+        self.typing.as_ref()
+    }
+
+    fn typing_mut(&mut self) -> &mut Option<Typing> {
+        &mut self.typing
+    }
+
+    fn left(&mut self, at: usize) {
+        if let Some(Row::Field(field)) = self.rows().get(at).cloned()
+            && let View::Server(form) = &mut self.view
+        {
+            form.check(field);
+        }
+    }
+
+    fn picked(&mut self, _at: usize, _value: &str) {}
+
+    fn save(&mut self) -> Did {
+        let fail = |mcp: &mut Self, why: &str| {
+            mcp.notice = Some(Notice::Failed(why.to_owned()));
+            Did::Changed
+        };
+        match &mut self.view {
+            View::List => Did::Nothing,
+            View::Server(form) => match form.action() {
+                Ok(action) => self.ask(action, "Saving it…"),
+                Err(field) => {
+                    self.notice = Some(Notice::Marked);
+                    let at = (self.rows().iter()).position(|row| *row == Row::Field(field));
+                    Did::Went(at.unwrap_or(0))
+                }
+            },
+            View::Credential { name, value } => {
+                let name = name.trim().to_owned();
+                if name.is_empty() {
+                    return fail(self, "Give the credential a name.");
+                }
+                let action = McpAction::Secret {
+                    name,
+                    value: value.clone(),
+                };
+                self.ask(action, "Saving it…")
+            }
+            View::Callback { form, url } => {
+                let url = url.trim().to_owned();
+                if url.is_empty() {
+                    return fail(self, "Paste the address the browser ended on.");
+                }
+                let action = McpAction::CompleteLogin {
+                    name: form.name().to_owned(),
+                    url,
+                };
+                self.ask(action, "Finishing the sign in…")
+            }
+            View::Import {
+                provider,
+                candidates,
+                picked,
+            } => {
+                let names: Vec<String> = (candidates.iter().zip(picked.iter()))
+                    .filter(|(_, picked)| **picked)
+                    .map(|(candidate, _)| candidate.name.clone())
+                    .collect();
+                if names.is_empty() {
+                    return fail(self, "Pick at least one server to copy.");
+                }
+                let action = McpAction::Import {
+                    provider: provider.name().into(),
+                    names,
+                };
+                self.ask(action, "Copying them over…")
+            }
+        }
+    }
+
+    fn cancel(&mut self) -> usize {
+        self.typing = None;
+        self.notice.take_if(|notice| notice.of_form());
+        if let Some(asked) = &mut self.asked {
+            asked.from_form = false;
+        }
+        match std::mem::replace(&mut self.view, View::List) {
+            // Back to the server whose sign in it was.
+            View::Callback { form, .. } => {
+                self.view = View::Server(form);
+                (self.rows().iter())
+                    .position(|row| *row == Row::FinishSignIn)
+                    .unwrap_or(0)
+            }
+            View::Server(form) => (form.original.as_ref())
+                .and_then(|server| self.place(&server.name))
+                .unwrap_or(0),
+            View::Credential { .. } => (self.rows().iter())
+                .position(|row| *row == Row::Credential)
+                .unwrap_or(0),
+            View::Import { provider, .. } => (self.rows().iter())
+                .position(|row| *row == Row::Import(provider))
+                .unwrap_or(0),
+            View::List => 0,
+        }
+    }
+
+    fn add(&mut self) -> Did {
+        if !matches!(self.view, View::List) || self.listing != Listing::Ready {
+            return Did::Nothing;
+        }
+        self.view = View::Server(Box::new(ServerForm::new(None)));
+        self.typing = None;
+        self.notice = None;
+        Did::Went(0)
+    }
 }
-fn state_name(state: McpState) -> &'static str {
-    match state {
-        McpState::Disabled => "Disabled",
-        McpState::Disconnected => "Disconnected",
-        McpState::Starting => "Starting",
-        McpState::Connected => "Connected",
-        McpState::NeedsLogin => "Needs sign in",
-        McpState::Error => "Error",
-        McpState::Ready => "Ready",
+
+/// What a press or a step did, which `changed` something, or didn't.
+fn changed(changed: bool) -> Did {
+    if changed { Did::Changed } else { Did::Nothing }
+}
+
+impl SettingsMenu {
+    /// Takes in the daemon's answer to what the MCP Servers page asked
+    /// under `number`. Returns a sign in's address, for the browser.
+    pub(crate) fn mcp_came(
+        &mut self,
+        number: u64,
+        result: Result<McpReply, String>,
+    ) -> Option<String> {
+        let on_page = self.catalogue_shown() == Some(super::Catalogued::Servers);
+        // The keys stay on the row they're on, wherever a read puts it.
+        let before = (on_page).then(|| self.mcp.rows().get(self.easy_focus()).cloned());
+        let (url, went) = self.mcp.came(number, result);
+        if !on_page {
+            return url;
+        }
+        match (went, before.flatten()) {
+            (Some(row), _) => self.easy_went(row),
+            (None, Some(row)) => {
+                if let Some(at) = self.mcp.rows().iter().position(|each| *each == row) {
+                    self.easy_keep_focus(at);
+                }
+            }
+            (None, None) => {}
+        }
+        url
+    }
+
+    /// The MCP Servers page's list is being read: the number its answer
+    /// is known by.
+    pub(crate) fn mcp_reading(&mut self) -> u64 {
+        self.mcp.reading()
     }
 }
 

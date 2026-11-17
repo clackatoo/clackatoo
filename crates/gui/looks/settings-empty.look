@@ -1,0 +1,22 @@
+# The pages that list things, with nothing to list, in a short window,
+# whose pages down the side scroll to the one shown; and the Agents
+# page's end, with what's native to each agent.
+size 1280x520
+keys <C-;>:Settings<CR>
+wait-for Appearance
+shot short-appearance
+keys }}}}}}
+wait-for New specialist
+shot short-specialists
+keys }
+wait-for No skills yet
+shot short-skills
+keys }
+wait-for Add a server
+shot short-mcp
+keys }
+wait-for Permission engine
+shot short-permissions
+size 1280x900
+keys {{{{G
+shot agents-end

@@ -81,12 +81,12 @@ impl Page {
             Self::Editor => "Indenting, searching, and what language servers add.",
             Self::Terminals => "Marks, what's kept after a restart, and pasting.",
             Self::Agents => "Which agent a new chat starts with, and what it may do.",
-            Self::Permissions => {
-                "Choose who reviews approval requests, and manage Clackatoo's rules."
-            }
-            Self::Specialists => "Create and customize reusable agent roles.",
-            Self::Mcp => "Manage server connections, credentials and provider configuration.",
-            Self::Skills => "Shared skills and skillsets available to every agent in this project.",
+            // Those that list things say what for, and for where: see
+            // `SettingsMenu::easy_view`.
+            Self::Permissions => "Who answers when an agent asks to do something.",
+            Self::Specialists => "Roles a chat can hand work to.",
+            Self::Mcp => "Servers chats can use.",
+            Self::Skills => "What agents know how to do.",
             Self::Keys => "Keys for what you do most, recorded as you press them.",
             Self::Machines => "Working on other machines, and how they show here.",
         }
@@ -105,20 +105,26 @@ impl Page {
             ),
             Self::Keys => Some("Every key, in every mode, and what set it, is in Advanced."),
             Self::Skills => Some(
-                "Add skills in .agents/skills, or bundles in .agents/skillsets. Use ~/.agents for every project. Reopen Settings to refresh; invoking a skill reads its latest instructions.",
+                "A skill is a folder with a SKILL.md, in the project's .agents/skills, or in a \
+                 bundle under .agents/skillsets; under ~/.agents, it's for every project. A \
+                 skill is read afresh each time it's used.",
             ),
             Self::Machines => Some(
                 "The phone app and the web's password are the daemon's: clackatoo web sets them \
                  up.",
             ),
             Self::Mcp => Some(
-                "Managed servers use Clackatoo proxies. Claude Code and the bundled Codex adapter support provider-server suppression; other adapters must explicitly support it. Provider policy changes apply after a daemon upgrade or restart.",
+                "clackatoo connects chats to these itself, so every agent gets the same ones. \
+                 Whether agents also use servers from their own settings is on the Agents page.",
             ),
             Self::Specialists => Some(
-                "Specialists are SPECIALIST.md files. Create personal or project roles, or copy a packaged role to customize it. Existing chats keep their current role.",
+                "Each is a SPECIALIST.md file. A chat already open keeps the role it started \
+                 with.",
             ),
             Self::Permissions => Some(
-                "Rules review requests that reach Clackatoo. Provider-approved operations keep their existing permissions; the provider's sandbox still applies. Rules are not an operating-system sandbox.",
+                "Deny beats Ask, and Ask beats Allow. What no rule matches is asked of you. \
+                 Rules answer only what an agent asks clackatoo: what the agent's own settings \
+                 already allow isn't asked, and its sandbox still holds.",
             ),
             Self::Appearance | Self::Editor => None,
         }
@@ -127,9 +133,13 @@ impl Page {
     pub(crate) fn icon(self) -> Icon {
         match self {
             Self::Appearance => Icon::Appearance,
-            Self::Editor | Self::Skills | Self::Mcp => Icon::Code,
+            Self::Editor => Icon::Code,
             Self::Terminals => Icon::Terminal,
-            Self::Agents | Self::Specialists | Self::Permissions => Icon::Star,
+            Self::Agents => Icon::Agent,
+            Self::Specialists => Icon::Star,
+            Self::Skills => Icon::Bolt,
+            Self::Mcp => Icon::Plug,
+            Self::Permissions => Icon::Shield,
             Self::Keys => Icon::Keyboard,
             Self::Machines => Icon::Phone,
         }
@@ -296,7 +306,7 @@ const fn keys(label: &'static str, action: Action) -> Entry {
     }
 }
 
-use Page::{Agents, Appearance, Editor, Keys, Machines, Mcp, Permissions, Terminals};
+use Page::{Agents, Appearance, Editor, Keys, Machines, Permissions, Terminals};
 
 /// Every entry, page by page, in the order each page shows them.
 pub(crate) const ENTRIES: &[Entry] = &[
@@ -305,7 +315,9 @@ pub(crate) const ENTRIES: &[Entry] = &[
         "Default for new chats",
         (
             "Permission engine",
-            "Existing chats keep their selection. Change a chat in its permissions menu. Claude uses Manual; Codex uses Workspace access. Other providers use Provider permissions.",
+            "Whether an agent's own settings decide what it may do, or the rules below. Under \
+             the rules, Claude Code runs in Manual and Codex with Workspace access. A chat \
+             already open keeps its own, changed in its permissions menu.",
         ),
         &["permissions.engine"],
         &[
@@ -714,49 +726,52 @@ pub(crate) const ENTRIES: &[Entry] = &[
         Agents,
         "Native plugins",
         "Allow Claude Code plugins",
-        "Use Claude's plugins and native skill catalogue alongside shared skills. Takes effect after a daemon restart or upgrade.",
+        "Claude Code's own plugins and skills, beside the shared skills.",
         "plugins.claude",
     ),
     toggle(
         Agents,
         "Native plugins",
         "Allow Codex plugins",
-        "Use Codex's plugins and native skill catalogue alongside shared skills. Takes effect after a daemon restart or upgrade.",
+        "Codex's own plugins and skills, beside the shared skills.",
         "plugins.codex",
     ),
     toggle(
-        Mcp,
-        "Provider-managed MCP",
-        "Allow provider-managed MCP servers",
-        "Allow additional servers from the agent's own configuration. Managed servers remain available independently.",
+        Agents,
+        "Servers from the agent's own configuration",
+        "Let agents use their own MCP servers",
+        "The servers set up in an agent's own settings, as well as those on the MCP Servers \
+         page. Off, chats get only that page's.",
         "mcp.providers",
     ),
     choices(
-        Mcp,
-        "Provider-managed MCP",
+        Agents,
+        "Servers from the agent's own configuration",
         (
-            "Claude Code override",
-            "Uses strict MCP configuration when off.",
+            "Claude Code's own servers",
+            "As above follows the switch above. Never keeps them out of its chats; Always \
+             lets them in.",
         ),
         &["mcp.claude"],
         &[
-            choice("Default", &["inherit"]),
-            choice("Off", &["off"]),
-            choice("Allow", &["allow"]),
+            choice("As above", &["inherit"]),
+            choice("Never", &["off"]),
+            choice("Always", &["allow"]),
         ],
     ),
     choices(
-        Mcp,
-        "Provider-managed MCP",
+        Agents,
+        "Servers from the agent's own configuration",
         (
-            "Codex override",
-            "Requires Clackatoo's bundled Codex adapter to suppress every configured layer.",
+            "Codex's own servers",
+            "Never needs the Codex adapter that comes with clackatoo, which is the one that \
+             can keep them out.",
         ),
         &["mcp.codex"],
         &[
-            choice("Default", &["inherit"]),
-            choice("Off", &["off"]),
-            choice("Allow", &["allow"]),
+            choice("As above", &["inherit"]),
+            choice("Never", &["off"]),
+            choice("Always", &["allow"]),
         ],
     ),
     // Keys.
@@ -925,8 +940,8 @@ mod tests {
             }
         }
         for page in Page::ALL {
-            // Catalogue pages are populated by the daemon, rather than static options.
-            if matches!(page, Page::Skills | Page::Specialists) {
+            // Some pages list what the daemon has, rather than options.
+            if matches!(page, Page::Skills | Page::Specialists | Page::Mcp) {
                 continue;
             }
             assert!(on(page).next().is_some(), "{page:?} shows nothing");

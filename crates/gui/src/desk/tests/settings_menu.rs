@@ -40,7 +40,7 @@ fn read(dir: &tempfile::TempDir, file: &str) -> String {
     std::fs::read_to_string(dir.path().join(file)).unwrap_or_default()
 }
 
-fn named(desk: &mut Desk, key: NamedKey) {
+pub(super) fn named(desk: &mut Desk, key: NamedKey) {
     press(desk, Key::Named(key), None, Modifiers::default());
 }
 
@@ -494,20 +494,20 @@ fn keys_init_lua_binds_since_are_never_undone() {
 
 /// A desk whose config holds `init.lua`, loaded, with the menu used in no
 /// mode yet: it opens in Easy.
-fn easy_configured(init: &str) -> (Desk, tempfile::TempDir) {
+pub(super) fn easy_configured(init: &str) -> (Desk, tempfile::TempDir) {
     let (desk, dir) = configured(init);
     std::fs::remove_file(dir.path().join("settings-mode")).unwrap();
     (desk, dir)
 }
 
 /// Easy, as it's drawn.
-fn easy(desk: &mut Desk) -> crate::settings::view::EasyView {
+pub(super) fn easy(desk: &mut Desk) -> crate::settings::view::EasyView {
     desk.easy_view().expect("Easy")
 }
 
 /// The row of Easy labelled `label`, by its place among every section's,
 /// and the row.
-fn easy_row(desk: &mut Desk, label: &str) -> (u16, crate::settings::view::RowView) {
+pub(super) fn easy_row(desk: &mut Desk, label: &str) -> (u16, crate::settings::view::RowView) {
     let view = easy(desk);
     let rows: Vec<_> = view
         .sections
@@ -568,8 +568,13 @@ fn skills_are_searchable_and_open_their_source_on_the_workspaces_machine() {
     desk.settings_pointer(SettingsHit::Page(u8::try_from(page).unwrap()));
     assert_eq!(easy(&mut desk).title, "Skills");
     let (_, skill) = easy_row(&mut desk, "/migrate-db");
-    assert_eq!(skill.control, ControlView::Open);
-    assert!(skill.notes.iter().any(|(note, _)| note == "Project"));
+    assert!(
+        matches!(&skill.control, ControlView::Button(button) if button.label == "Open its file")
+    );
+    assert_eq!(
+        skill.status.map(|(said, _)| said).as_deref(),
+        Some("Project")
+    );
     type_keys(&mut desk, "/migration");
     assert!(
         easy(&mut desk)
@@ -1032,7 +1037,7 @@ fn the_cog_opens_the_menu_in_the_mode_used_last_and_closes_it() {
 /// at its default, but `subagents.working`, which its init.lua sets at
 /// line 2, and `images.total_mb`, saved in its settings.lua, which it
 /// goes by once it restarts.
-fn daemon_said(machine: &str) -> clackatoo_protocol::DaemonSettings {
+pub(super) fn daemon_said(machine: &str) -> clackatoo_protocol::DaemonSettings {
     use clackatoo_daemon::settings::options;
     use clackatoo_protocol::{DaemonOption, OptionPlace, OptionSetBy, OptionSource};
     let dir = "/home/u/.config/clackatoo";
@@ -1307,167 +1312,4 @@ fn easy_and_advanced_show_the_daemons_settings_and_the_daemon_saves_them() {
     desk.daemon_settings_came(&daemon_said("desk"), None);
     let view = desk.finder_view((30, 100), None).expect("the menu");
     assert_eq!(view.place.as_deref(), Some("daemon on desk"));
-}
-
-#[test]
-fn specialist_settings_creates_multiline_drafts_saves_explicitly_and_keeps_failed_edits() {
-    use crate::settings::view::{ControlView, Part, SettingsHit};
-    let (mut desk, _dir) = easy_configured("");
-    desk.open_specialist_settings();
-    answer_all(&mut desk);
-    desk.settings_specialists(Response::Specialists(vec![]));
-    assert_eq!(easy(&mut desk).title, "Specialists");
-    let (row, _) = easy_row(&mut desk, "Create specialist");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let (row, _) = easy_row(&mut desk, "Name");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    desk.paste_into_settings("reviewer");
-    named(&mut desk, NamedKey::Enter);
-    let (row, _) = easy_row(&mut desk, "Instructions");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    desk.paste_into_settings("Review code.\nReport concrete bugs.");
-    named(&mut desk, NamedKey::ArrowLeft);
-    desk.paste_into_settings("!");
-    named(&mut desk, NamedKey::Enter);
-    assert!(
-        answer_all(&mut desk).is_empty(),
-        "editing a draft never saves it"
-    );
-    let (row, _) = easy_row(&mut desk, "Save specialist");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let requests = answer_all(&mut desk);
-    let [Request::SaveSpecialistFile { specialist, .. }] = &requests[..] else {
-        panic!("{requests:?}")
-    };
-    assert_eq!(specialist.name, "reviewer");
-    let value: serde_json::Value = serde_json::from_str(&specialist.settings).unwrap();
-    assert_eq!(
-        value["instructions"],
-        "Review code.\nReport concrete bugs!."
-    );
-    let expected = specialist.clone();
-    desk.settings_specialist_saved(
-        &expected,
-        Response::Error(clackatoo_protocol::Error::Other("disk full".into())),
-    );
-    let view = easy(&mut desk);
-    assert!(view.warning && view.footer.contains("disk full"));
-    let (_, instructions) = easy_row(&mut desk, "Instructions");
-    assert!(
-        matches!(instructions.control,ControlView::Paragraph {text,..} if text.contains("bugs!"))
-    );
-    let (row, _) = easy_row(&mut desk, "Save specialist");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    assert!(matches!(
-        &answer_all(&mut desk)[..],
-        [Request::SaveSpecialistFile { .. }]
-    ));
-    desk.settings_specialist_saved(&expected, Response::SpecialistSaved);
-    assert!(easy(&mut desk).footer.contains("saved"));
-    easy_row(&mut desk, "Create specialist");
-}
-
-#[test]
-fn specialist_settings_prevents_agent_saves_and_ignores_an_old_menus_save_reply() {
-    use crate::settings::view::{Part, SettingsHit};
-    let (mut desk, _dir) = easy_configured("");
-    desk.open_specialist_settings();
-    answer_all(&mut desk);
-    desk.settings_specialists(Response::Specialists(vec![
-        clackatoo_protocol::SpecialistDefinition {
-            name: "reviewer".into(),
-            settings: r#"{"instructions":"Review","limits":{"access":"read-only"}}"#.into(),
-            saved: None,
-            locked: None,
-        },
-    ]));
-    let (row, _) = easy_row(&mut desk, "reviewer");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    desk.controlled = true;
-    let (row, _) = easy_row(&mut desk, "Save specialist");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    assert!(answer_all(&mut desk).is_empty());
-    assert!(easy(&mut desk).footer.contains("yours"));
-    desk.controlled = false;
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let requests = answer_all(&mut desk);
-    let [Request::SaveSpecialistFile { specialist, .. }] = &requests[..] else {
-        panic!("{requests:?}")
-    };
-    desk.open_specialist_settings();
-    answer_all(&mut desk);
-    desk.settings_specialists(Response::Specialists(vec![]));
-    desk.settings_pointer(SettingsHit::Control(0, Part::Whole));
-    desk.settings_specialist_saved(specialist, Response::SpecialistSaved);
-    easy_row(&mut desk, "Instructions"); // previous menu's reply cannot discard this draft
-}
-
-#[test]
-fn file_specialist_settings_copies_builtins_and_keeps_scope_source_and_dependencies() {
-    use crate::settings::view::{Part, SettingsHit};
-    use clackatoo_protocol::{SpecialistDefinition, SpecialistFile, SpecialistScope};
-    let (mut desk, _dir) = easy_configured("");
-    desk.open_specialist_settings();
-    answer_all(&mut desk);
-    let definition = SpecialistDefinition {
-        name: "explore".into(),
-        settings: r#"{"instructions":"Explore carefully","includes":["checks"]}"#.into(),
-        saved: None,
-        locked: None,
-    };
-    desk.settings_specialists(Response::SpecialistFiles(vec![SpecialistFile {
-        definition: definition.clone(),
-        path: String::new(),
-        scope: SpecialistScope::Personal,
-        editable: false,
-    }]));
-    let (row, view) = easy_row(&mut desk, "explore");
-    assert_eq!(
-        view.control,
-        crate::settings::view::ControlView::Button("Make a custom copy")
-    );
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let (scope, _) = easy_row(&mut desk, "Scope");
-    desk.settings_pointer(SettingsHit::Control(scope, Part::Segment(1)));
-    // Clicking the selected segment keeps the selection, rather than toggling it.
-    desk.settings_pointer(SettingsHit::Control(scope, Part::Segment(1)));
-    let (row, _) = easy_row(&mut desk, "Save specialist");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let requests = answer_all(&mut desk);
-    let [
-        Request::SaveSpecialistFile {
-            specialist,
-            scope: SpecialistScope::Project,
-            path: None,
-            ..
-        },
-    ] = &requests[..]
-    else {
-        panic!("{requests:?}")
-    };
-    assert_eq!(specialist.name, "explore");
-    assert_eq!(specialist.saved, None);
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&specialist.settings).unwrap()["includes"]
-            .as_array()
-            .is_some()
-    );
-    desk.open_specialist_settings();
-    answer_all(&mut desk);
-    let mut local = definition;
-    local.saved = Some("original file".into());
-    desk.settings_specialists(Response::SpecialistFiles(vec![SpecialistFile {
-        definition: local,
-        path: "/repo/.agents/specialists/explore/SPECIALIST.md".into(),
-        scope: SpecialistScope::Project,
-        editable: true,
-    }]));
-    let (row, _) = easy_row(&mut desk, "explore");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let (row, _) = easy_row(&mut desk, "Save specialist");
-    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
-    let requests = answer_all(&mut desk);
-    assert!(
-        matches!(&requests[..],[Request::SaveSpecialistFile {path:Some(path),specialist,..}] if path.ends_with("SPECIALIST.md") && specialist.saved.as_deref()==Some("original file"))
-    );
 }

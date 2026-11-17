@@ -3,6 +3,12 @@
 //! `:setpersist` sets and saves (see [`crate::settings`] for the menu
 //! itself). `:mappersist` binds keys and saves them, as the menu's keys
 //! section does.
+//!
+//! What the menu lists of the daemon's, its settings, agents, skills,
+//! specialists and MCP servers, is read here, as the menu says it's due
+//! (see [`Desk::read_settings`]), for the pane that was focused as the
+//! menu opened, whatever is focused since. A lost connection fails what
+//! was asked, and everything is read again once it's back.
 
 use std::time::Instant;
 
@@ -18,11 +24,18 @@ use crate::options::persist::Change;
 use crate::options::settings_lua::Mapping;
 use crate::options::{Case, Scope, SetBy};
 use crate::settings::view::{EasyView, Laid, SettingsHit};
-use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, Set, SettingsMenu};
+use crate::settings::{DaemonFacts, Facts, History, Mode, Outcome, Read, Set, SettingsMenu};
 
 /// The most characters the bar is given of what the daemon's config
 /// changed outside clackatoo.
 const MOST_NOTICED: usize = 400;
+
+/// Why a page of the menu's lists nothing while the daemon's out of reach.
+const NOT_CONNECTED: &str =
+    "Not connected to the daemon. This page is read again once the connection's back.";
+
+/// Why the permission rules weren't saved, the keys being an agent's.
+const RULES_ARE_YOURS: &str = "an agent's input can't change that setting: it's yours";
 
 impl Desk {
     /// Runs `with` on the menu, if it's open, with what it needs to know
@@ -106,54 +119,93 @@ impl Desk {
             SettingsMenu::new(query, case, mode, &facts, client.keys_changes())
         };
         self.settings = Some(menu);
-        self.settings_changed();
-        // The agents the daemon knows, for Easy's cards. No pane, as no
-        // chat's directory is wanted.
-        if self.connected {
-            self.request(
-                Request::ChatChoices {
-                    pane: None,
-                    on: None,
-                },
-                Asked::SettingsAgents,
-            );
+        if let Some(menu) = &mut self.settings {
+            // Its lists are this pane's project's, whatever's focused after.
+            menu.set_pane(self.shown.map(|shown| shown.pane));
         }
-        self.ask_daemon_settings();
-        self.ask_settings_specialists();
-        self.ask_settings_mcp();
-        if self.connected && self.daemon_has(wire::SKILLS) {
-            let pane = self.shown.map(|shown| shown.pane);
-            self.request(Request::Skills { pane }, Asked::SettingsSkills);
-        } else if let Some(menu) = &mut self.settings {
-            menu.skills_came(Err(
-                "Connect to a current daemon to browse shared skills.".into()
-            ));
+        self.settings_changed();
+        self.read_settings(Instant::now());
+    }
+
+    /// Asks the daemon for what the menu is due to be told at `now` (see
+    /// [`SettingsMenu::due`]); or tells the menu why it can't be asked,
+    /// for its page to say: the daemon's out of reach, or too old to say.
+    pub(super) fn read_settings(&mut self, now: Instant) {
+        let Some(menu) = &self.settings else {
+            return;
+        };
+        let pane = menu.pane();
+        let due = menu.due(now);
+        if due.is_empty() {
+            return;
+        }
+        for read in due {
+            let (feature, lists) = match read {
+                Read::Agents => (None, "agents"),
+                Read::Settings => (Some(wire::DAEMON_SETTINGS), "its settings"),
+                Read::Skills => (Some(wire::SKILLS), "skills"),
+                Read::Specialists => (Some(wire::SPECIALIST_FILES), "specialists"),
+                Read::McpServers => (Some(wire::MANAGED_MCP), "MCP servers"),
+            };
+            let cannot = if !self.connected {
+                Some(NOT_CONNECTED.to_owned())
+            } else if feature.is_some_and(|feature| !self.daemon_has(feature)) {
+                Some(format!(
+                    "This daemon is older than this window, and can't list {lists}. Upgrade it                      to use this page."
+                ))
+            } else {
+                None
+            };
+            let Some(menu) = &mut self.settings else {
+                return;
+            };
+            if let Some(why) = cannot {
+                menu.unavailable(read, why);
+                continue;
+            }
+            menu.reading(read);
+            let (request, asked) = match read {
+                Read::Agents => (
+                    Request::ChatChoices { pane, on: None },
+                    Asked::SettingsAgents,
+                ),
+                Read::Settings => (Request::DaemonSettings, Asked::DaemonSettings),
+                Read::Skills => (Request::Skills { pane }, Asked::SettingsSkills),
+                Read::Specialists => (
+                    Request::SpecialistFiles { pane },
+                    Asked::SettingsSpecialists,
+                ),
+                Read::McpServers => (
+                    Request::Mcp {
+                        pane,
+                        action: clackatoo_protocol::McpAction::List,
+                    },
+                    Asked::SettingsMcp(menu.mcp_reading()),
+                ),
+            };
+            self.request(request, asked);
+        }
+        self.settings_changed();
+    }
+
+    /// The connection to the daemon was lost: what the menu asked will
+    /// never be answered, which its pages say.
+    pub(super) fn settings_lost(&mut self) {
+        if let Some(menu) = &mut self.settings {
+            menu.lost();
+            self.settings_changed();
         }
     }
 
-    fn ask_settings_mcp(&mut self) {
-        let Some(menu) = &mut self.settings else {
-            return;
-        };
-        let id = menu.mcp_id();
-        if self.connected && self.daemon_has(wire::MANAGED_MCP) {
-            if let Some(menu) = &mut self.settings {
-                menu.mcp_loading();
-            }
-            self.request(
-                Request::Mcp {
-                    pane: self.shown.map(|s| s.pane),
-                    action: clackatoo_protocol::McpAction::List,
-                },
-                Asked::SettingsMcp(id),
-            );
-        } else if let Some(menu) = &mut self.settings {
-            menu.mcp_came(
-                id,
-                Err("Connect to a current daemon to manage MCP servers.".into()),
-            );
+    /// The connection to the daemon is back: the menu's lists are read
+    /// again.
+    pub(super) fn settings_reconnected(&mut self) {
+        if let Some(menu) = &mut self.settings {
+            menu.reconnected();
+            self.read_settings(Instant::now());
         }
     }
+
     pub(super) fn settings_mcp(&mut self, id: u64, response: Response) -> bool {
         let result = match response {
             Response::Mcp(reply) => Ok(reply),
@@ -167,54 +219,39 @@ impl Desk {
         if let Some(url) = url {
             self.open_url(url);
         }
-        self.settings_changed();
+        self.read_settings(Instant::now());
         true
     }
-    pub(super) fn tick_mcp_settings(&mut self, now: std::time::Instant) -> bool {
-        if self.connected
-            && self
-                .settings
-                .as_ref()
-                .is_some_and(|menu| menu.mcp_poll_due(now))
-        {
-            self.ask_settings_mcp();
+
+    /// Reads what the menu is due to be told at `now`, as the window
+    /// wakes for it (see [`Desk::pane_wakes`]). Returns whether to draw.
+    pub(super) fn tick_settings(&mut self, now: Instant) -> bool {
+        if self.connected && self.settings.is_some() {
+            self.read_settings(now);
         }
         false
     }
 
-    fn ask_settings_specialists(&mut self) {
-        if self.connected && self.daemon_has(wire::SPECIALIST_FILES) {
-            self.request(
-                Request::SpecialistFiles {
-                    pane: self.shown.map(|s| s.pane),
-                },
-                Asked::SettingsSpecialists,
-            );
-        } else if let Some(menu) = &mut self.settings {
-            menu.specialists_came(Err(
-                "Connect to a current daemon to edit specialists.".into()
-            ));
-        }
-    }
+    /// Takes in the specialists the menu asked for, or why they can't be
+    /// listed. Returns whether to draw.
     pub(super) fn settings_specialists(&mut self, response: Response) -> bool {
-        if let Response::SpecialistFiles(files) = response {
-            if let Some(menu) = &mut self.settings {
-                menu.specialist_files_came(files);
-            }
-            self.settings_changed();
-            return true;
-        }
         let result = match response {
-            Response::Specialists(s) => Ok(s),
-            Response::Error(e) => Err(e.to_string()),
+            Response::SpecialistFiles(files) => Ok(files),
+            Response::Error(err) => Err(format!("The specialists couldn't be read: {err}")),
             _ => return false,
         };
-        if let Some(menu) = &mut self.settings {
-            menu.specialists_came(result);
-        }
+        let open = (self.settings.as_mut()).and_then(|menu| menu.specialists_came(result));
         self.settings_changed();
+        // One just saved, whose file was to be opened once it's known
+        // where it is.
+        if let Some(place) = open {
+            self.open_settings_file(&place);
+        }
         true
     }
+
+    /// The daemon answered the menu's save of specialist `edit`. Returns
+    /// whether to draw.
     pub(super) fn settings_specialist_saved(
         &mut self,
         edit: &clackatoo_protocol::SpecialistDefinition,
@@ -222,31 +259,30 @@ impl Desk {
     ) -> bool {
         let result = match response {
             Response::SpecialistSaved => Ok(()),
-            Response::Error(e) => Err(format!("Could not save specialist: {e}")),
+            Response::Error(err) => Err(format!("It wasn't saved: {err}")),
             _ => return false,
         };
-        let worked = result.is_ok();
-        if let Some(menu) = &mut self.settings {
-            menu.specialist_saved(edit, result);
+        let open = (self.settings.as_mut()).and_then(|menu| menu.specialist_saved(edit, result));
+        match open {
+            Some(place) => self.open_settings_file(&place),
+            // The list says what its file holds now.
+            None => self.read_settings(Instant::now()),
         }
-        if worked {
-            self.ask_settings_specialists();
-        }
-        self.settings_changed();
         true
     }
+
     pub(super) fn open_specialist_settings(&mut self) {
         self.open_settings("");
         if let Some(menu) = &mut self.settings {
             menu.show_specialists();
         }
-        self.settings_changed();
+        self.read_settings(Instant::now());
     }
 
     pub(super) fn settings_skills(&mut self, response: Response) -> bool {
         let result = match response {
             Response::Skills(skills) => Ok(skills),
-            Response::Error(err) => Err(format!("Could not read skills: {err}")),
+            Response::Error(err) => Err(format!("The skills couldn't be read: {err}")),
             _ => return false,
         };
         if let Some(menu) = &mut self.settings {
@@ -271,6 +307,9 @@ impl Desk {
             Response::DaemonSettings(settings) => self.daemon_settings_came(&settings, None),
             Response::Error(err) => {
                 log::warn!("the daemon wouldn't say its settings: {err}");
+                if let Some(menu) = &mut self.settings {
+                    menu.unavailable(Read::Settings, err.to_string());
+                }
                 false
             }
             _ => false,
@@ -288,6 +327,7 @@ impl Desk {
             return false;
         };
         self.daemon_saved(info.name);
+        self.rules_refused(info, &err.to_string());
         self.warn_saved(format!("daemon.{} wasn't saved: {err}", info.name));
         // What the menu counted on goes, as the daemon says it is.
         self.ask_daemon_settings();
@@ -314,9 +354,17 @@ impl Desk {
         self.settings_changed();
         // Only what this window asked for: another's is its own to say.
         let saved = saved.filter(|saved| self.daemon_saved(&saved.name));
-        if let (Some(menu), Some(saved)) = (&mut self.settings, &saved) {
-            menu.permission_saved(saved);
+        if let Some(menu) = &mut self.settings {
+            menu.settings_came();
+            if let Some(saved) = &saved {
+                menu.permission_saved(saved);
+            }
         }
+        // The rules' page says how saving them went, in its own words: a
+        // list of rules isn't for the foot to spell out.
+        let saved = saved.filter(|saved| {
+            saved.name != "permissions.rules" || saved.refused.is_some() || self.settings.is_none()
+        });
         match saved {
             Some(OptionSaved {
                 name,
@@ -382,14 +430,18 @@ impl Desk {
         info: &'static crate::options::Info,
         value: Option<&crate::options::Value>,
     ) {
-        if !self.daemon_has(wire::DAEMON_SETTINGS) {
-            return self.warn_saved("this daemon is too old to change its settings here".into());
+        let too_old = if !self.daemon_has(wire::DAEMON_SETTINGS) {
+            Some("this daemon is too old to change its settings here")
+        } else if info.name == "permissions.rules" && !self.daemon_has(wire::PERMISSIONS) {
+            Some("this daemon is too old to keep permission rules: upgrade it first")
+        } else {
+            None
+        };
+        if let Some(why) = too_old {
+            self.rules_refused(info, why);
+            return self.warn_saved(why.into());
         }
         let request = if info.name == "permissions.rules" {
-            if !self.daemon_has(wire::PERMISSIONS) {
-                return self
-                    .warn_saved("Update the daemon before changing permission rules".into());
-            }
             let expected = self
                 .daemon_settings
                 .as_ref()
@@ -410,6 +462,18 @@ impl Desk {
         }
         *self.daemon_saving.entry(info.name).or_default() += 1;
         self.request(request, Asked::DaemonOption(info));
+    }
+
+    /// Tells the menu a save of the daemon's option `info` won't happen,
+    /// and `why`, if it's the permission rules, whose page waits to hear.
+    fn rules_refused(&mut self, info: &crate::options::Info, why: &str) {
+        if let Some(menu) = &mut self.settings {
+            menu.permission_saved(&OptionSaved {
+                name: info.name.to_owned(),
+                value: None,
+                refused: Some(why.to_owned()),
+            });
+        }
     }
 
     /// A change this window asked the daemon to save of its option called
@@ -532,32 +596,27 @@ impl Desk {
         self.looking_at_settings(|menu, facts, _| menu.easy_view(facts))
     }
 
-    /// Takes in the agents the daemon knows, for Easy's cards, if the menu
-    /// is still open. Returns whether to draw.
+    /// Takes in the agents the daemon knows, for Easy's cards, and the
+    /// directory the menu's lists are for, if the menu is still open.
+    /// Returns whether to draw.
     pub(super) fn settings_agents(&mut self, response: clackatoo_protocol::Response) -> bool {
-        let choices = match response {
-            clackatoo_protocol::Response::ChatChoices(choices) => choices,
-            clackatoo_protocol::Response::Error(err) => {
-                log::warn!("the daemon wouldn't say which agents it knows: {err}");
-                return false;
-            }
-            _ => return false,
-        };
         self.settings_changed();
         let Some(menu) = &mut self.settings else {
             return false;
         };
-        let agents = (choices.agents.iter())
-            .map(|provider| {
-                let installed = !matches!(
-                    provider.models,
-                    clackatoo_protocol::ProviderModels::NotInstalled
-                );
-                (provider.agent.clone(), provider.title.clone(), installed)
-            })
-            .collect();
-        menu.set_agents(agents);
-        true
+        match response {
+            clackatoo_protocol::Response::ChatChoices(choices) => {
+                menu.set_agents(&choices.agents);
+                menu.set_dir(&choices.cwd, &choices.home);
+                true
+            }
+            clackatoo_protocol::Response::Error(err) => {
+                log::warn!("the daemon wouldn't say which agents it knows: {err}");
+                menu.unavailable(Read::Agents, err.to_string());
+                false
+            }
+            _ => false,
+        }
     }
 
     /// A click on row `row` of the menu, or a double click if `open`.
@@ -622,8 +681,11 @@ impl Desk {
     /// The top bar's cog: opens the settings menu, in the mode used last,
     /// or closes it if it's open.
     pub(crate) fn toggle_settings(&mut self) {
-        if self.settings.take().is_none() {
-            self.open_settings("");
+        // A form with changes asks before they're thrown away.
+        match self.settings.as_mut().map(SettingsMenu::closing) {
+            Some(true) => self.settings = None,
+            Some(false) => self.settings_changed(),
+            None => self.open_settings(""),
         }
     }
 
@@ -689,21 +751,25 @@ impl Desk {
                 menu.mcp_came(id, Err(MCP_USERS_ONLY.into()));
             }
         } else {
-            self.request(
-                Request::Mcp {
-                    pane: self.shown.map(|s| s.pane),
-                    action,
-                },
-                Asked::SettingsMcp(id),
-            );
+            let pane = self.settings.as_ref().and_then(SettingsMenu::pane);
+            self.request(Request::Mcp { pane, action }, Asked::SettingsMcp(id));
         }
     }
 
     fn settings_did(&mut self, outcome: Outcome) {
+        // Nothing can be asked of a daemon that's out of reach: the page
+        // that asked says so, as when the connection's lost.
+        let asks = match &outcome {
+            Outcome::Mcp { .. } | Outcome::SaveSpecialist { .. } => true,
+            Outcome::Set(sets) => sets.iter().any(|set| set.info.scope == Scope::Daemon),
+            _ => false,
+        };
+        if asks && !self.connected {
+            return self.settings_lost();
+        }
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}
             Outcome::Mcp { action, id } => self.settings_mcp_action(action, id),
-            Outcome::RefreshPermissions => self.ask_daemon_settings(),
             Outcome::Close => self.settings = None,
             Outcome::Set(sets) => {
                 // The daemon's, and the window's that run programs, are
@@ -713,9 +779,10 @@ impl Desk {
                     set.info.scope == Scope::Daemon || crate::options::runs_programs(set.info)
                 };
                 if (self.automating || self.controlled) && sets.iter().any(theirs) {
-                    return self.warn_saved(
-                        "an agent's input can't change that setting: it's yours".into(),
-                    );
+                    for set in &sets {
+                        self.rules_refused(set.info, RULES_ARE_YOURS);
+                    }
+                    return self.warn_saved(RULES_ARE_YOURS.into());
                 }
                 // The daemon's are saved by the daemon, which runs them.
                 let (daemons, sets): (Vec<_>, Vec<_>) =
@@ -749,19 +816,15 @@ impl Desk {
             } => {
                 if self.automating || self.controlled {
                     if let Some(menu) = &mut self.settings {
-                        menu.specialist_saved(
-                            &specialist,
-                            Err(
-                                "An agent's input can't save specialists: this setting is yours"
-                                    .into(),
-                            ),
-                        );
+                        let yours = "An agent's input can't save specialists: they're yours.";
+                        menu.specialist_saved(&specialist, Err(yours.into()));
                     }
                     return;
                 }
+                let pane = self.settings.as_ref().and_then(SettingsMenu::pane);
                 self.request(
                     Request::SaveSpecialistFile {
-                        pane: self.shown.map(|s| s.pane),
+                        pane,
                         scope,
                         path,
                         specialist: specialist.clone(),
@@ -784,15 +847,22 @@ impl Desk {
                 self.settings = None;
                 self.open_config_line(&place, true);
             }
-            Outcome::OpenSkill(place) => {
-                self.open_settings_skill(&place);
-            }
+            Outcome::OpenFile(place) => self.open_settings_file(&place),
+        }
+        // Whatever it did may be something to read again.
+        if self.settings.is_some() {
+            self.read_settings(Instant::now());
         }
     }
 
-    fn open_settings_skill(&mut self, place: &crate::options::provenance::Place) {
-        self.settings = None;
-        let Some(shown) = self.shown else {
+    /// Opens the file at `place`, a skill's or a specialist's, in an
+    /// editor beside the pane the menu's lists are for, on its machine,
+    /// and closes the menu.
+    fn open_settings_file(&mut self, place: &crate::options::provenance::Place) {
+        let pane = (self.settings.take())
+            .and_then(|menu| menu.pane())
+            .or(self.shown.map(|shown| shown.pane));
+        let Some(pane) = pane else {
             return;
         };
         let path = place.file.to_string();
@@ -805,7 +875,7 @@ impl Desk {
         };
         self.request(
             Request::Split {
-                pane: shown.pane,
+                pane,
                 side: Side::Right,
                 terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
                 on: None,
