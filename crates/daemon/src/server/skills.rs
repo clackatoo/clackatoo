@@ -46,6 +46,13 @@ const PROJECT_KNOWN_FOR: Duration = Duration::from_secs(30);
 /// it changed, before the chats that had it are left without.
 const MOST_RETRIES: u8 = 3;
 
+/// The most folders whose projects are kept.
+const MOST_LOOKED: usize = 8;
+
+/// What an agent is told of a call whose answer would be from before
+/// what it's offered changed.
+const CHANGED: &str = "The skills offered here changed while this was read. Ask again.";
+
 /// The most catalogues kept, the least lately read let go first.
 const MOST_KEPT: usize = 32;
 
@@ -121,6 +128,17 @@ enum Purpose {
     },
     /// The skill an agent's `load_skill` asked for is being read.
     Loading(Asker),
+}
+
+impl Purpose {
+    /// The chat it's for, if it's for one.
+    fn chat(&self) -> Option<TerminalId> {
+        match self {
+            Self::Connect(chat) | Self::Refresh(Some(chat)) => Some(*chat),
+            Self::List(asker) | Self::Load { asker, .. } | Self::Loading(asker) => Some(asker.chat),
+            Self::Refresh(None) | Self::Browse { .. } | Self::BrowseSpecialists { .. } => None,
+        }
+    }
 }
 
 /// Something waiting on a read.
@@ -202,8 +220,9 @@ pub(super) struct Skills {
     catalogues: BTreeMap<TerminalId, Held>,
     /// The catalogues to read again, as reading them failed.
     retries: Vec<Retry>,
-    /// The project last found for a folder that isn't a chat's.
-    looked: Mutex<Option<Looked>>,
+    /// The projects lately found for folders that aren't chats', one for
+    /// each window with Settings open somewhere else.
+    looked: Mutex<Vec<Looked>>,
     /// How many times a chat has been given a catalogue: what a read
     /// costs the event loop, for tests to count.
     #[cfg(test)]
@@ -280,30 +299,48 @@ impl Daemon {
     /// disk, as it is when a chat is added, and kept a while: Settings
     /// asks every few seconds while it's open.
     pub(super) fn skill_roots(&self, cwd: PathBuf) -> Roots {
+        self.folder_roots(cwd, false)
+    }
+
+    /// As [`skill_roots`](Self::skill_roots), with the project looked for
+    /// afresh: for a save, which writes into it, so a repository made or
+    /// removed a moment ago is where it's found to be now.
+    pub(super) fn skill_roots_now(&self, cwd: PathBuf) -> Roots {
+        self.folder_roots(cwd, true)
+    }
+
+    /// The roots of a catalogue for the folder `cwd`: with its project
+    /// looked for on disk if `afresh`, or if it isn't lately known.
+    fn folder_roots(&self, cwd: PathBuf, afresh: bool) -> Roots {
         let chats = || (self.terminals.values()).filter_map(|slot| slot.terminal.chat_ref());
         if let Some(chat) = chats().find(|chat| chat.real_cwd() == cwd) {
             let project = chat.project().to_owned();
             return self.roots_of(cwd, project);
         }
         let mut looked = (self.skills.looked.lock()).unwrap_or_else(PoisonError::into_inner);
-        let known = (looked.as_ref())
-            .filter(|looked| looked.cwd == cwd && looked.at.elapsed() < PROJECT_KNOWN_FOR);
-        let (real, project) = if let Some(looked) = known {
-            (looked.real.clone(), looked.project.clone())
-        } else {
+        looked.retain(|looked| looked.at.elapsed() < PROJECT_KNOWN_FOR);
+        let known = (looked.iter())
+            .find(|looked| looked.cwd == cwd)
+            .filter(|_| !afresh)
+            .map(|looked| (looked.real.clone(), looked.project.clone()));
+        let (real, project) = known.unwrap_or_else(|| {
             // With links followed, as a chat's is, so the roots are those
             // of a chat there.
             let real = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
             let project =
                 clackatoo_syntax::git_root(&real, self.real_home()).unwrap_or(real.clone());
-            *looked = Some(Looked {
+            looked.retain(|looked| looked.cwd != cwd);
+            if looked.len() >= MOST_LOOKED {
+                looked.remove(0);
+            }
+            looked.push(Looked {
                 cwd,
                 real: real.clone(),
                 project: project.clone(),
                 at: Instant::now(),
             });
             (real, project)
-        };
+        });
         drop(looked);
         // A chat there, reached by another name for the folder.
         let project = chats()
@@ -323,11 +360,16 @@ impl Daemon {
     /// reads the disk. A chat's working directory and project have their
     /// links followed too, so this is the home they're found to be in or
     /// under: where `/home` is a link, the one in the environment isn't.
+    /// Only what was found is kept: while home can't be read, as before
+    /// it's mounted, it's the one in the environment, and asked again.
     pub(super) fn real_home(&self) -> &std::path::Path {
-        self.skills.home.get_or_init(|| {
-            let home = &self.config.home;
-            home.canonicalize().unwrap_or_else(|_| home.clone())
-        })
+        if let Some(home) = self.skills.home.get() {
+            return home;
+        }
+        match self.config.home.canonicalize() {
+            Ok(real) => self.skills.home.get_or_init(|| real),
+            Err(_) => &self.config.home,
+        }
     }
 
     /// The roots of a catalogue for `cwd`, in `project`: with what the
@@ -577,7 +619,10 @@ impl Daemon {
                 continue;
             }
             self.skills.catalogues.remove(&chat);
-            self.skills.retries.extend(now.map(|roots| Retry {
+            // Once for its roots, however many chats have them.
+            let retries = &mut self.skills.retries;
+            let again = now.filter(|roots| !retries.iter().any(|retry| retry.roots == *roots));
+            retries.extend(again.map(|roots| Retry {
                 roots,
                 tries: 0,
                 waiting: false,
@@ -944,6 +989,13 @@ impl Daemon {
                 };
                 self.hand_answer_with(token, ticket, response);
             }
+            // Never from roots the chat no longer has: what a folder no
+            // longer trusted holds, or a skill switched off.
+            Purpose::List(asker) | Purpose::Load { asker, .. }
+                if result.is_ok() && self.chat_roots(asker.chat).as_ref() != Some(roots) =>
+            {
+                self.answer_skill_tool(&asker, Err(CHANGED.to_owned()));
+            }
             Purpose::List(asker) => {
                 let listed = result
                     .map_err(|failed| failed.to_string())
@@ -1072,7 +1124,15 @@ impl Daemon {
             if self.read_cancelled(&pending) {
                 self.skills_failed(pending.purpose, &pending.roots, Failed::Cancelled);
             } else if let Purpose::Loading(asker) = &pending.purpose {
-                let loaded = loaded.clone().map_err(|refused| refused.to_string());
+                // Read from the catalogue the chat had when it asked: if
+                // that's no longer the chat's, neither is the skill.
+                let current = pending.epoch == self.skills.epoch
+                    && self.chat_roots(asker.chat).as_ref() == Some(&pending.roots);
+                let loaded = match loaded {
+                    Ok(text) if current => Ok(text.clone()),
+                    Ok(_) => Err(CHANGED.to_owned()),
+                    Err(refused) => Err(refused.to_string()),
+                };
                 self.answer_skill_tool(asker, loaded);
             }
         }
@@ -1089,8 +1149,14 @@ impl Daemon {
             if self.read_cancelled(&pending) {
                 self.skills_failed(pending.purpose, &pending.roots, Failed::Cancelled);
             } else if pending.epoch != self.skills.epoch {
-                // Read before something saved from Settings: again.
-                self.read_catalogue(pending.purpose, pending.roots);
+                // Read before something was saved from Settings, or what
+                // the user trusts or has switched off changed: again, and
+                // for a chat, with its roots as they are now, not those
+                // it asked with, which may say a folder is still trusted.
+                let roots = (pending.purpose.chat())
+                    .and_then(|chat| self.chat_roots(chat))
+                    .unwrap_or(pending.roots);
+                self.read_catalogue(pending.purpose, roots);
             } else {
                 current.push(pending);
             }
@@ -1815,10 +1881,182 @@ mod tests {
         // Not looked for again: the repository going isn't seen yet.
         std::fs::remove_dir(repo.join(".git")).unwrap();
         assert_eq!(daemon.skill_roots(link.clone()).project, repo);
-        let mut looked = daemon.skills.looked.lock().unwrap();
-        let at = &mut looked.as_mut().unwrap().at;
-        *at = at.checked_sub(PROJECT_KNOWN_FOR).unwrap();
-        drop(looked);
-        assert_eq!(daemon.skill_roots(link).project, repo.join("sub"));
+        // A save looks afresh, as it writes there.
+        assert_eq!(
+            daemon.skill_roots_now(link.clone()).project,
+            repo.join("sub")
+        );
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        assert_eq!(daemon.skill_roots(link.clone()).project, repo.join("sub"));
+        for looked in daemon.skills.looked.lock().unwrap().iter_mut() {
+            looked.at = looked.at.checked_sub(PROJECT_KNOWN_FOR).unwrap();
+        }
+        assert_eq!(daemon.skill_roots(link).project, repo);
+        // Each of several folders is kept, not only the last.
+        for name in ["one", "two"] {
+            std::fs::create_dir_all(top.join(name).join(".git")).unwrap();
+            assert_eq!(daemon.skill_roots(top.join(name)).project, top.join(name));
+        }
+        std::fs::remove_dir(top.join("one/.git")).unwrap();
+        assert_eq!(daemon.skill_roots(top.join("one")).project, top.join("one"));
+        assert_eq!(daemon.skills.looked.lock().unwrap().len(), 3);
+    }
+
+    /// Connects a tools server for the chat `chat`, as its agent's would
+    /// be, and returns its token and the end its answers are read from.
+    fn tools_of(daemon: &mut Daemon, chat: TerminalId) -> (Token, std::os::unix::net::UnixStream) {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let stream = mio::net::UnixStream::from_std(ours);
+        let info = (String::new(), false);
+        let connection =
+            crate::mcp::Connection::new(stream, chat, Vec::new(), info, &daemon.parser);
+        let token = Token(daemon.sources.insert(Source::Tools(connection)));
+        (token, theirs)
+    }
+
+    /// The next answer to a tool call on `theirs`: whether it's an error,
+    /// and its text.
+    fn answer(theirs: &std::os::unix::net::UnixStream) -> (bool, String) {
+        use std::io::BufRead as _;
+        let mut said = String::new();
+        std::io::BufReader::new(theirs)
+            .read_line(&mut said)
+            .unwrap();
+        let answer: Value = serde_json::from_str(&said).unwrap();
+        let error = answer["result"]["isError"] == true;
+        (error, answer["result"]["content"].to_string())
+    }
+
+    /// A trusted repository with a skill of its own, `local`, and a chat
+    /// in it, with its tools connected.
+    fn trusted_chat(
+        dir: &std::path::Path,
+    ) -> (
+        Daemon,
+        TerminalId,
+        PathBuf,
+        Token,
+        std::os::unix::net::UnixStream,
+    ) {
+        let (mut daemon, _) = daemon_with_chat(dir);
+        daemon.trust.folders = crate::trust::Trust::load(&crate::Trusting::ThisRun);
+        let repo = dir.canonicalize().unwrap().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        skill(&repo.join(".agents/skills"), "local", "LOCAL PROCEDURE");
+        skill(&dir.join(".agents/skills"), "mine", "MY PROCEDURE");
+        daemon.trust.folders.mark(repo.clone(), true);
+        let chat = add_chat(&mut daemon, &repo);
+        let (token, theirs) = tools_of(&mut daemon, chat);
+        (daemon, chat, repo, token, theirs)
+    }
+
+    /// A `list_skills` being read as its folder is untrusted is read
+    /// again for the chat as it is now, and never answered with what the
+    /// folder holds.
+    #[test]
+    fn a_list_in_flight_as_its_folder_is_untrusted_names_nothing_of_the_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat, repo, token, theirs) = trusted_chat(dir.path());
+        daemon.skill_tool(token, serde_json::json!(7), chat, None);
+        let trusted: Vec<_> = (daemon.skills.pending.values())
+            .map(|pending| pending.roots.trusted)
+            .collect();
+        assert_eq!(trusted, [true]);
+        daemon.trust.folders.mark(repo, false);
+        daemon.skills_changed();
+        settle(&mut daemon, |daemon| {
+            !(daemon.skills.pending.values())
+                .any(|pending| matches!(pending.purpose, Purpose::List(_)))
+        });
+        let (error, listed) = answer(&theirs);
+        assert!(!error, "{listed}");
+        assert!(
+            listed.contains("mine") && !listed.contains("local"),
+            "{listed}"
+        );
+        // And were the old read answered after all, it says to ask again.
+        let stale = Roots {
+            trusted: true,
+            ..daemon.chat_roots(chat).unwrap()
+        };
+        let catalogue = Arc::new(Catalogue::discover(&stale));
+        let asker = Asker {
+            token,
+            id: serde_json::json!(8),
+            chat,
+            secret: None,
+        };
+        daemon.skills_finished(
+            Purpose::List(asker),
+            &stale,
+            Ok(catalogue),
+            &BTreeSet::new(),
+        );
+        let (error, said) = answer(&theirs);
+        assert!(error && said.contains("Ask again"), "{said}");
+        assert!(!said.contains("local"));
+    }
+
+    /// A `load_skill` being read as its folder is untrusted, or as the
+    /// skill is switched off, isn't answered with the skill.
+    #[test]
+    fn a_load_in_flight_as_its_skill_is_taken_away_isnt_answered_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat, repo, token, theirs) = trusted_chat(dir.path());
+        daemon.read_skills_now(chat);
+        let load = |daemon: &mut Daemon, id: u32, name: &str| {
+            let load = Some((name.to_owned(), String::new()));
+            daemon.skill_tool(token, serde_json::json!(id), chat, load);
+            assert_eq!(daemon.skills.pending.len(), 1);
+        };
+        let loaded = |daemon: &mut Daemon| {
+            settle(daemon, |daemon| {
+                !(daemon.skills.pending.values())
+                    .any(|pending| matches!(pending.purpose, Purpose::Loading(_)))
+            });
+            answer(&theirs)
+        };
+        load(&mut daemon, 1, "local");
+        let (error, said) = loaded(&mut daemon);
+        assert!(!error && said.contains("LOCAL PROCEDURE"), "{said}");
+
+        load(&mut daemon, 2, "local");
+        daemon.trust.folders.mark(repo, false);
+        daemon.skills_changed();
+        let (error, said) = loaded(&mut daemon);
+        assert!(error && said.contains("Ask again"), "{said}");
+        assert!(!said.contains("LOCAL PROCEDURE"));
+
+        settle(&mut daemon, |daemon| daemon.skill_catalogue(chat).is_some());
+        load(&mut daemon, 3, "mine");
+        let off: Arc<[String]> = ["mine".to_owned()].into();
+        daemon.config.agents.configured.disabled_skills = off;
+        daemon.skills_changed();
+        let (error, said) = loaded(&mut daemon);
+        assert!(error && said.contains("Ask again"), "{said}");
+        assert!(!said.contains("MY PROCEDURE"));
+    }
+
+    /// While the home directory can't be read, it's the one in the
+    /// environment, and looked for again: what's kept is only what was
+    /// found.
+    #[test]
+    fn a_home_that_cant_be_read_yet_is_looked_for_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let top = dir.path().canonicalize().unwrap();
+        let (real, link) = (top.join("mounted"), top.join("home"));
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        daemon.config.home.clone_from(&link);
+        daemon.skills.home = std::sync::OnceLock::new();
+        assert_eq!(daemon.real_home(), link, "not there yet");
+        std::fs::create_dir(&real).unwrap();
+        assert_eq!(daemon.real_home(), real);
+        std::fs::remove_dir(&real).unwrap();
+        assert_eq!(daemon.real_home(), real, "found once");
     }
 }

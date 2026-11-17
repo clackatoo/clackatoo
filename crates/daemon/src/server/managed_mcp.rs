@@ -1671,6 +1671,10 @@ impl Daemon {
                 .collect();
         }
         self.merge_mcp_status(&mut done.reply.servers, &done.catalogues[0]);
+        // After the statuses, which go by name: these share a name with
+        // the user's own server that chats have, and run nothing yet.
+        let unreviewed = &done.catalogues[0].managed_mcp.unreviewed;
+        (done.reply.servers).extend(unreviewed.values().map(Bound::waiting_info));
         let reply = self.after_mcp_job(job, &mut done);
         if reply {
             self.hand_answer_with(job.token, job.ticket, Response::Mcp(done.reply));
@@ -1994,7 +1998,12 @@ fn settings_job(roots: &[Roots], action: &McpAction) -> Result<Finished, String>
                     .into();
         }
         McpAction::Trust { name, expected } => {
-            let bound = selected(registry, name)?;
+            // A project's waiting to take the place of the user's own of
+            // its name is the one of that name there is to review.
+            let bound = match registry.unreviewed.get(name) {
+                Some(waiting) => waiting,
+                None => selected(registry, name)?,
+            };
             if &bound.revision != expected {
                 return Err(
                     "This definition changed since it was shown. Reload and review it again."

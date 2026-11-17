@@ -62,6 +62,14 @@ pub(super) struct AgentSlot {
     unread_errors: bool,
 }
 
+impl AgentSlot {
+    /// Whether it was started through an adapter clackatoo installs that
+    /// holds a session to a number of turns and a cost.
+    pub(super) fn holds_budgets(&self) -> bool {
+        matches!(&self.spec.launch, crate::agents::Launch::Known(known) if known.budgets)
+    }
+}
+
 /// The agents chats talk to, and the ones being installed.
 /// How long a turn an agent took by itself, which the user stopped, waits
 /// for the agent to say it ended (see `chat/woken.rs`).
@@ -3098,6 +3106,38 @@ mod tests {
         assert!(matches!(&items[0], Item::Tool(tool) if tool.id == "task"));
         assert!(items[2].tool().is_some_and(|tool| tool.id == "read"));
         resumed.stop_agents(&[]);
+    }
+
+    /// Turn and cost budgets go by the agent that's running, which is the
+    /// one a chat would be given: taking the user's own command for
+    /// `claude` out of the config doesn't make the process it started
+    /// one that holds them, nor putting one in make the installed
+    /// adapter that's running one that doesn't.
+    #[test]
+    fn budgets_go_by_the_agent_running_when_the_config_changes_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = daemon_with_chat(dir.path());
+        let turns = crate::specialists::Budget {
+            turns: Some(3),
+            ..crate::specialists::Budget::default()
+        };
+        assert!(daemon.check_budget(turns, "claude").is_ok(), "as installed");
+        daemon.config.agents.custom = vec![crate::agents::CustomAgent {
+            name: "claude".into(),
+            title: None,
+            starting_mode: None,
+            tasks: None,
+            command: vec![example("fake_agent").into_os_string()],
+        }];
+        assert!(daemon.start_agent_for(id, "claude").is_some());
+        assert!(daemon.check_budget(turns, "claude").is_err());
+        // The config no longer has the command: the process still runs.
+        daemon.config.agents.custom.clear();
+        assert!(daemon.config.agents.holds_budgets("claude"));
+        assert!(daemon.check_budget(turns, "claude").is_err());
+        daemon.stop_agents(&[]);
+        daemon.agents.running.clear();
+        assert!(daemon.check_budget(turns, "claude").is_ok(), "none running");
     }
 
     /// A chat waiting for its catalogue to connect, as the daemon

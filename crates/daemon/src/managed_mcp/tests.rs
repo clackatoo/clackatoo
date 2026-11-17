@@ -47,15 +47,54 @@ fn shadowed_entries_do_not_consume_the_remaining_registry_capacity() {
     let registry = Registry::discover(&roots, &BTreeSet::new());
     assert_eq!(registry.servers.len(), 127);
     assert!(registry.servers.contains_key("unique"));
-    assert_eq!(
-        registry.servers["server000"]
-            .definition
-            .as_ref()
-            .unwrap()
-            .command
-            .as_deref(),
-        Some("server")
+    assert_eq!(registry.unreviewed.len(), 2);
+}
+
+/// A project's definition nobody has reviewed doesn't switch off the
+/// user's own server of the same name: chats go on getting that one, and
+/// the project's is listed as waiting to take its place. Reviewed, it
+/// does. One that's invalid still holds the name, as documented.
+#[test]
+fn an_unreviewed_project_server_doesnt_take_the_place_of_the_users_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    let project = roots.cwd.join(".agents/mcp.json");
+    write(
+        &project,
+        r#"{"servers":{"github":{"command":"theirs"},"broken":{"command":7}}}"#,
     );
+    write(
+        &config::personal(&roots).join("mcp.json"),
+        r#"{"servers":{"github":{"command":"mine"},"broken":{"command":"mine"}}}"#,
+    );
+    let command = |bound: &config::Bound| {
+        let definition = bound.definition.as_ref().unwrap();
+        definition.command.clone().unwrap()
+    };
+    let registry = Registry::discover(&roots, &BTreeSet::new());
+    let chats_get = &registry.servers["github"];
+    assert_eq!(command(chats_get), "mine");
+    assert!(chats_get.trusted() && chats_get.info().detail.is_empty());
+    let waiting = &registry.unreviewed["github"];
+    assert_eq!(
+        (command(waiting), waiting.path.clone()),
+        ("theirs".into(), project)
+    );
+    let shown = waiting.waiting_info();
+    assert!(!shown.trusted);
+    assert!(
+        shown.detail.contains("your own server of this name"),
+        "{}",
+        shown.detail
+    );
+    // Invalid, it holds the name against the user's own.
+    assert!(registry.servers["broken"].definition.is_none());
+    assert!(!registry.unreviewed.contains_key("broken"));
+
+    credentials::approve(&waiting.private, waiting.grant()).unwrap();
+    let registry = Registry::discover(&roots, &BTreeSet::new());
+    assert_eq!(command(&registry.servers["github"]), "theirs");
+    assert!(registry.unreviewed.is_empty());
 }
 
 #[test]

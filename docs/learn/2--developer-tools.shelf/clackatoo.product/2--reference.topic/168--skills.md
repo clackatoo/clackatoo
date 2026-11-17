@@ -145,7 +145,8 @@ what's marked.
 - **Your own skill of the same name is still offered.** A project that isn't
   trusted changes nothing.
 - **Untrusting a folder takes its skills from open chats at once**, before
-  anything is read again. Trusting one reads its chats' catalogues again, and
+  anything is read again. A `list_skills` or `load_skill` an agent had under
+  way is answered for the chat as it is now, or told to ask again. Trusting one reads its chats' catalogues again, and
   they gain its skills when that read ends; a read that fails is tried again.
 - **Trust never lets a project replace a built-in specialist** or loosen one
   of your own: see [Specialists](~clackatoo/reference/specialists#defining-a-specialist).
@@ -273,7 +274,9 @@ Runtime-specific execution settings, including `context`, `agent`, `model`,
 and named `arguments`, are not executed by shared skills. Such a skill is
 shown as unavailable with its reason. Dynamic shell expansion, a line that
 starts with `` !` `` outside a code block, and positional `$ARGUMENTS[N]`
-expansion are also unsupported. Files larger than 64 KiB or
+expansion are also unsupported. A `` !` `` further into a line doesn't make a
+skill unavailable: it loads with those characters as plain text, and nothing
+is run. Files larger than 64 KiB or
 with invalid metadata are shown with their problem.
 
 ## Hosted runtimes

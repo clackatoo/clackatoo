@@ -32,9 +32,22 @@ impl Daemon {
         with_built_in(self.skill_catalogue(chat))
     }
 
+    /// Whether the agent called `name` holds a session to a number of
+    /// turns and a cost. One that's running is what a chat would be
+    /// given, so it goes by how that one was started; with none running,
+    /// by how the config would start one now. The two differ once the
+    /// config changes under an agent that goes on running.
+    pub(super) fn holds_budgets(&self, name: &str) -> bool {
+        let running = (self.agents.named(name)).and_then(|agent| self.agents.running.get(&agent));
+        match running {
+            Some(slot) => slot.holds_budgets(),
+            None => self.config.agents.holds_budgets(name),
+        }
+    }
+
     /// Checks the agent called `agent` can hold a chat to `budget`.
     pub(super) fn check_budget(&self, budget: Budget, agent: &str) -> Result<(), Unenforced> {
-        if budget.needs_adapter() && !self.config.agents.holds_budgets(agent) {
+        if budget.needs_adapter() && !self.holds_budgets(agent) {
             return Err(Unenforced {
                 agent: agent.to_owned(),
             });
