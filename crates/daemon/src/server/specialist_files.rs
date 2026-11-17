@@ -105,7 +105,7 @@ impl Daemon {
             edit,
             scope,
             path,
-            roots: self.skill_roots(cwd),
+            roots: self.skill_roots_now(cwd),
         });
         self.take_specialist_files();
     }
