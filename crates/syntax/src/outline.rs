@@ -11,7 +11,7 @@ use tree_sitter::{Node, ParseOptions, Parser, WasmStore};
 use crate::Pack;
 
 /// Bump when extraction semantics change, invalidating persistent records.
-pub const OUTLINE_VERSION: u32 = 1;
+pub const OUTLINE_VERSION: u32 = 2;
 
 /// A definition, with one-based source lines and a body-free signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,8 +288,14 @@ fn line(row: usize) -> u32 {
     u32::try_from(row.saturating_add(1)).unwrap_or(u32::MAX)
 }
 
+/// The kind of definition `node` is, if it's one. C names a struct or
+/// enum with the same node where it's defined and wherever it's used
+/// (`struct point *p`), so those count only with a body.
 fn definition_kind(node: Node<'_>) -> Option<&'static str> {
     Some(match node.kind() {
+        "struct_specifier" | "enum_specifier" if node.child_by_field_name("body").is_none() => {
+            return None;
+        }
         "function_item"
         | "function_definition"
         | "function_declaration"
@@ -495,5 +501,34 @@ mod tests {
             checked >= 3,
             "at least three installed grammars required for qualification"
         );
+    }
+
+    #[test]
+    #[ignore = "needs the installed C language pack; set CLACKATOO_OUTLINE_LANGUAGES"]
+    fn a_c_type_named_where_it_is_used_is_not_defined_there() {
+        let root = PathBuf::from(
+            std::env::var_os("CLACKATOO_OUTLINE_LANGUAGES").expect("language pack directory"),
+        );
+        let pack = Pack::read(&root.join("c")).unwrap();
+        let source = "struct point { int x; };\n\
+                      enum mode { FAST, SLOW };\n\
+                      struct point *origin;\n\
+                      enum mode current;\n\
+                      int area(struct point *p, enum mode m) { return p->x; }\n";
+        let outline = OutlineParser::new()
+            .unwrap()
+            .extract(&pack, source, &|| false)
+            .unwrap();
+        let named = |name: &str| -> Vec<u32> {
+            outline
+                .definitions
+                .iter()
+                .filter(|definition| definition.name == name)
+                .map(|definition| definition.line)
+                .collect()
+        };
+        assert_eq!(named("point"), [1], "{outline:?}");
+        assert_eq!(named("mode"), [2], "{outline:?}");
+        assert_eq!(named("area"), [5], "{outline:?}");
     }
 }
