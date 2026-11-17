@@ -123,7 +123,8 @@ if the agent later tells the conversation again.
 
 The store keeps to 256 MiB. Past that, it lets go of the snapshots used
 longest ago, with the messages they went with. A snapshot that a
-conversation or draft in memory refers to is never let go.
+conversation in memory refers to is never let go: in its turns on any
+branch, its queued messages, or its draft.
 
 When an agent tells a conversation again, as it loads or after a branch
 switch, each message is matched against the exact captured message before
