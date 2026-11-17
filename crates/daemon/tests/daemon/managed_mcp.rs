@@ -910,3 +910,39 @@ fn a_server_refusing_the_credential_in_its_headers_is_an_error_not_a_sign_in() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn always_allowing_a_server_answers_its_other_questions_already_waiting() {
+    use serde_json::json;
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let marker = daemon.dir.path().join("external-call");
+    fixture(&mut client, &marker);
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let mut proxy = Proxy::new(&mut client, chat);
+    proxy.initialize();
+    // Four calls at once, as an agent makes them: four questions.
+    for id in 1..=4 {
+        proxy.send(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"write","arguments":{}}}));
+    }
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    // A request that needs no leave goes round behind them: by its
+    // answer the proxy has asked about all four. (Were one still on its
+    // way, it would find the server allowed, and the test hold anyway.)
+    proxy.send(&json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}));
+    assert!(proxy.reply(9)["result"]["tools"].is_array());
+    answer(&mut client, chat, Some("server".into()));
+    let mut answered = std::collections::BTreeSet::new();
+    while answered.len() < 4 {
+        let message = proxy.next();
+        assert_eq!(
+            message["result"]["content"][0]["text"], "upstream answered",
+            "{message}"
+        );
+        answered.insert(message["id"].as_u64().unwrap());
+    }
+    // One answer was all it took.
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_none());
+    assert!(node.question.is_none());
+    assert_eq!(std::fs::read_to_string(marker).unwrap().lines().count(), 4);
+}

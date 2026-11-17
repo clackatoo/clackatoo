@@ -3,9 +3,9 @@
 //! questions waiting are about their calls.
 //!
 //! The servers allowed are kept with the chat's chosen settings, as one
-//! of the chat's own, like its Tools setting: they last through upgrades
-//! and restarts, and stay as the chat changes agent or branch. A copy of
-//! the chat starts with none. Each is kept by what the server is, not
+//! of the chat's own, like its Tools setting: they last through upgrades,
+//! and stay as the chat changes agent or branch. A chat made again from
+//! a saved workspace, or copied, starts with none. Each is kept by what the server is, not
 //! what it's called, so a server defined otherwise under the same name
 //! asks again.
 
@@ -58,6 +58,15 @@ impl HostedChat {
             .filter(|(id, _)| id.starts_with(ALLOWED))
             .cloned()
             .collect()
+    }
+
+    /// Forgets every server allowed that isn't one of `live`, the
+    /// servers the chat has now: what a definition was before it changed
+    /// is never asked about again, and needn't be kept.
+    pub(crate) fn keep_allowed_servers(&mut self, live: &[String]) {
+        self.chosen.retain(|(id, _)| {
+            (id.strip_prefix(ALLOWED)).is_none_or(|server| live.iter().any(|live| live == server))
+        });
     }
 
     /// Has `chosen`, the settings of a session being gone back to, allow
