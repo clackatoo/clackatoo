@@ -100,9 +100,16 @@ impl HostedChat {
             });
         }
         self.stop_requested = live.stop_requested;
-        // The turn it was stopped in is the one it was handed over in: no
-        // turn begins while a daemon upgrades.
-        if live.stop_requested {
+        // Which turn was stopped isn't handed over, only that the chat is
+        // held as stopped. That was the last turn, unless the agent has
+        // taken one by itself since, which is no stopped turn: if it was
+        // stopped too, it either still waits for the agent to say it
+        // ended, or has ended. Which turns it took by itself is known by
+        // now: the chat's standing is resumed before this.
+        let last = self.node.turns.last();
+        let took_since = last.is_some_and(|turn| turn.woke.is_some() && turn.end.is_none())
+            && !live.woken_stopping;
+        if live.stop_requested && !took_since {
             self.stopped_turn = self.last_uid();
         }
         self.slow = live.slow;
