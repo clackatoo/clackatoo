@@ -2,7 +2,11 @@
 use super::{Action, HostedChat, Link, Setting, SettingChoice, SettingKind};
 use crate::permissions::Engine;
 
+/// The setting that says which engine answers a chat's approval requests.
 pub(crate) const SETTING: &str = Setting::PERMISSION_ENGINE;
+
+/// Where a chat under clackatoo's rules keeps the provider mode it was in
+/// before, to go back to it with Provider permissions.
 const PREVIOUS: &str = "clackatoo.permissions.previous";
 
 impl HostedChat {
@@ -36,6 +40,9 @@ impl HostedChat {
         }
     }
 
+    /// Gives a chat with no engine chosen yet `engine`, the daemon's
+    /// default or its parent's, if its agent can work under rules, and
+    /// shows the setting. A choice already made is kept.
     pub(crate) fn default_permission_engine(&mut self, engine: Engine) {
         if !self.chosen.iter().any(|(id, _)| id == SETTING) {
             let engine = if self.permission_mode().is_some() {
@@ -48,6 +55,9 @@ impl HostedChat {
         self.refresh_permission_setting();
     }
 
+    /// The provider mode its agent is put in under clackatoo's rules, the
+    /// one in which it asks before it acts: `None` for an agent rules
+    /// can't work with.
     pub(crate) fn permission_mode(&self) -> Option<&'static str> {
         match self.agent.as_str() {
             "claude" => Some("default"),
@@ -56,6 +66,9 @@ impl HostedChat {
         }
     }
 
+    /// Whether its agent may be in the provider mode `mode`: any, under
+    /// Provider permissions; under rules, only one that asks before it
+    /// acts, or does less.
     pub(crate) fn permission_mode_allowed(&self, mode: &str) -> bool {
         self.permission_engine() == Engine::Provider
             || match self.agent.as_str() {
@@ -65,6 +78,8 @@ impl HostedChat {
             }
     }
 
+    /// Whether a message may go to its agent: under rules, only once the
+    /// agent has confirmed a mode they work with.
     pub(crate) fn permissions_ready(&self) -> bool {
         self.permission_engine() == Engine::Provider || self.permission_confirmed
     }
@@ -76,11 +91,18 @@ impl HostedChat {
     pub(crate) fn permission_stopped(&self) -> bool {
         self.stopped_turn.is_some() && self.stopped_turn == self.last_uid()
     }
+
+    /// Whether `option`, an answer to the agent's plan that leaves plan
+    /// mode for another, may be offered: only for a mode the chat's engine
+    /// allows.
     pub(crate) fn permission_plan_choice(&self, option: &str) -> bool {
         super::modes::leaving_plan_for(&self.agent, option)
             .is_some_and(|mode| self.permission_mode_allowed(mode))
     }
 
+    /// Before a session opens under rules: nothing of its mode is
+    /// confirmed yet, and the mode asked for is the one chosen, if rules
+    /// allow it, or else the one they need.
     pub(super) fn prepare_permission_connection(&mut self) {
         if self.permission_engine() == Engine::Provider {
             return;
@@ -104,6 +126,10 @@ impl HostedChat {
         self.chosen.push((setting.id, desired));
     }
 
+    /// The user chose the engine `value` for the chat. It changes only
+    /// between turns, with no question waiting. Going to rules asks the
+    /// agent for a mode they work with; going back restores the mode it
+    /// was in before.
     pub(super) fn choose_permission_engine(&mut self, value: &str) -> Vec<Action> {
         let engine = match value {
             "provider" => Engine::Provider,
@@ -196,6 +222,9 @@ impl HostedChat {
         }
     }
 
+    /// The agent answered the change of mode rules asked for. If it's
+    /// `confirmed` and now in a mode rules work with, the message held
+    /// for it goes; if not, that message fails, saying why.
     pub(super) fn permission_mode_answered(&mut self, confirmed: bool) {
         if self.permission_engine() == Engine::Provider {
             return;
@@ -216,6 +245,8 @@ impl HostedChat {
         }
     }
 
+    /// The engine setting as the chat's menu shows it, offering rules
+    /// only for an agent they work with.
     pub(super) fn permission_setting(&self) -> Setting {
         let mut choices = vec![SettingChoice {
             value: "provider".into(),
@@ -241,6 +272,7 @@ impl HostedChat {
         }
     }
 
+    /// Shows the engine setting as it is now among the chat's settings.
     fn refresh_permission_setting(&mut self) {
         self.node.settings.retain(|setting| setting.id != SETTING);
         self.node.settings.push(self.permission_setting());
@@ -402,5 +434,25 @@ mod tests {
         assert!(!chat.asks_tool(18));
         chat.withdraw(17);
         assert!(!chat.asks_tool(17));
+    }
+
+    #[test]
+    fn a_stop_is_still_of_its_turn_after_a_daemon_upgrade() {
+        let spec = crate::AgentConfig::default().find("claude").unwrap();
+        let handed_over = |stop: bool| {
+            let mut chat = chat();
+            open(&mut chat, "default");
+            chat.act(ChatAction::Send("Do work".into()));
+            if stop {
+                chat.act(ChatAction::Stop);
+            }
+            let (handed, live) = chat.hand_over_live();
+            let mut resumed = HostedChat::resume(handed, &spec);
+            resumed.resume_live(live);
+            resumed
+        };
+        // What the agent asks as it winds down is still of a stopped turn.
+        assert!(handed_over(true).permission_stopped());
+        assert!(!handed_over(false).permission_stopped());
     }
 }

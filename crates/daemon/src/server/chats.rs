@@ -1157,7 +1157,7 @@ impl Daemon {
     /// read: from the end of the turn, then as it comes, until it exits
     /// and that's been read to the end, or until it's been gone too long.
     /// Nothing more is written to one that has gone.
-    fn flush_agent(&mut self, id: AgentId) {
+    pub(super) fn flush_agent(&mut self, id: AgentId) {
         let Some(slot) = self.agents.running.get_mut(&id) else {
             return;
         };

@@ -512,8 +512,8 @@ pub(crate) struct HostedChat {
     /// Such a turn must not be continued by an upgrade.
     stop_requested: bool,
     /// The turn that was last stopped, by its uid: what was asked in it
-    /// is not allowed by a permission rule after. Not handed over: an
-    /// upgrade asks the user about every check that waits.
+    /// is not allowed by a permission rule after. Handed over as
+    /// `stop_requested`: the turn stopped is then the last.
     stopped_turn: Option<TurnUid>,
     /// How many turns the chat had as the user last stopped it, while it
     /// holds for them: stopping it again, with none begun since, drops

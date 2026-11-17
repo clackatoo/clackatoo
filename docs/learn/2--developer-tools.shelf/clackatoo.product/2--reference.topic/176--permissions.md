@@ -60,12 +60,14 @@ whether Tools was set to Ask or Allow; Tools Off still refuses them.
 Some requests always need your direct approval, whichever rule would allow
 them. A Deny still refuses them.
 
-- Typing into a terminal.
+- Typing into a terminal, or into a command Codex left running.
 - Showing a file outside the chat's project.
 - The browser's first page in a chat. Its question keeps the **Allow for
   this chat** answer, which lets the agent open further pages.
-- Provider plan approvals, the provider's own questions, and changes to
-  sandbox or network permissions.
+- Provider plan approvals and the provider's own questions.
+- Requests for more sandbox or network access: Claude Code's
+  `SandboxNetworkAccess`, and Codex's requests for additional permissions
+  or for network access with a command.
 - A command whose request carries anything beyond the command itself, such
   as Claude Code's `dangerouslyDisableSandbox`.
 
@@ -101,10 +103,11 @@ to stop sending subsequent permission requests.
 
 Clackatoo works out which tool a request uses from what it knows of the
 call, never from the request's own input. A request that names no tool
-matches no Tool rule. Codex sends its ordinary commands without a tool name,
-so only Command rules match them. Its approvals of MCP tool calls always ask
-you. A managed tool whose name contains `/` could be mistaken for an MCP
-method, so it matches no rule either.
+matches no Tool rule. Codex names the tool for only some of its commands, as
+`codex/exec_command`; others arrive without a name. Use Command rules for
+Codex's commands, which match either way. Its approvals of MCP tool calls
+always ask you. A managed tool whose name contains `/` could be mistaken for
+an MCP method, so it matches no rule either.
 
 Claude Code asks before it calls a managed server's tool, under its own
 name for it, such as `claude/mcp__managed_docs__search`. Clackatoo then
@@ -134,9 +137,18 @@ a broad tool Allow matches. So does a command that names a working directory
 outside the chat's project.
 
 An Ask or Deny on a command is a guard rail, not a sandbox. It matches the
-words as written: a Deny on `git push` does not match `git -C . push`, a
-script that pushes, or an alias. Use it to catch mistakes, not to contain an
-agent you do not trust.
+words as written, from the first. A Deny on `git push` does not match any of
+these:
+
+- `env git push`, `nice git push` or `command git push`, which start with
+  another program.
+- `git -C . push` or `git --no-pager push`, which put an option first.
+- A script or an alias that pushes.
+
+Under a rule that allows the whole tool, those run. A command that is not
+simple, such as `true; git push` or `"git" push`, is not denied either: it
+asks you. Use a Deny to catch mistakes, not to contain an agent you do not
+trust.
 
 ### Allowing a whole command tool
 
@@ -161,31 +173,54 @@ matching, including the existing parents of new files. Unresolvable paths
 ask you.
 
 `{project}` is the chat's git repository, or its working directory outside
-one. It matches nothing when that is your home directory, so a project rule
-never comes to cover everything you own.
+one. It matches nothing when that is your home directory or a folder that
+contains it, so a project rule never comes to cover everything you own.
 
-These matches require recognizable file inputs: Claude's Read, Write, Edit
-and NotebookEdit tools. An opaque or multi-file provider approval asks you
-instead. Codex approvals carrying additional consent content also ask
-directly, including network-access consent. Clackatoo's own file-opening
-tools ask only for a file outside the project, and that question is always
-yours to answer; a Deny on a Read rule still refuses it.
+These matches require recognizable file inputs, which are Claude Code's own
+file tools:
 
-Some files ask you even if an Allow matches. A Deny still refuses them.
-Their names are compared in any letter case, and a protected name that is a
-symbolic link is still protected.
+| Tool | Matched as | Path |
+| --- | --- | --- |
+| Read | Read | The file |
+| Grep, Glob | Read | The folder searched, or the chat's working directory when none is given |
+| Write, Edit, NotebookEdit | Edit | The file |
+
+A request from one of these tools that names a second path, or a search
+pattern that leaves its folder, asks you. An opaque or multi-file provider
+approval asks you too. Codex approvals carrying additional consent content
+also ask directly, including network-access consent. Clackatoo's own
+file-opening tools ask only for a file outside the project, and that
+question is always yours to answer; a Deny on a Read rule still refuses it.
+
+### Files that always ask
+
+Some files ask you even if an Allow matches, whether the Allow is a file
+rule or a rule for the whole tool. A Deny still refuses them. Their names
+are compared in any letter case, and a protected name that is a symbolic
+link is still protected.
 
 | Request | Always asks for |
 | --- | --- |
-| Edit | Clackatoo's config and state |
-| Edit | Anything in a `.clackatoo`, `.claude`, `.codex`, `.agents`, `.git` or `.vscode` folder, including skills, specialists and git hooks |
-| Edit | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.mcp.json`, `.envrc`, `.cargo/config.toml` and `.cargo/config` |
-| Read or Edit | `~/.ssh`, `~/.aws`, `~/.gnupg` and `~/.config/gh` |
-| Read or Edit | `.env` and `.env.*` files, and Clackatoo's `mcp-private` folder |
+| Read or Edit | `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gh` and `~/.config/gcloud` |
+| Read or Edit | `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.cargo/credentials.toml` |
+| Read or Edit | `.env`, `.env.*` and `*.env` files, `.envrc`, `.netrc`, `.git-credentials`, `.npmrc` and `.pypirc`, in any folder |
+| Read or Edit | Clackatoo's config and state, and its `mcp-private` folder |
+| Edit | Agent instructions and settings: `.clackatoo`, `.claude`, `.codex`, `.agents`, `.cursor` and `.gemini` folders, including skills and specialists; `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.mcp.json` and `.github/copilot-instructions.md` |
+| Edit | Project files that run code: `.git` (hooks and config), `.vscode`, `.zed`, `.idea`, `.devcontainer`, `.husky`, `.github/workflows`, `.cargo/config.toml`, `.pre-commit-config.yaml`, `lefthook.yml`, `.gitmodules`, `mise.toml`, `.yarnrc.yml` |
+| Edit | What runs when you log in or open a shell: `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/systemd/user`, `~/.config/autostart` and `~/.local/bin` |
 
-The Edit rows are files that instruct agents or run code when a project is
-opened. This list is a guard against accidents. It does not cover every file
-that can run code, such as a build script.
+Folder names such as `.claude` and `.git` count inside the chat's project
+and inside your home directory, not in the path above the project. A chat
+whose project is a worktree under `.claude/worktrees` can therefore use an
+Edit rule on `{project}`.
+
+This table applies to the file tools listed above. It does not apply to
+other tools that reach files, such as an MCP filesystem server or a command:
+a rule that allows `managed_fs/write_file` or `claude/Bash` allows writes to
+these files. Allow such tools only when you accept that.
+
+The list is a guard against accidents. It does not cover every file that
+can run code, such as a build script.
 
 ## Recent decisions
 
@@ -198,15 +233,24 @@ or upgrades.
 Checks that fail or take longer than three seconds ask you.
 
 Changing the rules cancels nothing. A check still in progress is evaluated
-again against the new rules. A question you have already been asked stays
-open, unless the new rules now allow or deny what it asks about; then they
-answer it, so an open question cannot bypass a new Deny.
+again against the new rules. A question you have already been asked is
+checked again too. It stays open unless the new rules now allow or deny
+what it asks about; then they answer it.
 
-A check is **Cancelled** when its turn ended or was stopped before the
-check finished, or when the chat moved to another session. Nothing runs, and
-the agent is told the check was cancelled, not that you refused. Stopping a
-turn affects that turn only: a turn the agent starts later, such as when a
-background task ends, is checked as usual.
+A question stays open for you to answer when its check against the new rules
+could not finish: the check timed out, or more than 64 questions were open
+at once. A new Deny does not close such a question, so read it before you
+allow it.
+
+A check is **Cancelled** when nothing was decided:
+
+- You stopped the turn. Nothing runs, and the agent is told you stopped it
+  and not to try again. This holds across a daemon upgrade. It affects that
+  turn only: a turn the agent starts later, such as when a background task
+  ends, is checked as usual.
+- The turn ended, or the chat moved to another session, before the check
+  finished. Nothing runs, and the agent is told nobody refused, so it may
+  ask again.
 
 Pending checks become human questions before an upgrade; they are never
 replayed.
