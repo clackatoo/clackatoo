@@ -8,9 +8,17 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{WorkItem, WorkState};
 
+mod asked;
+pub(crate) use asked::{Asked, Outcome, Question};
+
+/// How many threads run jobs.
 const WORKERS: usize = 2;
+/// The most jobs queued or running at once, hidden ones included.
 const MOST_ACTIVE: usize = 64;
+/// The most finished jobs whose outcomes are kept for the list.
 const MOST_HISTORY: usize = 16;
+/// How long a background job waits before it counts as urgent as an
+/// interactive one.
 const AGE: Duration = Duration::from_secs(2);
 
 /// Interactive demand can promote an already queued background job.
@@ -27,16 +35,31 @@ pub(crate) enum Step {
     Done,
 }
 
+/// Whether a job is the user's to watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Show {
+    /// It's in the work list, and its outcome stays there until dismissed.
+    Listed,
+    /// It's the plumbing of a question someone is waiting on (a search, a
+    /// preview, a lookup): never in the list, its history or the badge.
+    /// Whoever asked hears how it went, so it leaves nothing behind.
+    Hidden,
+}
+
+/// A job's work: called for each slice until it says it's done.
 type Task = Box<dyn FnMut(&Context) -> Result<Step, String> + Send>;
 
+/// A job, from when it's queued until its outcome is dismissed.
 struct Entry {
     key: String,
+    show: Show,
     priority: Priority,
     ready: Instant,
     item: WorkItem,
     task: Option<Task>,
 }
 
+/// What the workers and the loop share, under one lock.
 #[derive(Default)]
 struct State {
     next: u64,
@@ -49,6 +72,7 @@ struct State {
     last_scope: Option<String>,
 }
 
+/// The scheduler's state, and how its workers and the loop are woken.
 struct Shared {
     state: Mutex<State>,
     ready: Condvar,
@@ -63,8 +87,13 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn changed(&self, state: &mut State) {
-        state.revision += 1;
+    /// Wakes the loop, once until it next looks, as a job changed. The
+    /// list's revision moves only for a job `show`n in it, so hidden jobs
+    /// never send windows a list that reads the same as the last.
+    fn changed(&self, state: &mut State, show: Show) {
+        if show == Show::Listed {
+            state.revision += 1;
+        }
         if !self.dirty.swap(true, Ordering::AcqRel) {
             (self.wake)();
         }
@@ -78,6 +107,7 @@ pub(crate) struct Context {
 }
 
 impl Context {
+    /// Whether the job has been told to stop, or the scheduler has.
     pub(crate) fn cancelled(&self) -> bool {
         let state = self.shared.lock();
         state.stopped
@@ -95,7 +125,7 @@ impl Context {
         let Some(entry) = state.entries.get_mut(&self.id) else {
             return;
         };
-        if entry.item.state != WorkState::Running {
+        if entry.item.state != WorkState::Running || entry.show == Show::Hidden {
             return;
         }
         let detail = shown(detail);
@@ -111,7 +141,7 @@ impl Context {
         entry.item.detail = detail;
         entry.item.completed = completed;
         entry.item.total = total;
-        self.shared.changed(&mut state);
+        self.shared.changed(&mut state, Show::Listed);
     }
 }
 
@@ -131,6 +161,7 @@ impl std::fmt::Debug for Scheduler {
 }
 
 impl Scheduler {
+    /// A scheduler that calls `wake` when the loop should look at it.
     pub(crate) fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -152,6 +183,34 @@ impl Scheduler {
         scope: Option<String>,
         priority: Priority,
         task: impl FnMut(&Context) -> Result<Step, String> + Send + 'static,
+    ) -> Result<u64, String> {
+        self.submit_as(Show::Listed, key, title, scope, priority, Box::new(task))
+    }
+
+    /// Queues a job the user never sees: the plumbing of a question
+    /// someone is waiting on, who hears how it went. It's in no list, and
+    /// is forgotten as it ends, however it ends. Keys are as
+    /// [`submit`](Self::submit)'s.
+    pub(crate) fn submit_hidden(
+        &mut self,
+        key: String,
+        scope: Option<String>,
+        priority: Priority,
+        task: impl FnMut(&Context) -> Result<Step, String> + Send + 'static,
+    ) -> Result<u64, String> {
+        self.submit_as(Show::Hidden, key, "", scope, priority, Box::new(task))
+    }
+
+    /// Queues a job, `show`n or hidden, or joins one already queued with
+    /// the same key.
+    fn submit_as(
+        &mut self,
+        show: Show,
+        key: String,
+        title: &str,
+        scope: Option<String>,
+        priority: Priority,
+        task: Task,
     ) -> Result<u64, String> {
         if !self.started {
             for _ in 0..WORKERS {
@@ -193,9 +252,10 @@ impl Scheduler {
             id,
             Entry {
                 key,
+                show,
                 priority,
                 ready: Instant::now(),
-                task: Some(Box::new(task)),
+                task: Some(task),
                 item: WorkItem {
                     id,
                     title: shown(title),
@@ -209,15 +269,23 @@ impl Scheduler {
             },
         );
         state.queue.push_back(id);
-        self.shared.changed(&mut state);
+        self.shared.changed(&mut state, show);
         self.shared.ready.notify_all();
         Ok(id)
     }
 
+    /// The work list's revision, which moves as a listed job changes. The
+    /// loop asks each turn, and that's it looking: a change after this
+    /// wakes it again. (Only [`snapshot`](Self::snapshot) used to count as
+    /// looking, so a job that finished while the list was held back for
+    /// its quarter second woke nobody, and its answer waited that long.)
     pub(crate) fn revision(&self) -> u64 {
-        self.shared.lock().revision
+        let state = self.shared.lock();
+        self.shared.dirty.store(false, Ordering::Release);
+        state.revision
     }
 
+    /// The jobs the user may watch, with the list's revision.
     pub(crate) fn snapshot(&self) -> (u64, Vec<WorkItem>) {
         let state = self.shared.lock();
         self.shared.dirty.store(false, Ordering::Release);
@@ -226,11 +294,14 @@ impl Scheduler {
             state
                 .entries
                 .values()
+                .filter(|entry| entry.show == Show::Listed)
                 .map(|entry| entry.item.clone())
                 .collect(),
         )
     }
 
+    /// A job's state: `None` once it's dismissed, or for a hidden job once
+    /// it has ended.
     pub(crate) fn state(&self, id: u64) -> Option<WorkState> {
         self.shared
             .lock()
@@ -239,9 +310,21 @@ impl Scheduler {
             .map(|entry| entry.item.state)
     }
 
+    /// Asks a job to stop, for the feature that queued it.
     pub(crate) fn cancel(&self, id: u64) -> Result<(), String> {
+        self.cancel_if(id, |_| true)
+    }
+
+    /// Asks a job in the work list to stop, for the user. A hidden job
+    /// isn't theirs to stop: it's as if there were none.
+    pub(crate) fn cancel_listed(&self, id: u64) -> Result<(), String> {
+        self.cancel_if(id, |show| show == Show::Listed)
+    }
+
+    /// Asks the job `id` to stop, if `may` says one shown as it is may be.
+    fn cancel_if(&self, id: u64, may: impl Fn(Show) -> bool) -> Result<(), String> {
         let mut state = self.shared.lock();
-        let Some(entry) = state.entries.get_mut(&id) else {
+        let Some(entry) = state.entries.get_mut(&id).filter(|entry| may(entry.show)) else {
             return Err("No such background job.".into());
         };
         match entry.item.state {
@@ -250,14 +333,20 @@ impl Scheduler {
             WorkState::Queued | WorkState::Running => entry.item.state = WorkState::Cancelling,
             _ => return Ok(()),
         }
-        self.shared.changed(&mut state);
+        let show = entry.show;
+        self.shared.changed(&mut state, show);
         self.shared.ready.notify_all();
         Ok(())
     }
 
+    /// Takes a finished job's outcome out of the work list, for the user.
     pub(crate) fn dismiss(&self, id: u64) -> Result<(), String> {
         let mut state = self.shared.lock();
-        let Some(entry) = state.entries.get(&id) else {
+        let Some(entry) = state
+            .entries
+            .get(&id)
+            .filter(|entry| entry.show == Show::Listed)
+        else {
             return Ok(());
         };
         if entry.item.state.active() {
@@ -265,10 +354,11 @@ impl Scheduler {
         }
         state.entries.remove(&id);
         state.history.retain(|old| *old != id);
-        self.shared.changed(&mut state);
+        self.shared.changed(&mut state, Show::Listed);
         Ok(())
     }
 
+    /// Tells every worker to end.
     fn stop(&self) {
         let mut state = self.shared.lock();
         state.stopped = true;
@@ -282,8 +372,14 @@ impl Drop for Scheduler {
     }
 }
 
+/// Ends the job `id` as `outcome`. A listed job's outcome joins the
+/// history; a hidden job is forgotten.
 fn finish(state: &mut State, id: u64, outcome: WorkState) {
     let entry = state.entries.get_mut(&id).expect("a submitted job");
+    if entry.show == Show::Hidden {
+        state.entries.remove(&id);
+        return;
+    }
     entry.item.state = outcome;
     entry.item.cancellable = false;
     entry.task = None;
@@ -300,6 +396,9 @@ fn finish(state: &mut State, id: u64, outcome: WorkState) {
     }
 }
 
+/// Where in the queue the job to run next is: one whose project has
+/// nothing running, urgent before not, from another project than the
+/// last if there is one, and the longest queued of those.
 fn pick(state: &State) -> Option<usize> {
     let now = Instant::now();
     state
@@ -321,6 +420,8 @@ fn pick(state: &State) -> Option<usize> {
         .map(|(at, _)| at)
 }
 
+/// A worker: takes jobs and runs a slice of each, until the scheduler
+/// stops.
 fn run(shared: &Arc<Shared>) {
     loop {
         let (id, mut task) = {
@@ -337,9 +438,10 @@ fn run(shared: &Arc<Shared>) {
                     }
                     let scope = entry.item.scope.clone();
                     let task = entry.task.take().expect("queued task");
+                    let show = entry.show;
                     state.last_scope.clone_from(&scope);
                     state.running.insert(id, scope);
-                    shared.changed(&mut state);
+                    shared.changed(&mut state, show);
                     break (id, task);
                 }
                 state = shared
@@ -371,6 +473,7 @@ fn run(shared: &Arc<Shared>) {
         }
         state.running.remove(&id);
         let cancelled = state.stopped || state.entries[&id].item.state == WorkState::Cancelling;
+        let show = state.entries[&id].show;
         match result {
             _ if cancelled => finish(&mut state, id, WorkState::Cancelled),
             Ok(Step::Again) => {
@@ -386,11 +489,13 @@ fn run(shared: &Arc<Shared>) {
                 finish(&mut state, id, WorkState::Failed);
             }
         }
-        shared.changed(&mut state);
+        shared.changed(&mut state, show);
         shared.ready.notify_all();
     }
 }
 
+/// `text` as the work list shows it: one line, of no more than 240
+/// characters.
 fn shown(text: &str) -> String {
     clackatoo_term::visible(
         text.chars()
