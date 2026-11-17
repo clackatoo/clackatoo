@@ -15,8 +15,8 @@ shot mcp-servers
 keys j<CR>
 wait-for Connects by
 shot mcp-server
-# Down to its command, and something typed after it.
-keys <Tab><Tab><Tab><Tab>
+# On to its command, past what only says something, and more typed.
+keys <Tab><Tab>
 type -changed
 shot mcp-typing
 keys <CR>
@@ -24,10 +24,11 @@ shot mcp-changed
 # Esc asks before the change goes.
 keys <Esc>
 shot mcp-discard
-# A timeout that's no number says so under its field.
-keys <Tab><Tab><Tab><Tab>
+# A timeout that's no number says so under its field; Enter there stays
+# there, as Remove is next.
+keys <Tab><Tab><Tab><Tab><Tab>
 type x
-keys <Tab>
+keys <CR>
 shot mcp-wrong
 keys <Esc><Esc>
 wait-for Add a server
@@ -43,7 +44,9 @@ type docs-token
 keys <Tab>
 type never-show-this-private-value
 shot mcp-private-credential
-keys <Esc><Esc><Esc>
+keys <CR>
+shot mcp-private-credential-typed
+keys <Esc><Esc>
 wait-for Add a server
 size 800x780
 shot mcp-800

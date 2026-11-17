@@ -15,7 +15,7 @@ keys }
 wait-for Add a server
 shot short-mcp
 keys }
-wait-for Permission engine
+wait-for Who answers agents
 shot short-permissions
 size 1280x900
 keys {{{{G

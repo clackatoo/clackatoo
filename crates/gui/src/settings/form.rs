@@ -12,32 +12,39 @@
 //! Every box of text in a form is typed into one way (see [`key`] and
 //! [`edit`]): a character typed on the box the keys are on starts it,
 //! Enter finishes it and goes to the next row, Tab and Shift+Tab go from
-//! row to row, Esc puts back what it held, and a click puts the caret
-//! where it's clicked. Letters that act elsewhere in the menu (`q`, `m`,
+//! row to row, Esc stops typing, keeping what's typed, and a click puts
+//! the caret where it's clicked. Letters that act elsewhere in the menu (`q`, `m`,
 //! `r`, `u`, `/`) do nothing while a form is open, so typing a moment too
 //! soon never closes it.
 //!
 //! | Key | Does, in a form |
 //! |---|---|
-//! | Tab, Shift+Tab; Down, Up | The next row or the one before |
+//! | Tab, Shift+Tab | The next row with something to press or type into, or the one before |
+//! | Down, Up | The next row or the one before, whatever it holds |
 //! | `j`, `k`; `h`, `l` | The same, and the next or previous choice, on a row that isn't text |
-//! | Enter, Space | Presses the row's button, or its switch or next choice; Enter in a box of text finishes it |
+//! | Enter, Space | Presses the row's button, or its switch or next choice; Enter in a box of text finishes it and goes to the next row, but never on to a button that takes something away |
 //! | Ctrl+S | Saves the form |
-//! | Esc | Puts back the text being typed; or else cancels the form, asking first if it has changes |
+//! | Esc | Stops typing; or else cancels the form, asking first if it has changes |
+//!
+//! A button that takes something away for good is pressed twice: the
+//! first press arms it, and any key or click but the second press takes
+//! that back (see [`Catalogue::disarm`]).
 
 use std::time::{Duration, Instant};
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use super::Outcome;
-use super::view::{FieldView, Part, RowView};
+use super::view::{ControlView, FieldView, Part, RowView};
+use crate::render::Ink;
 use crate::vim::Stroke;
 
-/// A box of text being typed into: the row it's of, where the caret is in
-/// it, in bytes, and what it held before, which Esc puts back.
+/// A box of text being typed into: the row it's of, and where the caret
+/// is in it, in bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Typing {
     pub(super) row: usize,
     pub(super) caret: usize,
-    before: String,
 }
 
 /// The text of a row that's a box of text, to type into, and the most
@@ -88,6 +95,9 @@ pub(super) struct FormView {
     pub(super) changed: bool,
     /// What its button that finishes it says: `Save`, or `Saving…`.
     pub(super) save: String,
+    /// It's been sent to be saved, and the daemon hasn't answered: its
+    /// fields don't change meanwhile, as what's saved is what was sent.
+    pub(super) saving: bool,
 }
 
 /// What an action came to, said along the foot until the next one: a read
@@ -222,6 +232,14 @@ pub(super) trait Catalogue {
 
     /// The list's one button, by its title, was pressed.
     fn add(&mut self) -> Did;
+
+    /// Whether row `at` is a button that takes something away for good:
+    /// Enter in the field before it never goes on to it.
+    fn takes_away(&self, at: usize) -> bool;
+
+    /// A key or a click that isn't the second press of a button that
+    /// asks for two: the first press is taken back.
+    fn disarm(&mut self);
 }
 
 /// How many rows `catalogue` shows.
@@ -257,6 +275,10 @@ pub(super) fn key(catalogue: &mut dyn Catalogue, focus: &mut usize, stroke: Stro
         };
     }
     *focus = (*focus).min(len - 1);
+    let presses = matches!(stroke, Stroke::Enter | Stroke::Char { ch: ' ', .. });
+    if !presses || catalogue.typing().is_some() {
+        catalogue.disarm();
+    }
     if catalogue.typing().is_some() {
         return key_typing(catalogue, focus, stroke, len);
     }
@@ -272,8 +294,10 @@ pub(super) fn key(catalogue: &mut dyn Catalogue, focus: &mut usize, stroke: Stro
             ch: 'c',
             ctrl: true,
         } => Keyed::Cancel,
-        Stroke::Tab => go(catalogue, focus, (at + 1) % len),
-        Stroke::BackTab => go(catalogue, focus, (at + len - 1) % len),
+        Stroke::Tab | Stroke::BackTab => {
+            let to = stop_after(catalogue, at, stroke == Stroke::Tab);
+            go(catalogue, focus, to)
+        }
         Stroke::Down => go(catalogue, focus, (at + 1).min(len - 1)),
         Stroke::Up => go(catalogue, focus, at.saturating_sub(1)),
         Stroke::Enter if text => {
@@ -282,10 +306,18 @@ pub(super) fn key(catalogue: &mut dyn Catalogue, focus: &mut usize, stroke: Stro
         }
         // Anything that changes text, or moves in it, starts typing it.
         Stroke::Char { ctrl: false, .. }
+        | Stroke::Char {
+            ch: 'a' | 'e' | 'u' | 'w',
+            ctrl: true,
+        }
         | Stroke::Backspace
         | Stroke::Delete
         | Stroke::Left
         | Stroke::Right
+        | Stroke::CtrlLeft
+        | Stroke::CtrlRight
+        | Stroke::ShiftLeft
+        | Stroke::ShiftRight
         | Stroke::Home
         | Stroke::End
             if text =>
@@ -310,6 +342,18 @@ pub(super) fn key(catalogue: &mut dyn Catalogue, focus: &mut usize, stroke: Stro
         },
         _ => Keyed::Nothing,
     }
+}
+
+/// The row Tab goes to from row `at`, or Shift+Tab if not `forward`: the
+/// next with something to press or type into, going round, past rows
+/// that only say something. `at` itself, if there's no other.
+fn stop_after(catalogue: &dyn Catalogue, at: usize, forward: bool) -> usize {
+    let drawn = catalogue.drawn();
+    let len = drawn.len();
+    (1..len)
+        .map(|by| if forward { at + by } else { at + len - by } % len)
+        .find(|&row| drawn[row].control != ControlView::None)
+        .unwrap_or(at)
 }
 
 /// Takes the keys from row `focus` to row `to`.
@@ -347,25 +391,32 @@ fn key_typing(
             ch: 'c',
             ctrl: true,
         } => {
-            if let Some(text) = catalogue.text(at) {
-                *text.value = typing.before;
-            }
-            *catalogue.typing_mut() = None;
+            finish(catalogue);
             Keyed::Changed
         }
-        Stroke::Enter | Stroke::Down => {
+        Stroke::Enter => {
+            finish(catalogue);
+            // On to the next row, but never to one that takes something
+            // away: Enter pressed once too often mustn't.
+            let next = at + 1;
+            if next < len && !catalogue.takes_away(next) {
+                *focus = next;
+            }
+            Keyed::Moved
+        }
+        Stroke::Down => {
             finish(catalogue);
             *focus = (at + 1).min(len - 1);
             Keyed::Moved
         }
         Stroke::Tab => {
             finish(catalogue);
-            *focus = (at + 1) % len;
+            *focus = stop_after(catalogue, at, true);
             Keyed::Moved
         }
         Stroke::BackTab => {
             finish(catalogue);
-            *focus = (at + len - 1) % len;
+            *focus = stop_after(catalogue, at, false);
             Keyed::Moved
         }
         Stroke::Up => {
@@ -396,22 +447,16 @@ pub(super) fn begin(catalogue: &mut dyn Catalogue, at: usize, caret: Option<usiz
     let Some(text) = catalogue.text(at) else {
         return;
     };
-    let before = text.value.clone();
-    // A click can land inside a character of several bytes.
-    let mut caret = caret.map_or(before.len(), |caret| caret.min(before.len()));
-    while !before.is_char_boundary(caret) {
-        caret -= 1;
-    }
-    // Typing already under way keeps what Esc puts back.
-    let before = match catalogue.typing() {
-        Some(typing) => typing.before.clone(),
-        None => before,
-    };
-    *catalogue.typing_mut() = Some(Typing {
-        row: at,
-        caret,
-        before,
-    });
+    // A click can land inside a character made of several: the caret
+    // goes before it.
+    let wanted = caret.map_or(text.value.len(), |caret| caret.min(text.value.len()));
+    let caret = (text.value.grapheme_indices(true))
+        .map(|(start, _)| start)
+        .chain([text.value.len()])
+        .take_while(|start| *start <= wanted)
+        .last()
+        .unwrap_or(0);
+    *catalogue.typing_mut() = Some(Typing { row: at, caret });
 }
 
 /// Stops typing, keeping what was typed, and notes what's wrong with it.
@@ -421,48 +466,64 @@ pub(super) fn finish(catalogue: &mut dyn Catalogue) {
     }
 }
 
+/// What came of pasting into a form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Pasted {
+    /// The keys aren't on a box of text.
+    Nowhere,
+    /// It was typed in.
+    Typed,
+    /// It's more than the box holds, so none of it was: part of an
+    /// address or a token is worse than none.
+    TooLong,
+}
+
 /// Types `pasted` into the box being typed into, or the one the keys are
-/// on, a line break as a blank. Returns whether anything changed.
-pub(super) fn paste(catalogue: &mut dyn Catalogue, focus: usize, pasted: &str) -> bool {
+/// on: without the line breaks it starts or ends with, as a line copied
+/// whole has one, and with any inside it as blanks.
+pub(super) fn paste(catalogue: &mut dyn Catalogue, focus: usize, pasted: &str) -> Pasted {
     if catalogue.typing().is_none() {
         if catalogue.text(focus).is_none() {
-            return false;
+            return Pasted::Nowhere;
         }
         begin(catalogue, focus, None);
     }
     let Some(mut typing) = catalogue.typing().cloned() else {
-        return false;
+        return Pasted::Nowhere;
     };
     let Some(text) = catalogue.text(typing.row) else {
-        return false;
+        return Pasted::Nowhere;
     };
     let pasted: String = pasted
+        .trim_matches(['\r', '\n'])
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     if text.value.len() + pasted.len() > text.most {
-        return false;
+        return Pasted::TooLong;
     }
     text.value.insert_str(typing.caret, &pasted);
     typing.caret += pasted.len();
     *catalogue.typing_mut() = Some(typing);
-    true
+    Pasted::Typed
 }
 
 /// Changes `text`, or moves `caret` in it, as `stroke` does in a box of
 /// text holding at most `most` bytes. Returns whether it did anything.
 pub(super) fn edit(text: &mut String, caret: &mut usize, stroke: Stroke, most: usize) -> bool {
+    // A character as it's read, which may be several as they're stored:
+    // a letter and its accent, or an emoji made of a few.
     let before = |text: &str, at: usize| {
         text[..at]
-            .char_indices()
+            .grapheme_indices(true)
             .next_back()
             .map_or(0, |(start, _)| start)
     };
     let after = |text: &str, at: usize| {
         text[at..]
-            .chars()
+            .graphemes(true)
             .next()
-            .map_or(at, |ch| at + ch.len_utf8())
+            .map_or(at, |whole| at + whole.len())
     };
     *caret = (*caret).min(text.len());
     match stroke {
@@ -532,6 +593,64 @@ fn word_end(text: &str, at: usize) -> usize {
     rest[skipped..]
         .find(char::is_whitespace)
         .map_or(text.len(), |blank| at + skipped + blank)
+}
+
+/// What's wrong with a form's fields, each said under its own: `F` is the
+/// form's own name for a field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Marks<F>(Vec<(F, String)>);
+
+impl<F> Default for Marks<F> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<F: Copy + PartialEq> Marks<F> {
+    /// Notes what's `wrong` with `field`, or with none, that nothing is
+    /// any more. Returns whether it's fine.
+    pub(super) fn set(&mut self, field: F, wrong: Option<String>) -> bool {
+        self.0.retain(|(each, _)| *each != field);
+        match wrong {
+            Some(why) => {
+                self.0.push((field, why));
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// Nothing's wrong with anything any more, as far as is known.
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// How many fields have something wrong.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `row`, `field`'s, with what's wrong with it under its help.
+    pub(super) fn under(&self, field: F, mut row: RowView) -> RowView {
+        for (_, why) in self.0.iter().filter(|(each, _)| *each == field) {
+            row.notes.push((why.clone(), Ink::Warning));
+        }
+        row
+    }
+}
+
+/// The choice a press picks of `len`, the one at `now` being picked: the
+/// one clicked, `choice`, or with none, the next, going round.
+pub(super) fn chosen(now: Option<usize>, choice: Option<usize>, len: usize) -> usize {
+    let next = now.map_or(0, |now| (now + 1) % len);
+    choice.unwrap_or(next).min(len - 1)
+}
+
+/// The choice `l` or `h` steps to from the one at `now`, of `len`: the
+/// next or the one before, without going round.
+pub(super) fn stepped(now: Option<usize>, by: isize, len: usize) -> usize {
+    now.unwrap_or(0).saturating_add_signed(by).min(len - 1)
 }
 
 /// A box of text as a row shows it: `value`, with the caret in it if
@@ -612,6 +731,31 @@ mod tests {
         );
         assert_eq!(typed("git status", 0, &[Stroke::CtrlRight]).1, 3);
         assert_eq!(typed("git status", 10, &[Stroke::CtrlLeft]).1, 4);
+    }
+
+    #[test]
+    fn a_letter_and_its_accent_or_a_joined_emoji_are_one_character_to_the_keys() {
+        // e, then a combining acute; a family of three joined; then z.
+        let text = "e\u{301}\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}z";
+        let end = text.len();
+        assert_eq!(typed(text, end, &[Stroke::Left, Stroke::Left]).1, 3);
+        assert_eq!(
+            typed(text, end, &[Stroke::Left, Stroke::Backspace]).0,
+            "e\u{301}z"
+        );
+        assert_eq!(typed(text, 0, &[Stroke::Delete]).1, 0);
+        assert_eq!(typed(text, 0, &[Stroke::Delete]).0.chars().count(), 6);
+        assert_eq!(typed(text, 0, &[Stroke::Right]).1, 3);
+    }
+
+    #[test]
+    fn choices_are_pressed_round_and_stepped_to_their_ends() {
+        assert_eq!(chosen(Some(2), None, 3), 0);
+        assert_eq!(chosen(Some(0), Some(2), 3), 2);
+        assert_eq!(chosen(None, None, 3), 0);
+        assert_eq!(stepped(Some(2), 1, 3), 2);
+        assert_eq!(stepped(Some(0), -1, 3), 0);
+        assert_eq!(stepped(Some(1), 1, 3), 2);
     }
 
     #[test]

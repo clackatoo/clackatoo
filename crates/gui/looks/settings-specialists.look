@@ -11,7 +11,12 @@ limits: read-only
 ---
 Inspect trust boundaries and report concrete findings.
 END
-keys <C-;>:Settings<CR>
+# The project's own load only once its folder is trusted.
+keys <C-;>
+type :trust $PROJECT
+keys <CR>
+sleep 500
+keys :Settings<CR>
 wait-for Appearance
 keys }}}}}}
 wait-for New specialist

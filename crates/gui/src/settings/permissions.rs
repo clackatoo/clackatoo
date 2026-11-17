@@ -12,7 +12,7 @@
 use clackatoo_daemon::permissions::{Decision, Kind, Rule, read_rules};
 use clackatoo_protocol::PermissionRecord;
 
-use super::form::{self, Catalogue, Did, FormView, MOST_TEXT, Notice, Text, Typing};
+use super::form::{self, Catalogue, Did, FormView, MOST_TEXT, Marks, Notice, Text, Typing};
 use super::view::{ButtonView, ControlView, FieldView, Part, RowView};
 use super::{Facts, Outcome, Set, SettingsMenu};
 use crate::options::{SetBy, Value};
@@ -77,7 +77,7 @@ struct Draft {
     original: Option<Rule>,
     held: Held,
     opened: Held,
-    errors: Vec<(Field, String)>,
+    errors: Marks<Field>,
     /// Delete was pressed once: again deletes it.
     deleting: bool,
 }
@@ -127,7 +127,7 @@ impl Draft {
             original: rule.cloned(),
             opened: held.clone(),
             held,
-            errors: Vec::new(),
+            errors: Marks::default(),
             deleting: false,
         }
     }
@@ -183,31 +183,29 @@ impl Draft {
         let alone = serde_json::to_string(&[&rule]).unwrap_or_default();
         match read_rules(&alone) {
             Ok(_) => Ok(rule),
-            Err(why) => Err((Field::Target, said(&why))),
+            Err(why) => Err((Field::Target, why)),
         }
     }
 
     /// Notes what's wrong with what `field` holds, to say under it, or
     /// that nothing is any more.
     fn check(&mut self, field: Field) {
-        self.errors.retain(|(each, _)| *each != field);
-        if let Err((wrong, why)) = self.rule()
-            && wrong == field
-        {
-            self.errors.push((field, why));
-        }
+        let wrong = match self.rule() {
+            Err((wrong, why)) if wrong == field => Some(why),
+            _ => None,
+        };
+        self.errors.set(field, wrong);
     }
 }
 
-/// Why the daemon's rules can't be read, or one can't be saved, as its
-/// reader says it.
-fn said(why: &dyn std::fmt::Display) -> String {
-    why.to_string()
-}
-
-/// `rule` as a sentence: `Allow the command git status`.
+/// `rule` as a sentence: `Allow the command git status`, `Deny commands
+/// starting git push`.
 fn sentence(rule: &Rule) -> String {
-    let decision = rule.decision.name();
+    let decision = match rule.decision {
+        Decision::Allow => "Allow",
+        Decision::Ask => "Ask about",
+        Decision::Deny => "Deny",
+    };
     let target = &rule.target;
     match rule.kind {
         Kind::Tool if rule.arguments.is_some() => {
@@ -217,7 +215,12 @@ fn sentence(rule: &Rule) -> String {
             format!("{decision} any command through `{target}`")
         }
         Kind::Tool => format!("{decision} the tool `{target}`"),
-        Kind::Command => format!("{decision} the command `{target}`"),
+        // An Allow is of those words and no more; the others catch
+        // whatever starts with them.
+        Kind::Command if rule.decision == Decision::Allow => {
+            format!("{decision} the command `{target}`")
+        }
+        Kind::Command => format!("{decision} commands starting `{target}`"),
         Kind::Read => format!("{decision} reading files in `{target}`"),
         Kind::Edit => format!("{decision} changing files in `{target}`"),
     }
@@ -247,7 +250,7 @@ impl Permissions {
                 }
                 Err(why) => {
                     self.rules.clear();
-                    self.unreadable = Some(said(&why));
+                    self.unreadable = Some(why);
                 }
             }
         }
@@ -257,6 +260,20 @@ impl Permissions {
         self.now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
+    }
+
+    /// The rule that row `row` of the list is, if it's one.
+    pub(super) fn rule_at(&self, row: usize) -> Option<Rule> {
+        match self.rows().get(row)? {
+            Row::Rule(at) => self.rules.get(*at).cloned(),
+            _ => None,
+        }
+    }
+
+    /// The row of the list that `rule` is on, if it's listed.
+    pub(super) fn row_of(&self, rule: &Rule) -> Option<usize> {
+        let at = self.rules.iter().position(|each| each == rule)?;
+        self.rows().iter().position(|row| *row == Row::Rule(at))
     }
 
     /// The rules, as sentences, for a search to find.
@@ -296,10 +313,11 @@ impl Permissions {
         self.notice.as_ref()
     }
 
-    /// The connection was lost: a save asked for will never be answered.
-    pub(super) fn lost(&mut self) {
+    /// A save asked for will never be answered, and `why`: the connection
+    /// was lost, or there was none to ask on.
+    pub(super) fn lost(&mut self, why: &str) {
         if std::mem::take(&mut self.saving) {
-            self.notice = Some(Notice::Failed(super::LOST_ASKING.into()));
+            self.notice = Some(Notice::Failed(why.to_owned()));
         }
     }
 
@@ -418,7 +436,13 @@ impl Permissions {
                     }
                     Kind::Tool if rule.arguments.is_none() => "Whatever it's asked to do.",
                     Kind::Tool => "Only when it's given exactly the arguments the rule has.",
-                    Kind::Command => "Exactly that command, with nothing more on its line.",
+                    Kind::Command if rule.decision == Decision::Allow => {
+                        "Those words exactly, and nothing after them."
+                    }
+                    Kind::Command => {
+                        "Any command that starts with those words, wherever its program is \
+                         run from."
+                    }
                     Kind::Read | Kind::Edit => "In that folder, and the folders in it.",
                 };
                 match &self.locked {
@@ -442,6 +466,8 @@ impl Permissions {
                     "Allow" => "Allowed",
                     "Ask" => "Asked you about",
                     "Deny" => "Denied",
+                    // Nothing was decided: its turn ended, or its chat went.
+                    "Cancelled" => "Stopped asking about",
                     other => other,
                 };
                 RowView::new(
@@ -506,11 +532,17 @@ impl Permissions {
                     "As server/tool: clackatoo/list_panes, or claude/Bash.",
                     boxed(&held.target, "server/tool"),
                 ),
-                Kind::Command => RowView::new(
+                Kind::Command if held.decision == Decision::Allow => RowView::new(
                     "Command",
-                    "The whole command, exactly, as git status. One with a pipe, a quote or a \
-                     * in it always asks.",
+                    "The whole command, word for word, as git status: one with more after it \
+                     isn't allowed by this. One with a pipe, a quote or a * in it always asks.",
                     boxed(&held.target, "git status"),
+                ),
+                Kind::Command => RowView::new(
+                    "Command starts with",
+                    "How it starts, as git push: that catches git push origin too, and \
+                     /usr/bin/git push.",
+                    boxed(&held.target, "git push"),
                 ),
                 Kind::Read | Kind::Edit => RowView::new(
                     "Folder",
@@ -537,10 +569,7 @@ impl Permissions {
                 Ink::Caution,
             ));
         }
-        for (_, why) in draft.errors.iter().filter(|(each, _)| *each == field) {
-            view.notes.push((why.clone(), Ink::Warning));
-        }
-        view
+        draft.errors.under(field, view)
     }
 
     /// Saves the list with the form's rule in it, or with `delete`,
@@ -551,6 +580,19 @@ impl Permissions {
         }
         if let Some(why) = self.refusal() {
             self.notice = Some(Notice::Failed(why.to_owned()));
+            return Did::Changed;
+        }
+        // A list that can't be read now, though it could when the form
+        // opened, is never saved over with what little is known of it.
+        if let Some(why) = self.unreadable().filter(|_| self.ready) {
+            self.notice = Some(Notice::Failed(why));
+            return Did::Changed;
+        }
+        if !self.ready {
+            self.notice = Some(Notice::Failed(
+                "The daemon's rules aren't known just now, so this can't be saved into them."
+                    .into(),
+            ));
             return Did::Changed;
         }
         let Some(draft) = &mut self.draft else {
@@ -582,7 +624,7 @@ impl Permissions {
                 let rule = match draft.rule() {
                     Ok(rule) => rule,
                     Err((field, why)) => {
-                        draft.errors.push((field, why));
+                        draft.errors.set(field, Some(why));
                         self.notice = Some(Notice::Marked);
                         let at = (self.rows().iter()).position(|row| *row == Row::Field(field));
                         return Did::Went(at.unwrap_or(0));
@@ -597,7 +639,7 @@ impl Permissions {
         self.landing = place.unwrap_or(rules.len().saturating_sub(1));
         let text = serde_json::to_string(&rules).unwrap_or_default();
         if let Err(why) = read_rules(&text) {
-            self.notice = Some(Notice::Failed(said(&why)));
+            self.notice = Some(Notice::Failed(why));
             return Did::Changed;
         }
         self.saving = true;
@@ -661,20 +703,12 @@ impl Catalogue for Permissions {
         let held = &mut draft.held;
         match field {
             Field::Decision => {
-                let now = DECISIONS
-                    .iter()
-                    .position(|each| *each == held.decision)
-                    .unwrap_or(0);
-                let to = choice.unwrap_or((now + 1) % DECISIONS.len());
-                held.decision = DECISIONS[to.min(DECISIONS.len() - 1)];
+                let now = DECISIONS.iter().position(|each| *each == held.decision);
+                held.decision = DECISIONS[form::chosen(now, choice, DECISIONS.len())];
             }
             Field::Kind => {
-                let now = KINDS
-                    .iter()
-                    .position(|each| *each == held.kind)
-                    .unwrap_or(0);
-                let to = choice.unwrap_or((now + 1) % KINDS.len());
-                held.kind = KINDS[to.min(KINDS.len() - 1)];
+                let now = KINDS.iter().position(|each| *each == held.kind);
+                held.kind = KINDS[form::chosen(now, choice, KINDS.len())];
                 // What was wrong for another kind may not be for this.
                 draft.errors.clear();
             }
@@ -704,9 +738,8 @@ impl Catalogue for Permissions {
             ),
             Field::Target | Field::Arguments => return Did::Nothing,
         };
-        let now = now.unwrap_or(0);
-        let to = now.saturating_add_signed(by).min(len - 1);
-        if to == now {
+        let to = form::stepped(now, by, len);
+        if Some(to) == now {
             return Did::Nothing;
         }
         self.press(at, Some(Part::Segment(u8::try_from(to).unwrap_or(0))))
@@ -719,9 +752,10 @@ impl Catalogue for Permissions {
                 Some(rule) => sentence(rule),
                 None => "New rule".into(),
             },
-            subtitle: "A rule answers for you when what an agent asks matches it exactly.".into(),
+            subtitle: "A rule answers for you when what an agent asks matches it.".into(),
             changed: draft.held != draft.opened,
             save: if self.saving { "Saving…" } else { "Save" }.into(),
+            saving: self.saving && self.from_form,
         })
     }
 
@@ -790,6 +824,19 @@ impl Catalogue for Permissions {
         self.notice = None;
         Did::Went(0)
     }
+
+    fn takes_away(&self, at: usize) -> bool {
+        self.rows().get(at) == Some(&Row::Delete)
+    }
+
+    fn disarm(&mut self) {
+        if let Some(draft) = &mut self.draft
+            && std::mem::take(&mut draft.deleting)
+        {
+            self.notice
+                .take_if(|notice| matches!(notice, Notice::Confirm(_)));
+        }
+    }
 }
 
 impl SettingsMenu {
@@ -833,7 +880,7 @@ mod tests {
         );
         assert_eq!(
             said(Decision::Ask, Kind::Read, "~/notes"),
-            "Ask reading files in `~/notes`"
+            "Ask about reading files in `~/notes`"
         );
         assert_eq!(
             said(Decision::Allow, Kind::Tool, "clackatoo/list_panes"),
@@ -842,6 +889,15 @@ mod tests {
         assert_eq!(
             said(Decision::Allow, Kind::Tool, "claude/Bash"),
             "Allow any command through `claude/Bash`"
+        );
+        // A Deny or an Ask of a command catches whatever starts with it.
+        assert_eq!(
+            said(Decision::Deny, Kind::Command, "git push"),
+            "Deny commands starting `git push`"
+        );
+        assert_eq!(
+            said(Decision::Ask, Kind::Command, "git push"),
+            "Ask about commands starting `git push`"
         );
         // Denying one is only of the tool.
         assert_eq!(
@@ -860,7 +916,7 @@ mod tests {
         draft.held.target = "clackatoo/list_panes".into();
         draft.held.arguments = "{not json".into();
         draft.check(Field::Target);
-        assert!(draft.errors.is_empty());
+        assert_eq!(draft.errors.len(), 0);
         assert_eq!(draft.rule().unwrap_err().0, Field::Arguments);
         // Arguments are only a tool's: another kind's rule has none.
         draft.held.kind = Kind::Command;

@@ -97,6 +97,10 @@ impl Desk {
     /// Opens the settings menu, with `query` typed to search for.
     pub(super) fn open_settings(&mut self, query: &str) {
         self.close_finder();
+        // One open on a form with changes stays, and asks about them.
+        if self.settings.is_some() {
+            return;
+        }
         self.settings_scrolled_to_top();
         if let Some(shown) = self.shown {
             self.close_editor_panel(shown.pane);
@@ -151,7 +155,8 @@ impl Desk {
                 Some(NOT_CONNECTED.to_owned())
             } else if feature.is_some_and(|feature| !self.daemon_has(feature)) {
                 Some(format!(
-                    "This daemon is older than this window, and can't list {lists}. Upgrade it                      to use this page."
+                    "This daemon is older than this window, and can't list {lists}. Upgrade it \
+                     to use this page."
                 ))
             } else {
                 None
@@ -188,6 +193,18 @@ impl Desk {
         self.settings_changed();
     }
 
+    /// Closes the menu, as a key that leaves it does, or as something else
+    /// opens in its place: unless it holds a form with changes, which the
+    /// foot then asks about, as its close button would, and which goes if
+    /// it's closed again straight after.
+    pub(super) fn put_settings_away(&mut self) {
+        match self.settings.as_mut().map(SettingsMenu::closing) {
+            Some(false) => self.settings_changed(),
+            Some(true) => self.settings = None,
+            None => {}
+        }
+    }
+
     /// The connection to the daemon was lost: what the menu asked will
     /// never be answered, which its pages say.
     pub(super) fn settings_lost(&mut self) {
@@ -206,6 +223,9 @@ impl Desk {
         }
     }
 
+    /// Takes in the daemon's answer to what the menu's MCP Servers page
+    /// asked under the number `id`, opening a sign in's address in the
+    /// browser. Returns whether to draw.
     pub(super) fn settings_mcp(&mut self, id: u64, response: Response) -> bool {
         let result = match response {
             Response::Mcp(reply) => Ok(reply),
@@ -271,6 +291,8 @@ impl Desk {
         true
     }
 
+    /// Opens the settings menu on its Specialists page, as the cog by a
+    /// chat's specialists does.
     pub(super) fn open_specialist_settings(&mut self) {
         self.open_settings("");
         if let Some(menu) = &mut self.settings {
@@ -279,6 +301,8 @@ impl Desk {
         self.read_settings(Instant::now());
     }
 
+    /// Takes in the skills the menu asked for, or why they can't be
+    /// listed. Returns whether to draw.
     pub(super) fn settings_skills(&mut self, response: Response) -> bool {
         let result = match response {
             Response::Skills(skills) => Ok(skills),
@@ -744,7 +768,9 @@ impl Desk {
         true
     }
 
-    /// Carries out what a key or click did to the menu.
+    /// Asks the daemon for `action` of the menu's MCP Servers page, its
+    /// answer known by the number `id`: unless the keys are an agent's,
+    /// which may change no server.
     fn settings_mcp_action(&mut self, action: clackatoo_protocol::McpAction, id: u64) {
         if self.automating || self.controlled {
             if let Some(menu) = &mut self.settings {
@@ -756,6 +782,7 @@ impl Desk {
         }
     }
 
+    /// Carries out what a key or click did to the menu.
     fn settings_did(&mut self, outcome: Outcome) {
         // Nothing can be asked of a daemon that's out of reach: the page
         // that asked says so, as when the connection's lost.
@@ -765,7 +792,10 @@ impl Desk {
             _ => false,
         };
         if asks && !self.connected {
-            return self.settings_lost();
+            if let Some(menu) = &mut self.settings {
+                menu.not_sent();
+            }
+            return self.settings_changed();
         }
         match outcome {
             Outcome::Nothing | Outcome::Changed | Outcome::Fonts => {}

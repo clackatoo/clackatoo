@@ -83,7 +83,11 @@ fn asked(mcp: &mut Mcp, label: &str) -> (McpAction, u64) {
 /// Types `text` into the row labelled `label`, and leaves it.
 fn typed(mcp: &mut Mcp, label: &str, text: &str) {
     let mut at = row(mcp, label);
-    assert!(form::paste(mcp, at, text), "{label} takes no text");
+    assert_eq!(
+        form::paste(mcp, at, text),
+        form::Pasted::Typed,
+        "{label} takes no text"
+    );
     form::key(mcp, &mut at, Stroke::Enter);
 }
 
@@ -150,8 +154,10 @@ fn a_save_that_fails_keeps_the_form_and_cancel_works_while_one_is_asked() {
     assert_eq!(settings["command"], "search-server-changed");
     assert_eq!(settings["env"], json!({"KEY": {"secret": "search-key"}}));
     assert_eq!(mcp.form().unwrap().save, "Saving…");
-    // One thing is asked at a time.
-    assert_eq!(mcp.save(), Did::Nothing);
+    // It isn't sent twice: the foot says it's waiting.
+    assert_eq!(mcp.save(), Did::Changed);
+    assert!(matches!(mcp.notice(), Some(Notice::Working(said)) if said.starts_with("Still")));
+    assert!(mcp.form().unwrap().saving);
     mcp.came(id, Err("changed outside Settings".into()));
     assert_eq!(
         mcp.notice(),
@@ -176,7 +182,7 @@ fn a_lost_connection_fails_what_was_asked_and_the_list_is_read_again_once_it_is_
     mcp.press(row(&mcp, "search"), None);
     let (_, id) = asked(&mut mcp, "Test");
     mcp.reading();
-    mcp.lost();
+    mcp.lost(crate::settings::LOST_ASKING);
     assert_eq!(
         mcp.notice(),
         Some(&Notice::Failed(crate::settings::LOST_ASKING.into()))
@@ -195,11 +201,22 @@ fn a_lost_connection_fails_what_was_asked_and_the_list_is_read_again_once_it_is_
 }
 
 #[test]
-fn a_test_changes_its_server_alone_and_is_shown_until_the_server_changes() {
+fn a_test_changes_its_server_alone_and_holds_up_nothing_else() {
     let mut mcp = listing(vec![remote(), server()]);
     mcp.press(row(&mcp, "search"), None);
     let (_, id) = asked(&mut mcp, "Test");
-    // The daemon answers a test with the one server.
+    // While it's tested, something else can be asked, and is.
+    let (other, reconnect) = {
+        let mut connected = server();
+        connected.state = McpState::Connected;
+        let number = mcp.reading();
+        mcp.came(number, Ok(reply(vec![remote(), connected])));
+        asked(&mut mcp, "Reconnect")
+    };
+    assert!(matches!(other, McpAction::Reconnect { .. }));
+    mcp.came(reconnect, Ok(reply(vec![remote(), server()])));
+    assert!(matches!(mcp.notice(), Some(Notice::Done(said)) if said.contains("connecting")));
+    // A daemon before this one answers a test with the one server.
     let tested = McpServerInfo {
         state: McpState::Ready,
         detail: "Connection test passed.".into(),
@@ -216,19 +233,205 @@ fn a_test_changes_its_server_alone_and_is_shown_until_the_server_changes() {
         Some(&Notice::Done("search answered, with 1 tool.".into()))
     );
     assert!(labels(&mcp).contains(&"find".to_owned()));
-    // The daemon doesn't keep a test: the next read says nothing of it.
-    let number = mcp.reading();
-    mcp.came(number, Ok(reply(vec![remote(), server()])));
-    assert_eq!(mcp.server("search").unwrap().state, McpState::Ready);
-    assert_eq!(mcp.server("search").unwrap().tools.len(), 1);
-    // Saved as something else, it's no longer what was tested.
-    let number = mcp.reading();
-    let changed = McpServerInfo {
-        revision: "another".into(),
+    // One that needs a sign in answered, and says so; that's no failure.
+    let (_, id) = asked(&mut mcp, "Test");
+    let locked = McpServerInfo {
+        state: McpState::NeedsLogin,
+        detail: "Auth required".into(),
         ..server()
     };
-    mcp.came(number, Ok(reply(vec![remote(), changed])));
-    assert_eq!(mcp.server("search").unwrap().state, McpState::Disconnected);
+    mcp.came(id, Ok(reply(vec![remote(), locked])));
+    assert_eq!(
+        mcp.notice(),
+        Some(&Notice::Done(
+            "search answered that it needs a sign in.".into()
+        ))
+    );
+    // And the daemon's words for that aren't put beside the window's.
+    let status = &mcp.drawn()[row(&mcp, "Connection")];
+    assert!(!status.help.contains("Auth required"), "{status:?}");
+}
+
+#[test]
+fn a_form_with_changes_tests_nothing_until_it_is_saved() {
+    let mut mcp = listing(vec![server()]);
+    mcp.press(row(&mcp, "search"), None);
+    typed(&mut mcp, "Command", "-next");
+    let test = row(&mcp, "Test");
+    let ControlView::Button(button) = &mcp.drawn()[test].control else {
+        panic!("no button")
+    };
+    assert!(!button.enabled, "it would test the server as saved");
+    assert_eq!(mcp.press(test, None), Did::Nothing);
+}
+
+#[test]
+fn what_is_typed_stays_in_its_box_when_the_rows_above_it_come_and_go() {
+    let mut mcp = listing(vec![server()]);
+    mcp.press(row(&mcp, "search"), None);
+    let arguments = row(&mcp, "Arguments");
+    form::begin(&mut mcp, arguments, None);
+    let mut focus = arguments;
+    form::key(&mut mcp, &mut focus, Stroke::char('x'));
+    // A chat connects: Reconnect is offered, a row above the fields.
+    let mut connected = server();
+    connected.state = McpState::Connected;
+    let number = mcp.reading();
+    mcp.came(number, Ok(reply(vec![connected])));
+    let moved = row(&mcp, "Arguments");
+    assert_eq!(moved, arguments + 1);
+    assert_eq!(mcp.typing().map(|typing| typing.row), Some(moved));
+    let mut focus = moved;
+    form::key(&mut mcp, &mut focus, Stroke::char('y'));
+    let field = |mcp: &Mcp, label: &str| match &mcp.drawn()[row(mcp, label)].control {
+        ControlView::Field(field) => field.text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(field(&mcp, "Arguments"), "--stdioxy");
+    assert_eq!(field(&mcp, "Command"), "search-server");
+    // Esc stops typing, and keeps what was typed.
+    form::key(&mut mcp, &mut focus, Stroke::Escape);
+    assert_eq!(field(&mcp, "Arguments"), "--stdioxy");
+    assert!(mcp.typing().is_none());
+}
+
+#[test]
+fn a_save_is_of_the_server_as_it_was_opened_never_over_a_change_made_elsewhere() {
+    let mut mcp = listing(vec![server()]);
+    mcp.press(row(&mcp, "search"), None);
+    // Unchanged, the form follows the server as it's saved elsewhere.
+    let elsewhere = McpServerInfo {
+        settings: json!({"command": "another-server", "args": [], "enabled": true}).to_string(),
+        revision: "second".into(),
+        ..server()
+    };
+    let number = mcp.reading();
+    mcp.came(number, Ok(reply(vec![elsewhere.clone()])));
+    let command = |mcp: &Mcp| match &mcp.drawn()[row(mcp, "Command")].control {
+        ControlView::Field(field) => field.text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(command(&mcp), "another-server");
+    assert!(!mcp.form().unwrap().changed);
+    // Changed here, then saved elsewhere again: the changes are kept, the
+    // form says so, and a save is over what it was opened from, which the
+    // daemon refuses.
+    typed(&mut mcp, "Command", "-mine");
+    let third = McpServerInfo {
+        settings: json!({"command": "third-server", "enabled": false}).to_string(),
+        revision: "third".into(),
+        ..server()
+    };
+    let number = mcp.reading();
+    mcp.came(number, Ok(reply(vec![third])));
+    assert_eq!(command(&mcp), "another-server-mine");
+    let status = &mcp.drawn()[row(&mcp, "Connection")];
+    assert!(
+        status
+            .notes
+            .iter()
+            .any(|(note, _)| note.contains("somewhere else")),
+        "{status:?}"
+    );
+    let Did::Outcome(Outcome::Mcp { action, .. }) = mcp.save() else {
+        panic!("not saved")
+    };
+    let McpAction::Save {
+        expected, settings, ..
+    } = action
+    else {
+        panic!("{action:?}")
+    };
+    assert_eq!(expected.as_deref(), Some("second"));
+    let settings: Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(settings["command"], "another-server-mine");
+    assert_eq!(
+        settings["enabled"], true,
+        "as it was opened, not as it is now"
+    );
+}
+
+#[test]
+fn both_timeouts_are_shown_and_saved_as_they_were_unless_changed() {
+    let slow = McpServerInfo {
+        settings: json!({
+            "command": "search-server",
+            "timeout_seconds": 45,
+            "call_timeout_seconds": 7200,
+            "oauth": null,
+        })
+        .to_string(),
+        ..server()
+    };
+    let mut mcp = listing(vec![slow]);
+    mcp.press(row(&mcp, "search"), None);
+    let field = |mcp: &Mcp, label: &str| match &mcp.drawn()[row(mcp, label)].control {
+        ControlView::Field(field) => field.text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(field(&mcp, "Give up connecting after"), "45");
+    assert_eq!(field(&mcp, "Give up on a tool call after"), "7200");
+    mcp.press(row(&mcp, "Read-only server"), None);
+    let saved = |mcp: &mut Mcp| {
+        let Did::Outcome(Outcome::Mcp {
+            action: McpAction::Save { settings, .. },
+            id,
+        }) = mcp.save()
+        else {
+            panic!("not saved")
+        };
+        mcp.came(id, Err("not this time".into()));
+        serde_json::from_str::<Value>(&settings).unwrap()
+    };
+    let settings = saved(&mut mcp);
+    assert_eq!(settings["timeout_seconds"], 45);
+    assert_eq!(settings["call_timeout_seconds"], 7200);
+    // A call may be given a day, connecting ten minutes.
+    typed(&mut mcp, "Give up on a tool call after", "0");
+    assert_eq!(saved(&mut mcp)["call_timeout_seconds"], 72_000);
+    typed(&mut mcp, "Give up on a tool call after", "0");
+    assert!(matches!(mcp.save(), Did::Went(_)));
+    // One whose file names neither has the usual ones.
+    let mut mcp = listing(vec![server()]);
+    mcp.press(row(&mcp, "search"), None);
+    assert_eq!(field(&mcp, "Give up connecting after"), "30");
+    assert_eq!(field(&mcp, "Give up on a tool call after"), "600");
+}
+
+#[test]
+fn a_button_that_takes_something_away_is_never_reached_by_enter_and_any_key_disarms_it() {
+    let mut mcp = listing(vec![server()]);
+    mcp.press(row(&mcp, "search"), None);
+    // Enter in the last field stays there: Remove is next.
+    let last = row(&mcp, "Give up on a tool call after");
+    let remove = row(&mcp, "Remove search");
+    assert_eq!(remove, last + 1);
+    let mut focus = last;
+    form::key(&mut mcp, &mut focus, Stroke::char('0'));
+    assert_eq!(
+        form::key(&mut mcp, &mut focus, Stroke::Enter),
+        form::Keyed::Moved
+    );
+    assert_eq!(focus, last);
+    // Tab reaches it, past rows that only say something, and Enter arms it.
+    form::key(&mut mcp, &mut focus, Stroke::Tab);
+    assert_eq!(focus, remove);
+    let said = |mcp: &Mcp| match &mcp.drawn()[remove].control {
+        ControlView::Button(button) => button.label.clone(),
+        other => panic!("{other:?}"),
+    };
+    form::key(&mut mcp, &mut focus, Stroke::Enter);
+    assert_eq!(said(&mcp), "Really remove");
+    // Any key but the second press takes that back.
+    form::key(&mut mcp, &mut focus, Stroke::BackTab);
+    assert_eq!(said(&mcp), "Remove");
+    assert_eq!(mcp.notice(), None);
+    // Shift+Tab went back to the last field, not to a row with nothing
+    // to press; and Tab from the last row goes round to the first that has.
+    assert_eq!(focus, last);
+    form::key(&mut mcp, &mut focus, Stroke::Tab);
+    form::key(&mut mcp, &mut focus, Stroke::Tab);
+    assert_eq!(focus, row(&mcp, "Test"), "not Connection, which only says");
 }
 
 #[test]
@@ -263,9 +466,9 @@ fn a_form_shows_and_saves_only_what_its_way_of_connecting_uses() {
     mcp.press(row(&mcp, "Sign in with a browser"), None);
     typed(&mut mcp, "Scopes", "read write");
     // A call can be given ten minutes at most.
-    typed(&mut mcp, "Give up on a call after", "00");
+    typed(&mut mcp, "Give up connecting after", "00");
     assert!(matches!(mcp.save(), Did::Went(_)), "the timeout is checked");
-    let timeout = row(&mcp, "Give up on a call after");
+    let timeout = row(&mcp, "Give up connecting after");
     form::begin(&mut mcp, timeout, None);
     let mut focus = timeout;
     form::key(&mut mcp, &mut focus, Stroke::Backspace);
@@ -294,6 +497,7 @@ fn a_form_shows_and_saves_only_what_its_way_of_connecting_uses() {
             "enabled": true,
             "read_only": false,
             "timeout_seconds": 309,
+            "call_timeout_seconds": 600,
         })
     );
 }
@@ -351,7 +555,8 @@ fn a_private_credential_and_a_sign_ins_address_are_drawn_as_dots() {
     let mut mcp = listing(Vec::new());
     mcp.press(row(&mcp, "Private credential"), None);
     typed(&mut mcp, "Name", "key");
-    typed(&mut mcp, "Value", "private-value");
+    // Copied as a line, with the blank a browser leaves before it.
+    typed(&mut mcp, "Value", " private-value\n");
     let ControlView::Field(field) = &mcp.drawn()[row(&mcp, "Value")].control else {
         panic!("no field")
     };
@@ -531,7 +736,7 @@ fn a_sign_in_asked_while_the_list_is_read_is_answered_by_its_own_number() {
         ..McpReply::default()
     };
     assert_eq!(mcp.came(id, Ok(answer)).0, url);
-    assert!(mcp.asked.is_none());
+    assert!(mcp.asked.is_empty());
 }
 
 #[test]

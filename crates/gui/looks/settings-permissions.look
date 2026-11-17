@@ -5,7 +5,7 @@ size 1280x900
 keys <C-;>:Settings<CR>
 wait-for Appearance
 keys }}}}}}}}}
-wait-for Permission engine
+wait-for Who answers agents
 shot permissions
 keys a
 wait-for When it matches
@@ -26,6 +26,14 @@ keys <CR>
 shot permission-any-command
 keys <C-s>
 wait-for Allow any command
+# A Deny catches whatever starts with its words, and its form says so.
+keys a
+wait-for When it matches
+keys l<Tab>l<Tab>
+type git push
+shot permission-deny
+keys <C-s>
+wait-for Deny commands starting
 # A folder that's no folder is said under its field.
 keys a
 wait-for When it matches
@@ -35,5 +43,11 @@ keys <C-s>
 shot permission-wrong
 keys <Esc><Esc>
 shot permission-rules
+# One of them open: Delete asks for a second press.
+keys <CR>
+wait-for Delete this rule
+keys <Tab><Tab><Tab><CR>
+shot permission-delete
+keys <Esc>
 size 640x780
 shot permissions-640

@@ -5,7 +5,7 @@
 use clackatoo_protocol::{McpAction, McpScope, McpServerInfo, McpState};
 use serde_json::{Map, Value, json};
 
-use super::super::form::{self, MOST_TEXT, Text, Typing};
+use super::super::form::{self, MOST_TEXT, Marks, Text, Typing};
 use super::super::view::{ButtonView, ControlView, FieldView, Look, RowView};
 use crate::render::Ink;
 
@@ -36,7 +36,10 @@ pub(super) enum Field {
     Scopes,
     Enabled,
     ReadOnly,
+    /// How long connecting to it, or asking it what it has, may take.
     Timeout,
+    /// How long one call of a tool may take.
+    CallTimeout,
 }
 
 /// What the form's fields hold.
@@ -58,34 +61,46 @@ struct Held {
     scopes: String,
     enabled: bool,
     read_only: bool,
-    /// How long a call may take, in seconds, as typed.
+    /// How long connecting may take, and a call, in seconds, as typed.
     timeout: String,
+    call_timeout: String,
 }
 
 /// The form for one server: one the daemon lists, or one being added.
 #[derive(Debug)]
 pub(super) struct ServerForm {
-    /// The server as the daemon last listed it: none for one being added.
+    /// The server as the daemon last listed it, for how it's connected
+    /// and its tools: none for one being added.
     pub(super) original: Option<McpServerInfo>,
+    /// The server as it was when the fields were filled in: what's saved
+    /// is that with the fields' changes, over that and nothing later, so
+    /// a change made elsewhere meanwhile is never saved over.
+    base: Option<McpServerInfo>,
     held: Held,
     /// What the fields held as the form opened, to tell what's changed.
     opened: Held,
     /// What's wrong with a field, said under it.
-    errors: Vec<(Field, String)>,
+    errors: Marks<Field>,
     /// Remove was pressed once: again removes it.
     pub(super) removing: bool,
     /// Forget was pressed once: again forgets its login.
     pub(super) forgetting: bool,
 }
 
-/// The fewest and most seconds a call may be given.
+/// The fewest and most seconds connecting may be given, and how many it
+/// has if its definition doesn't say.
 const TIMEOUT: std::ops::RangeInclusive<u32> = 1..=600;
+const USUAL_TIMEOUT: u32 = 30;
 
-impl ServerForm {
-    /// The form for `original`, or with none, for a server to add.
-    pub(super) fn new(original: Option<McpServerInfo>) -> Self {
-        let config: Value = original
-            .as_ref()
+/// The same, for one call of a tool.
+const CALL_TIMEOUT: std::ops::RangeInclusive<u32> = 1..=86_400;
+const USUAL_CALL_TIMEOUT: u32 = 600;
+
+impl Held {
+    /// What the fields hold for `server` as it's saved, or with none, for
+    /// a server to add.
+    fn of(server: Option<&McpServerInfo>) -> Self {
+        let config: Value = server
             .and_then(|server| serde_json::from_str(&server.settings).ok())
             .unwrap_or(Value::Null);
         let text = |key: &str| {
@@ -120,10 +135,14 @@ impl ServerForm {
                 .and_then(Value::as_bool)
                 .unwrap_or(otherwise)
         };
-        let held = Held {
-            name: (original.as_ref()).map_or_else(String::new, |server| server.name.clone()),
+        let seconds = |key: &str, usual: u32| {
+            let seconds = config.get(key).and_then(Value::as_u64);
+            seconds.map_or_else(|| usual.to_string(), |seconds| seconds.to_string())
+        };
+        Self {
+            name: server.map_or_else(String::new, |server| server.name.clone()),
             // One that can't be changed where it is is saved as a personal copy.
-            scope: (original.as_ref())
+            scope: server
                 .filter(|server| server.editable)
                 .map_or(McpScope::Personal, |server| server.scope),
             transport: if config.get("url").is_some_and(Value::is_string) {
@@ -145,17 +164,22 @@ impl ServerForm {
             scopes: scopes.join(" "),
             enabled: flag("enabled", true),
             read_only: flag("read_only", false),
-            timeout: config
-                .get("timeout_seconds")
-                .and_then(Value::as_u64)
-                .unwrap_or(30)
-                .to_string(),
-        };
+            timeout: seconds("timeout_seconds", USUAL_TIMEOUT),
+            call_timeout: seconds("call_timeout_seconds", USUAL_CALL_TIMEOUT),
+        }
+    }
+}
+
+impl ServerForm {
+    /// The form for `original`, or with none, for a server to add.
+    pub(super) fn new(original: Option<McpServerInfo>) -> Self {
+        let held = Held::of(original.as_ref());
         Self {
+            base: original.clone(),
             original,
             opened: held.clone(),
             held,
-            errors: Vec::new(),
+            errors: Marks::default(),
             removing: false,
             forgetting: false,
         }
@@ -172,9 +196,26 @@ impl ServerForm {
     }
 
     /// Takes in the server as the daemon lists it now: how it's connected
-    /// and its tools, leaving what's typed alone.
+    /// and its tools. Saved as something else meanwhile, somewhere else,
+    /// a form with no changes shows it as it is now; one with changes
+    /// keeps them, and what they were made to.
     pub(super) fn follow(&mut self, server: &McpServerInfo) {
         self.original = Some(server.clone());
+        if self.changed_elsewhere() && !self.changed() {
+            self.held = Held::of(Some(server));
+            self.opened = self.held.clone();
+            self.base = Some(server.clone());
+            self.errors.clear();
+        }
+    }
+
+    /// Whether the server was saved as something else, somewhere else,
+    /// since the fields were filled in: saving them would be refused.
+    pub(super) fn changed_elsewhere(&self) -> bool {
+        match (&self.base, &self.original) {
+            (Some(base), Some(now)) => base.revision != now.revision,
+            _ => false,
+        }
     }
 
     /// The fields shown, in order: only those that apply to how it's
@@ -192,7 +233,12 @@ impl ServerForm {
                 }
             }
         }
-        fields.extend([Field::Enabled, Field::ReadOnly, Field::Timeout]);
+        fields.extend([
+            Field::Enabled,
+            Field::ReadOnly,
+            Field::Timeout,
+            Field::CallTimeout,
+        ]);
         fields
     }
 
@@ -217,6 +263,7 @@ impl ServerForm {
             Field::ClientId => (&mut self.held.client_id, MOST_TEXT),
             Field::Scopes => (&mut self.held.scopes, MOST_TEXT),
             Field::Timeout => (&mut self.held.timeout, 8),
+            Field::CallTimeout => (&mut self.held.call_timeout, 8),
             Field::Scope
             | Field::Transport
             | Field::SignInFirst
@@ -274,14 +321,8 @@ impl ServerForm {
     /// Notes what's wrong with what `field` holds, to say under it, or
     /// that nothing is any more.
     pub(super) fn check(&mut self, field: Field) -> bool {
-        self.errors.retain(|(each, _)| *each != field);
-        match self.wrong(field) {
-            Some(why) => {
-                self.errors.push((field, why));
-                false
-            }
-            None => true,
-        }
+        let wrong = self.wrong(field);
+        self.errors.set(field, wrong)
     }
 
     /// What's wrong with what `field` holds, if anything is.
@@ -292,6 +333,16 @@ impl ServerForm {
             let fine = text.is_empty()
                 || serde_json::from_str::<Value>(text).is_ok_and(|value| value.is_object());
             (!fine).then(|| format!("{what} must be written as JSON, between {{ and }}."))
+        };
+        let seconds = |text: &str, range: &std::ops::RangeInclusive<u32>| {
+            let fine = (text.trim().parse::<u32>()).is_ok_and(|seconds| range.contains(&seconds));
+            (!fine).then(|| {
+                format!(
+                    "Give a number of seconds from {} to {}.",
+                    range.start(),
+                    range.end()
+                )
+            })
         };
         match field {
             Field::Name => {
@@ -313,17 +364,8 @@ impl ServerForm {
                 (!fine).then(|| "Give its address, starting https:// or http://.".into())
             }
             Field::Headers => object(&held.headers, "Headers"),
-            Field::Timeout => {
-                let fine = (held.timeout.trim().parse::<u32>())
-                    .is_ok_and(|seconds| TIMEOUT.contains(&seconds));
-                (!fine).then(|| {
-                    format!(
-                        "Give a number of seconds from {} to {}.",
-                        TIMEOUT.start(),
-                        TIMEOUT.end()
-                    )
-                })
-            }
+            Field::Timeout => seconds(&held.timeout, &TIMEOUT),
+            Field::CallTimeout => seconds(&held.call_timeout, &CALL_TIMEOUT),
             _ => None,
         }
     }
@@ -345,8 +387,9 @@ impl ServerForm {
         Ok(McpAction::Save {
             settings: Value::Object(self.settings()).to_string(),
             scope: self.held.scope,
-            // What it's saved over, if it's saved where it was.
-            expected: (self.original.as_ref())
+            // What it's saved over, if it's saved where it was: the server
+            // as the fields were filled in from it.
+            expected: (self.base.as_ref())
                 .filter(|server| server.name == name)
                 .map(|server| server.revision.clone()),
             name,
@@ -354,17 +397,19 @@ impl ServerForm {
     }
 
     /// The server's definition, as the fields have it: what it was saved
-    /// with, so anything this window doesn't know of is kept, with what
-    /// its way of connecting uses set and the other way's taken out.
+    /// with, so anything this window doesn't know of is kept, in its sign
+    /// in's settings too, with what its way of connecting uses set and the
+    /// other way's taken out.
     fn settings(&self) -> Map<String, Value> {
         let held = &self.held;
-        let mut config: Map<String, Value> = (self.original.as_ref())
+        let mut config: Map<String, Value> = (self.base.as_ref())
             .and_then(|server| serde_json::from_str(&server.settings).ok())
             .unwrap_or_default();
         let object = |text: &str| -> Value {
             serde_json::from_str(text.trim()).unwrap_or_else(|_| json!({}))
         };
-        for key in ["command", "args", "env", "url", "headers", "oauth"] {
+        let sign_in = config.remove("oauth");
+        for key in ["command", "args", "env", "url", "headers"] {
             config.remove(key);
         }
         match held.transport {
@@ -380,21 +425,32 @@ impl ServerForm {
                 config.insert("url".into(), json!(held.url.trim()));
                 config.insert("headers".into(), object(&held.headers));
                 if held.sign_in_first {
+                    let mut sign_in = match sign_in {
+                        Some(Value::Object(sign_in)) => sign_in,
+                        _ => Map::new(),
+                    };
                     let client = held.client_id.trim();
-                    config.insert(
-                        "oauth".into(),
-                        json!({
-                            "client_id": (!client.is_empty()).then_some(client),
-                            "scopes": held.scopes.split_whitespace().collect::<Vec<_>>(),
-                        }),
+                    sign_in.insert(
+                        "client_id".into(),
+                        json!((!client.is_empty()).then_some(client)),
                     );
+                    let scopes: Vec<&str> = held.scopes.split_whitespace().collect();
+                    sign_in.insert("scopes".into(), json!(scopes));
+                    config.insert("oauth".into(), Value::Object(sign_in));
                 }
             }
         }
         config.insert("enabled".into(), json!(held.enabled));
         config.insert("read_only".into(), json!(held.read_only));
-        let timeout = held.timeout.trim().parse::<u32>().unwrap_or(30);
-        config.insert("timeout_seconds".into(), json!(timeout));
+        let seconds = |text: &str, usual: u32| text.trim().parse::<u32>().unwrap_or(usual);
+        config.insert(
+            "timeout_seconds".into(),
+            json!(seconds(&held.timeout, USUAL_TIMEOUT)),
+        );
+        config.insert(
+            "call_timeout_seconds".into(),
+            json!(seconds(&held.call_timeout, USUAL_CALL_TIMEOUT)),
+        );
         config
     }
 
@@ -415,7 +471,7 @@ impl ServerForm {
                 ..form::field(value, at, typing)
             })
         };
-        let mut row = match field {
+        let row = match field {
             Field::Name if self.fixed(field) => {
                 RowView::new("Name", "", ControlView::None).with_status(&held.name, Ink::Plain)
             }
@@ -499,16 +555,20 @@ impl ServerForm {
                 ControlView::Toggle(held.read_only),
             ),
             Field::Timeout => RowView::new(
-                "Give up on a call after",
-                "Seconds, from 1 to 600. A call that takes longer is stopped, and isn't sent \
-                 again.",
+                "Give up connecting after",
+                "Seconds, from 1 to 600, for it to start, and to say what tools it has. One \
+                 that takes longer is connected to again.",
                 boxed(&held.timeout, "30", false),
             ),
+            Field::CallTimeout => RowView::new(
+                "Give up on a tool call after",
+                "Seconds, from 1 to 86400, a day, counted again each time the server says \
+                 it's getting on. A call that takes longer is stopped, and isn't sent again; \
+                 it may still have done something.",
+                boxed(&held.call_timeout, "600", false),
+            ),
         };
-        for (_, why) in self.errors.iter().filter(|(each, _)| *each == field) {
-            row.notes.push((why.clone(), Ink::Warning));
-        }
-        row
+        self.errors.under(field, row)
     }
 
     /// Where a saved server is kept, which a form doesn't change, its
@@ -568,8 +628,10 @@ pub(super) fn state_meaning(server: &McpServerInfo) -> &'static str {
         McpState::Disconnected => "No chat is using it now. Chats connect when they need it.",
         McpState::Starting => "A chat is connecting to it.",
         McpState::Connected => "A chat is connected to it.",
-        McpState::NeedsLogin => "It needs you to sign in before chats can use it.",
-        McpState::Error => "It couldn't be reached.",
+        McpState::NeedsLogin => {
+            "It needs you to sign in. The chats waiting for it connect once you have."
+        }
+        McpState::Error => "It couldn't be started or reached. The chats using it keep trying.",
         McpState::Ready => "It answered a test. Chats connect when they need it.",
     }
 }

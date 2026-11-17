@@ -623,7 +623,12 @@ pub(crate) enum Read {
 
 /// What a page says of something asked of the daemon when the connection
 /// to it was lost.
-const LOST_ASKING: &str = "The connection to the daemon was lost before it answered, so this                            may or may not have been done. Look again once it's back.";
+const LOST_ASKING: &str = "The connection to the daemon was lost before it answered, so this \
+                           may or may not have been done. Look again once it's back.";
+
+/// What a page says of something asked while the daemon's out of reach.
+const NOT_SENT: &str =
+    "Not connected to the daemon, so nothing was sent. Try again once the connection's back.";
 
 /// How long after the daemon's settings were read they're read again,
 /// while the Permissions page shows what its rules last decided.
@@ -664,6 +669,8 @@ pub(crate) struct SettingsMenu {
     /// The shared skills of the directory Settings opened in, whether
     /// they've been listed, and when they're read.
     skills: Vec<clackatoo_protocol::Skill>,
+    /// The skills the daemon's `skills.disabled` switches off, by name.
+    skills_off: Vec<String>,
     skills_listing: form::Listing,
     skills_feed: form::Feed,
     specialists: specialists::Specialists,
@@ -723,6 +730,7 @@ impl SettingsMenu {
             said_saved: None,
             agents: Vec::new(),
             skills: Vec::new(),
+            skills_off: Vec::new(),
             skills_listing: form::Listing::Reading,
             skills_feed: form::Feed::due_now(),
             specialists: specialists::Specialists::new(),
@@ -834,7 +842,7 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
-        self.permissions.follow(facts);
+        self.follow_rules(facts);
         self.confirming = std::mem::take(&mut self.discarding);
         self.said = None;
         // A form takes every key, so a letter typed a moment too soon
@@ -1698,6 +1706,10 @@ impl SettingsMenu {
     pub(crate) fn settings_came(&mut self) {
         let shown = self.catalogue_shown() == Some(Catalogued::Rules);
         self.settings_feed.came(shown.then_some(DECISIONS_EVERY));
+        // A skill switched off or on is listed with what came of it.
+        if self.mode == Mode::Easy && self.easy.page() == crate::options::easy::Page::Skills {
+            self.skills_feed.read_now();
+        }
     }
 
     /// The page shown is read again from the daemon, as it's shown.
@@ -1715,13 +1727,25 @@ impl SettingsMenu {
     /// will never be answered, which its page says, and nothing more is
     /// read until it's back.
     pub(crate) fn lost(&mut self) {
+        self.unanswered(LOST_ASKING);
+    }
+
+    /// Something was asked of a daemon that's out of reach: nothing was
+    /// sent, which its page says.
+    pub(crate) fn not_sent(&mut self) {
+        self.unanswered(NOT_SENT);
+    }
+
+    /// Whatever the pages asked of the daemon will never be answered, and
+    /// `why`; nothing more is read until the connection's back.
+    fn unanswered(&mut self, why: &str) {
         self.offline = true;
         self.agents_feed.lost();
         self.settings_feed.lost();
         self.skills_feed.lost();
-        self.mcp.lost();
-        self.specialists.lost();
-        self.permissions.lost();
+        self.mcp.lost(why);
+        self.specialists.lost(why);
+        self.permissions.lost(why);
     }
 
     /// The connection to the daemon is back: everything is read again.

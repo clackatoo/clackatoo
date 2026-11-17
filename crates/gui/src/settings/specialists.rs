@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 use clackatoo_protocol::{SpecialistDefinition, SpecialistFile, SpecialistScope};
 use serde_json::{Map, Value, json};
 
-use super::form::{self, Catalogue, Did, FormView, Listing, MOST_TEXT, Notice, Pick, Text, Typing};
+use super::form::{
+    self, Catalogue, Did, FormView, Listing, MOST_TEXT, Marks, Notice, Pick, Text, Typing,
+};
 use super::view::{ButtonView, ControlView, FieldView, Part, RowView};
 use super::{Outcome, Place, SettingsMenu};
 use crate::render::Ink;
@@ -104,6 +106,11 @@ enum Which {
     Only,
 }
 
+impl Which {
+    /// Each, in the order its row's choices are.
+    const ALL: [Self; 3] = [Self::All, Self::None, Self::Only];
+}
+
 /// How much a specialist may do, at most.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Access {
@@ -135,7 +142,9 @@ struct Held {
     agent: String,
     model: String,
     effort: String,
-    access: Access,
+    /// The most it may do; none if its file says something this window
+    /// doesn't know, which is kept unless another is picked.
+    access: Option<Access>,
     seconds: String,
     turns: String,
     cost: String,
@@ -161,7 +170,7 @@ struct Draft {
     copy_of: Option<String>,
     held: Held,
     opened: Held,
-    errors: Vec<(Field, String)>,
+    errors: Marks<Field>,
 }
 
 /// An agent a specialist can be given, and its models, as the daemon
@@ -234,9 +243,8 @@ impl Draft {
             .or(Some(limits))
             .and_then(Value::as_str)
         {
-            Some("no-commands") => Access::NoCommands,
-            Some("read-only") => Access::ReadOnly,
-            _ => Access::Everything,
+            None => Some(Access::Everything),
+            Some(written) => Access::ALL.into_iter().find(|each| each.name() == written),
         };
         let listed = |kind: Kind| match settings.get(kind.key()).and_then(Value::as_array) {
             None => (Which::All, String::new()),
@@ -271,7 +279,7 @@ impl Draft {
             copy_of: None,
             opened: held.clone(),
             held,
-            errors: Vec::new(),
+            errors: Marks::default(),
         }
     }
 
@@ -358,8 +366,9 @@ impl Draft {
                             || byte == b'-'
                             || byte == b'_'
                     });
-                (!fine)
-                    .then(|| "Give it a name of small letters, digits, - and _, 64 at most.".into())
+                (!fine).then(|| {
+                    "Give it a name of lowercase letters, digits, - and _, 64 at most.".into()
+                })
             }
             Field::Seconds => whole(&held.seconds, MOST_SECONDS),
             Field::Turns => whole(&held.turns, MOST_TURNS),
@@ -381,14 +390,8 @@ impl Draft {
     /// Notes what's wrong with what `field` holds, to say under it, or
     /// that nothing is any more.
     fn check(&mut self, field: Field) -> bool {
-        self.errors.retain(|(each, _)| *each != field);
-        match self.wrong(field) {
-            Some(why) => {
-                self.errors.push((field, why));
-                false
-            }
-            None => true,
-        }
+        let wrong = self.wrong(field);
+        self.errors.set(field, wrong)
     }
 
     /// What saves the form, or the first field with something wrong,
@@ -428,18 +431,32 @@ impl Draft {
         if !settings.get("instructions").is_some_and(Value::is_string) {
             settings.insert("instructions".into(), json!(STARTER));
         }
-        // The limits, as a table, whatever they were written as.
-        let mut limits = Map::new();
-        limits.insert("access".into(), json!(held.access.name()));
-        if let Ok(seconds) = held.seconds.trim().parse::<u64>() {
-            limits.insert("seconds".into(), json!(seconds));
+        // The limits, as a table, whatever they were written as, with
+        // anything in it this window doesn't know of kept.
+        let mut limits = match settings.remove("limits") {
+            Some(Value::Object(limits)) => limits,
+            Some(access @ Value::String(_)) => Map::from_iter([("access".to_owned(), access)]),
+            _ => Map::new(),
+        };
+        if let Some(access) = held.access {
+            limits.insert("access".into(), json!(access.name()));
         }
-        if let Ok(turns) = held.turns.trim().parse::<u64>() {
-            limits.insert("turns".into(), json!(turns));
-        }
-        if let Ok(cost) = held.cost.trim().parse::<f64>() {
-            limits.insert("cost_usd".into(), json!(cost));
-        }
+        let mut limit = |key: &str, value: Option<Value>| match value {
+            Some(value) => limits.insert(key.to_owned(), value),
+            None => limits.remove(key),
+        };
+        limit(
+            "seconds",
+            held.seconds.trim().parse::<u64>().ok().map(Value::from),
+        );
+        limit(
+            "turns",
+            held.turns.trim().parse::<u64>().ok().map(Value::from),
+        );
+        limit(
+            "cost_usd",
+            held.cost.trim().parse::<f64>().ok().map(Value::from),
+        );
         settings.insert("limits".into(), Value::Object(limits));
         for (at, kind) in Kind::ALL.into_iter().enumerate() {
             match held.which[at] {
@@ -539,13 +556,14 @@ impl Specialists {
         self.listing = Listing::Unavailable(why);
     }
 
-    /// The connection was lost: what was asked will never be answered.
-    pub(super) fn lost(&mut self) {
+    /// What was asked will never be answered, and `why`: the connection
+    /// was lost, or there was none to ask on.
+    pub(super) fn lost(&mut self, why: &str) {
         self.reading = false;
         self.due = false;
         self.open_once_listed = None;
         if self.saving.take().is_some() {
-            self.notice = Some(Notice::Failed(super::LOST_ASKING.into()));
+            self.notice = Some(Notice::Failed(why.to_owned()));
         }
     }
 
@@ -602,7 +620,7 @@ impl Specialists {
         }
         self.draft = None;
         self.typing = None;
-        (Some(self.place(&definition.name).unwrap_or(0)), open)
+        (Some(self.place(&definition.name, true).unwrap_or(0)), open)
     }
 
     /// The rows of the list, under their headings: the user's own, then
@@ -614,7 +632,10 @@ impl Specialists {
         let of = |editable: bool| -> Vec<Row> {
             (self.files.iter())
                 .filter(|file| file.editable == editable)
-                .map(|file| Row::Item(file.definition.name.clone()))
+                .map(|file| Row::Item {
+                    name: file.definition.name.clone(),
+                    yours: editable,
+                })
                 .collect()
         };
         let yours = of(true);
@@ -644,22 +665,30 @@ impl Specialists {
             .collect()
     }
 
-    /// Where specialist `name`'s row is in the list.
-    fn place(&self, name: &str) -> Option<usize> {
+    /// Where the row of the specialist called `name` is in the list: the
+    /// user's own if `yours`, or the one of that name that isn't.
+    fn place(&self, name: &str, yours: bool) -> Option<usize> {
+        let wanted = Row::Item {
+            name: name.to_owned(),
+            yours,
+        };
         (self.listed_rows().into_iter())
             .flat_map(|(_, _, rows)| rows)
-            .position(|row| matches!(row, Row::Item(each) if each == name))
+            .position(|row| row == wanted)
     }
 
-    /// The specialist called `name`, as listed.
-    fn file(&self, name: &str) -> Option<&SpecialistFile> {
-        self.files.iter().find(|file| file.definition.name == name)
+    /// The specialist called `name`, as listed: the user's own if
+    /// `yours`, or the one of that name that isn't, as one of the user's
+    /// may have the name of one built in.
+    fn file(&self, name: &str, yours: bool) -> Option<&SpecialistFile> {
+        (self.files.iter()).find(|file| file.definition.name == name && file.editable == yours)
     }
 
-    /// Opens the form for specialist `name`: its own, or for one that
-    /// isn't the user's, a copy.
-    fn open(&mut self, name: &str) -> Did {
-        let Some(file) = self.file(name).cloned() else {
+    /// Opens the form for the specialist called `name`, the user's own
+    /// if `yours`: its own form, or for one that isn't the user's, a
+    /// copy's.
+    fn open(&mut self, name: &str, yours: bool) -> Did {
+        let Some(file) = self.file(name, yours).cloned() else {
             return Did::Nothing;
         };
         let mut draft = Draft::new(file.definition, !file.editable);
@@ -676,21 +705,27 @@ impl Specialists {
         self.draft = Some(draft);
         self.typing = None;
         self.notice = None;
+        // A file that was to open once it's listed doesn't, over this.
+        self.open_once_listed = None;
         let first = (self.rows().iter()).position(|row| *row == Row::Field(Field::Description));
         Did::Went(first.unwrap_or(0))
     }
 
-    /// Opens specialist `name`'s form, as a search that found it does.
-    pub(super) fn open_named(&mut self, name: &str) -> Option<usize> {
-        match self.open(name) {
+    /// Opens the form of the specialist listed at `at`, as a search that
+    /// found it does.
+    pub(super) fn open_listed(&mut self, at: usize) -> Option<usize> {
+        let file = self.files.get(at)?;
+        let (name, yours) = (file.definition.name.clone(), file.editable);
+        match self.open(&name, yours) {
             Did::Went(row) => Some(row),
             _ => None,
         }
     }
 
-    /// A row of the list, as it's drawn.
-    fn list_row(&self, name: &str) -> RowView {
-        let Some(file) = self.file(name) else {
+    /// The row in the list of the specialist called `name`, the user's
+    /// own if `yours`, as it's drawn.
+    fn list_row(&self, name: &str, yours: bool) -> RowView {
+        let Some(file) = self.file(name, yours) else {
             return RowView::new(name, "", ControlView::None);
         };
         let settings: Value = serde_json::from_str(&file.definition.settings).unwrap_or_default();
@@ -724,11 +759,11 @@ impl Specialists {
         let by_agent = || {
             RowView::new("", "", ControlView::None).with_status("One for each agent", Ink::Plain)
         };
-        let mut row = match field {
+        let row = match field {
             Field::Name if draft.creating => {
                 let row = RowView::new(
                     "Name",
-                    "Small letters, digits, - and _. It keeps this name once it's saved.",
+                    "Lowercase letters, digits, - and _. It keeps this name once it's saved.",
                     boxed(&held.name, "reviewer", false),
                 );
                 match &draft.copy_of {
@@ -808,14 +843,27 @@ impl Specialists {
                  decides.",
                 boxed(&held.effort, "the agent's", false),
             ),
-            Field::Access => RowView::new(
-                "May do",
-                "The most it may do. A chat that's held to less keeps to that.",
-                ControlView::Segmented {
-                    labels: vec!["Everything", "No commands", "Only read"],
-                    picked: Access::ALL.iter().position(|each| *each == held.access),
-                },
-            ),
+            Field::Access => {
+                let row = RowView::new(
+                    "May do",
+                    "The most it may do. A chat that's held to less keeps to that.",
+                    ControlView::Segmented {
+                        labels: vec!["Everything", "No commands", "Only read"],
+                        picked: Access::ALL
+                            .iter()
+                            .position(|each| Some(*each) == held.access),
+                    },
+                );
+                if held.access.is_some() {
+                    row
+                } else {
+                    row.noted(
+                        "Its file says something this window doesn't know, which is kept \
+                         unless you pick one of these.",
+                        Ink::Caution,
+                    )
+                }
+            }
             Field::Seconds => RowView::new(
                 "Time limit",
                 "The longest one piece of work may take, in seconds. Left empty, there's none.",
@@ -838,19 +886,10 @@ impl Specialists {
                     Kind::Delegates => vec!["Any", "None", "Only these"],
                     _ => vec!["As the chat", "None", "Only these"],
                 };
-                let picked = match held.which[kind as usize] {
-                    Which::All => 0,
-                    Which::None => 1,
-                    Which::Only => 2,
-                };
-                RowView::new(
-                    label,
-                    said,
-                    ControlView::Segmented {
-                        labels,
-                        picked: Some(picked),
-                    },
-                )
+                let picked = Which::ALL
+                    .iter()
+                    .position(|each| *each == held.which[kind as usize]);
+                RowView::new(label, said, ControlView::Segmented { labels, picked })
             }
             Field::Named(kind) => self.named_row(kind, &held.named[kind as usize], at),
             Field::UserStarts => RowView::new(
@@ -860,14 +899,11 @@ impl Specialists {
             ),
             Field::AgentStarts => RowView::new(
                 "Agents can hand work to it",
-                "",
+                "An agent may start a chat with it, for a part of what it's doing.",
                 ControlView::Toggle(held.agent_starts),
             ),
         };
-        for (_, why) in draft.errors.iter().filter(|(each, _)| *each == field) {
-            row.notes.push((why.clone(), Ink::Warning));
-        }
-        row
+        draft.errors.under(field, row)
     }
 
     /// The row of the names typed for `kind`, saying which there are, and
@@ -1018,14 +1054,12 @@ impl Specialists {
             && (self.files.iter())
                 .any(|file| file.editable && file.definition.name == definition.name);
         if taken {
-            draft.errors.push((
-                Field::Name,
-                format!(
-                    "You already have a specialist called {}: change that one, or give this \
-                     another name.",
-                    definition.name
-                ),
-            ));
+            let taken = format!(
+                "You already have a specialist called {}: change that one, or give this \
+                 another name.",
+                definition.name
+            );
+            draft.errors.set(Field::Name, Some(taken));
             self.notice = Some(Notice::Marked);
             return Did::Went(0);
         }
@@ -1047,8 +1081,9 @@ impl Specialists {
 /// A row of the page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Row {
-    /// A specialist in the list, by its name.
-    Item(String),
+    /// A specialist in the list, by its name, and whether it's one of
+    /// the user's own: one of those may have the name of one built in.
+    Item { name: String, yours: bool },
     /// A field of the form.
     Field(Field),
 }
@@ -1064,7 +1099,7 @@ impl Catalogue for Specialists {
         (self.rows().iter().enumerate())
             .map(|(at, row)| match (row, &self.draft) {
                 (Row::Field(field), Some(draft)) => self.field_row(draft, *field, at),
-                (Row::Item(name), _) => self.list_row(name),
+                (Row::Item { name, yours }, _) => self.list_row(name, *yours),
                 (Row::Field(_), None) => RowView::new("", "", ControlView::None),
             })
             .collect()
@@ -1075,7 +1110,7 @@ impl Catalogue for Specialists {
             return Did::Nothing;
         };
         let field = match row {
-            Row::Item(name) => return self.open(&name),
+            Row::Item { name, yours } => return self.open(&name, yours),
             Row::Field(field) => field,
         };
         let choice = match part {
@@ -1098,20 +1133,15 @@ impl Catalogue for Specialists {
             Field::Access => {
                 let now = Access::ALL
                     .iter()
-                    .position(|each| *each == held.access)
-                    .unwrap_or(0);
-                let to = choice.unwrap_or((now + 1) % Access::ALL.len());
-                held.access = Access::ALL[to.min(Access::ALL.len() - 1)];
+                    .position(|each| Some(*each) == held.access);
+                held.access = Some(Access::ALL[form::chosen(now, choice, Access::ALL.len())]);
             }
             Field::Which(kind) => {
-                let all = [Which::All, Which::None, Which::Only];
-                let now = all
+                let now = Which::ALL
                     .iter()
-                    .position(|each| *each == held.which[kind as usize])
-                    .unwrap_or(0);
-                let to = choice.unwrap_or((now + 1) % all.len());
-                held.which[kind as usize] = all[to.min(all.len() - 1)];
-                draft.errors.retain(|(each, _)| *each != Field::Named(kind));
+                    .position(|each| *each == held.which[kind as usize]);
+                held.which[kind as usize] = Which::ALL[form::chosen(now, choice, Which::ALL.len())];
+                draft.errors.set(Field::Named(kind), None);
             }
             Field::UserStarts => held.user_starts = !held.user_starts,
             Field::AgentStarts => held.agent_starts = !held.agent_starts,
@@ -1141,30 +1171,29 @@ impl Catalogue for Specialists {
         let Some(Row::Field(field)) = self.rows().get(at).cloned() else {
             return Did::Nothing;
         };
-        let Some(draft) = &mut self.draft else {
+        let Some(draft) = &self.draft else {
             return Did::Nothing;
         };
-        let held = &mut draft.held;
+        let held = &draft.held;
         // A choice's next, or the one before, without going round.
-        let stepped = |now: usize, len: usize| now.saturating_add_signed(by).min(len - 1);
+        let segment = |now: Option<usize>, len: usize| {
+            Some(Part::Segment(
+                u8::try_from(form::stepped(now, by, len)).unwrap_or(0),
+            ))
+        };
         match field {
             Field::Scope if draft.creating => self.press(at, Some(Part::Segment(u8::from(by > 0)))),
             Field::Access => {
                 let now = Access::ALL
                     .iter()
-                    .position(|each| *each == held.access)
-                    .unwrap_or(0);
-                let to = u8::try_from(stepped(now, Access::ALL.len())).unwrap_or(0);
-                self.press(at, Some(Part::Segment(to)))
+                    .position(|each| Some(*each) == held.access);
+                self.press(at, segment(now, Access::ALL.len()))
             }
             Field::Which(kind) => {
-                let now = match held.which[kind as usize] {
-                    Which::All => 0,
-                    Which::None => 1,
-                    Which::Only => 2,
-                };
-                let to = u8::try_from(stepped(now, 3)).unwrap_or(0);
-                self.press(at, Some(Part::Segment(to)))
+                let now = Which::ALL
+                    .iter()
+                    .position(|each| *each == held.which[kind as usize]);
+                self.press(at, segment(now, Which::ALL.len()))
             }
             Field::UserStarts | Field::AgentStarts => self.press(at, None),
             _ => Did::Nothing,
@@ -1183,14 +1212,14 @@ impl Catalogue for Specialists {
             subtitle: "What it is and what it may do. A chat started with it after it's saved \
                        uses it as it is then."
                 .into(),
-            // A copy is something to save as it stands.
-            changed: draft.changed() || draft.copy_of.is_some(),
+            changed: draft.changed(),
             save: if self.saving.is_some() {
                 "Saving…"
             } else {
                 "Save"
             }
             .into(),
+            saving: self.saving.as_ref().is_some_and(|saving| saving.from_form),
         })
     }
 
@@ -1244,14 +1273,21 @@ impl Catalogue for Specialists {
     fn cancel(&mut self) -> usize {
         self.typing = None;
         self.notice.take_if(|notice| notice.of_form());
+        // Its save, if one's on its way, closes nothing else, and opens
+        // no file over what's shown by then.
         if let Some(saving) = &mut self.saving {
             saving.from_form = false;
+            saving.then_open = false;
         }
+        self.open_once_listed = None;
         let Some(draft) = self.draft.take() else {
             return 0;
         };
-        let name = draft.copy_of.unwrap_or(draft.original.name);
-        self.place(&name).unwrap_or(0)
+        match draft.copy_of {
+            Some(copied) => self.place(&copied, false),
+            None => self.place(&draft.original.name, true),
+        }
+        .unwrap_or(0)
     }
 
     fn add(&mut self) -> Did {
@@ -1272,14 +1308,24 @@ impl Catalogue for Specialists {
         self.draft = Some(Draft::new(original, true));
         self.typing = None;
         self.notice = None;
+        self.open_once_listed = None;
         Did::Went(0)
     }
+
+    fn takes_away(&self, _at: usize) -> bool {
+        false
+    }
+
+    fn disarm(&mut self) {}
 }
 
 impl SettingsMenu {
-    /// Shows the Specialists page.
+    /// Shows the Specialists page; unless a form with changes is shown,
+    /// which isn't left for it.
     pub(crate) fn show_specialists(&mut self) {
-        self.show_catalogue(super::Catalogued::Specialists);
+        if !self.form_changed() {
+            self.show_catalogue(super::Catalogued::Specialists);
+        }
     }
 
     /// Takes in the specialists the daemon lists. Returns their file to
@@ -1371,13 +1417,77 @@ mod tests {
     }
 
     #[test]
+    fn what_a_file_says_that_this_window_does_not_know_is_kept() {
+        // A way of holding it back, and a limit, from a newer clackatoo.
+        let settings = json!({
+            "instructions": "Review.",
+            "limits": {"access": "sandboxed", "tokens": 5, "seconds": 30},
+        });
+        let mut draft = Draft::new(definition("reviewer", &settings), false);
+        assert_eq!(
+            draft.held.access, None,
+            "not shown as free to do everything"
+        );
+        draft.held.seconds.clear();
+        let saved = draft.definition().unwrap();
+        let saved: Value = serde_json::from_str(&saved.settings).unwrap();
+        assert_eq!(saved["limits"], json!({"access": "sandboxed", "tokens": 5}));
+        // Until another is picked.
+        draft.held.access = Some(Access::ReadOnly);
+        let saved = draft.definition().unwrap();
+        let saved: Value = serde_json::from_str(&saved.settings).unwrap();
+        assert_eq!(saved["limits"], json!({"access": "read-only", "tokens": 5}));
+        // Limits written as a word alone become a table with that word.
+        let settings = json!({"instructions": "Review.", "limits": "read-only"});
+        let mut draft = Draft::new(definition("reviewer", &settings), false);
+        assert_eq!(draft.held.access, Some(Access::ReadOnly));
+        let saved = draft.definition().unwrap();
+        let saved: Value = serde_json::from_str(&saved.settings).unwrap();
+        assert_eq!(saved["limits"], json!({"access": "read-only"}));
+    }
+
+    #[test]
+    fn a_save_cancelled_opens_no_file_over_what_is_shown_by_then() {
+        let file = SpecialistFile {
+            definition: definition("reviewer", &json!({"instructions": "Review."})),
+            path: "/p/.agents/specialists/reviewer/SPECIALIST.md".into(),
+            scope: SpecialistScope::Project,
+            editable: true,
+        };
+        let mut specialists = Specialists::new();
+        specialists.listed(vec![file.clone()]);
+        // A new one, saved by its button that opens its file after.
+        specialists.add();
+        specialists.draft.as_mut().unwrap().held.name = "auditor".into();
+        let instructions = (specialists.rows().iter())
+            .position(|row| *row == Row::Field(Field::Instructions))
+            .unwrap();
+        let Did::Outcome(Outcome::SaveSpecialist { specialist, .. }) =
+            specialists.press(instructions, None)
+        else {
+            panic!("not saved")
+        };
+        // Cancelled, and another opened and changed, before it's answered.
+        specialists.cancel();
+        specialists.open("reviewer", true);
+        specialists.draft.as_mut().unwrap().held.description = "Changed".into();
+        assert_eq!(specialists.saved(&specialist, Ok(())), (None, None));
+        assert_eq!(
+            specialists.listed(vec![file]),
+            None,
+            "no file opens over it"
+        );
+        assert!(specialists.form().unwrap().changed);
+    }
+
+    #[test]
     fn a_field_says_what_is_wrong_with_it_as_the_keys_leave_it() {
         let mut draft = Draft::new(definition("reviewer", &json!({})), false);
         draft.held.seconds = "soon".into();
         assert!(!draft.check(Field::Seconds));
         draft.held.seconds = "30".into();
         assert!(draft.check(Field::Seconds));
-        assert!(draft.errors.is_empty());
+        assert_eq!(draft.errors.len(), 0);
         draft.held.turns = "0".into();
         draft.held.cost = "-1".into();
         assert_eq!(draft.definition(), Err(Field::Turns));

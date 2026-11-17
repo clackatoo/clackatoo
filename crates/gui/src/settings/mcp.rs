@@ -131,14 +131,15 @@ struct Asked {
     from_form: bool,
 }
 
-/// A server's last test from here, which the daemon doesn't keep: shown
-/// while the server is as it was tested and no chat has connected to it.
-#[derive(Debug)]
-struct Tested {
-    revision: String,
-    state: McpState,
-    detail: String,
-    tools: Vec<clackatoo_protocol::McpToolInfo>,
+/// Whether `action` is one a form's Save asks for.
+fn saves(action: &McpAction) -> bool {
+    matches!(
+        action,
+        McpAction::Save { .. }
+            | McpAction::Secret { .. }
+            | McpAction::CompleteLogin { .. }
+            | McpAction::Import { .. }
+    )
 }
 
 /// The MCP Servers page's state.
@@ -153,14 +154,15 @@ pub(super) struct Mcp {
     typing: Option<Typing>,
     /// The read of the list asked for, by its number.
     reading: Option<u64>,
-    asked: Option<Asked>,
+    /// What's been asked of the daemon and not answered. A test of one
+    /// server holds up nothing else.
+    asked: Vec<Asked>,
     /// When the list is to be read next.
     due: Option<Instant>,
     notice: Option<Notice>,
     /// The servers signed in to from here, each with why it failed, if
     /// it did: their rows say how it went.
     sign_ins: BTreeMap<String, Option<String>>,
-    tested: BTreeMap<String, Tested>,
     /// The button the keys are on in a server's row of the list, if not
     /// its last: the server's name, and the button's place.
     button: Option<(String, usize)>,
@@ -178,7 +180,7 @@ impl std::fmt::Debug for Mcp {
         f.debug_struct("Mcp")
             .field("servers", &self.servers.len())
             .field("listing", &self.listing)
-            .field("asked", &self.asked.is_some())
+            .field("asked", &self.asked.len())
             .finish_non_exhaustive()
     }
 }
@@ -192,11 +194,10 @@ impl Mcp {
             view: View::List,
             typing: None,
             reading: None,
-            asked: None,
+            asked: Vec::new(),
             due: Some(Instant::now()),
             notice: None,
             sign_ins: BTreeMap::new(),
-            tested: BTreeMap::new(),
             button: None,
             machine: None,
             home: String::new(),
@@ -251,13 +252,14 @@ impl Mcp {
         self.listing = Listing::Unavailable(why);
     }
 
-    /// The connection was lost: what was asked will never be answered,
-    /// and nothing's read until it's back.
-    pub(super) fn lost(&mut self) {
+    /// What was asked will never be answered, and `why`: the connection
+    /// was lost, or there was none to ask on. Nothing's read until it's
+    /// back.
+    pub(super) fn lost(&mut self, why: &str) {
         self.reading = None;
         self.due = None;
-        if self.asked.take().is_some() {
-            self.notice = Some(Notice::Failed(super::LOST_ASKING.into()));
+        if !std::mem::take(&mut self.asked).is_empty() {
+            self.notice = Some(Notice::Failed(why.to_owned()));
         }
     }
 
@@ -266,23 +268,29 @@ impl Mcp {
         self.servers.iter().find(|server| server.name == name)
     }
 
-    /// Whether `action` is what's been asked and not answered.
+    /// Whether something `is` says is what was asked is still waiting for
+    /// its answer.
     fn asking(&self, is: impl Fn(&McpAction) -> bool) -> bool {
-        self.asked.as_ref().is_some_and(|asked| is(&asked.action))
+        self.asked.iter().any(|asked| is(&asked.action))
     }
 
-    /// Asks the daemon for `action`, saying `working` meanwhile. One
-    /// thing is asked at a time: while one waits, nothing more is.
+    /// Asks the daemon for `action`, saying `working` meanwhile. The same
+    /// thing isn't asked twice at once, nor a second save while one
+    /// waits: the foot says it's still waiting.
     fn ask(&mut self, action: McpAction, working: &str) -> Did {
-        if self.asked.is_some() {
-            return Did::Nothing;
+        let waiting = self.asking(|asked| *asked == action || saves(asked) && saves(&action));
+        if waiting {
+            self.notice = Some(Notice::Working(
+                "Still waiting for the daemon to answer the last one…".into(),
+            ));
+            return Did::Changed;
         }
         if let McpAction::Authenticate { name } = &action {
             self.sign_ins.insert(name.clone(), None);
         }
         let number = ASKED.fetch_add(1, Ordering::Relaxed);
         self.notice = Some(Notice::Working(working.to_owned()));
-        self.asked = Some(Asked {
+        self.asked.push(Asked {
             number,
             action: action.clone(),
             from_form: !matches!(self.view, View::List),
@@ -294,6 +302,27 @@ impl Mcp {
     /// address, to open in the browser, and the row the keys go to, if
     /// the page shows something else for it.
     pub(super) fn came(
+        &mut self,
+        number: u64,
+        result: Result<McpReply, String>,
+    ) -> (Option<String>, Option<usize>) {
+        // A form's rows come and go with how its server is connected:
+        // what's being typed stays in its own box, wherever that is now.
+        let typed = (self.typing.as_ref()).and_then(|typing| self.rows().get(typing.row).cloned());
+        let came = self.took(number, result);
+        if let Some(typed) = typed {
+            let now = self.rows().iter().position(|row| *row == typed);
+            match (&mut self.typing, now) {
+                (Some(typing), Some(at)) => typing.row = at,
+                _ => self.typing = None,
+            }
+        }
+        came
+    }
+
+    /// Takes in the daemon's answer numbered `number`, as [`Mcp::came`]
+    /// says.
+    fn took(
         &mut self,
         number: u64,
         result: Result<McpReply, String>,
@@ -310,10 +339,11 @@ impl Mcp {
             }
             return (None, None);
         }
-        let Some(asked) = self.asked.take_if(|asked| asked.number == number) else {
+        let Some(at) = self.asked.iter().position(|asked| asked.number == number) else {
             // An answer nothing waits for any more.
             return (None, None);
         };
+        let asked = self.asked.remove(at);
         // Whatever it did, the list is read again: it says what the
         // servers' files are like now.
         self.due = Some(Instant::now());
@@ -329,24 +359,9 @@ impl Mcp {
         }
     }
 
-    /// Takes in the servers as the daemon lists them, and what a test
-    /// from here found of each that's still as it was tested.
+    /// Takes in the servers as the daemon lists them.
     fn listed(&mut self, mut servers: Vec<McpServerInfo>) {
         servers.sort_by(|a, b| a.name.cmp(&b.name));
-        for server in &mut servers {
-            let Some(tested) = self.tested.get(&server.name) else {
-                continue;
-            };
-            let untouched =
-                tested.revision == server.revision && server.state == McpState::Disconnected;
-            if untouched {
-                server.state = tested.state;
-                server.detail.clone_from(&tested.detail);
-                server.tools.clone_from(&tested.tools);
-            } else if tested.revision != server.revision {
-                self.tested.remove(&server.name);
-            }
-        }
         self.servers = servers;
         self.listing = Listing::Ready;
         // A server's form follows how it's connected; one whose server
@@ -415,12 +430,15 @@ impl Mcp {
                 )));
                 went = self.back_to_list(from_form, names.first().map(String::as_str));
             }
-            McpAction::Test { name } | McpAction::Reconnect { name } => {
-                // The daemon answers with the one server, as the test left it.
-                let found = reply.servers.into_iter().find(|server| server.name == name);
-                if let Some(server) = found {
-                    self.tested(server);
-                }
+            McpAction::Test { name } => {
+                self.merged(reply.servers);
+                self.notice = self.server(&name).map(tested_said);
+            }
+            McpAction::Reconnect { name } => {
+                self.merged(reply.servers);
+                self.notice = Some(Notice::Done(format!(
+                    "The chats using {name} are connecting to it again."
+                )));
             }
             McpAction::Trust { name, .. } => {
                 self.listed(reply.servers);
@@ -461,34 +479,14 @@ impl Mcp {
         (None, went)
     }
 
-    /// Takes in `server` as a test from here left it: how it went is
-    /// said, and kept to show while the server is as it was tested, since
-    /// the daemon keeps none of it; the other servers stay as listed.
-    fn tested(&mut self, server: McpServerInfo) {
-        let name = server.name.clone();
-        self.notice = Some(match server.state {
-            McpState::Ready => Notice::Done(format!(
-                "{name} answered, with {}.",
-                form::counted(server.tools.len(), "tool", "tools")
-            )),
-            McpState::NeedsLogin => {
-                Notice::Done(format!("{name} answered that it needs a sign in."))
-            }
-            _ => Notice::Failed(format!("{name} didn't answer: {}", server.detail)),
-        });
-        self.tested.insert(
-            name.clone(),
-            Tested {
-                revision: server.revision.clone(),
-                state: server.state,
-                detail: server.detail.clone(),
-                tools: server.tools.clone(),
-            },
-        );
-        let mut servers = std::mem::take(&mut self.servers);
-        servers.retain(|each| each.name != name);
-        servers.push(server);
-        self.listed(servers);
+    /// Takes in `servers` as an answer has them, which may be all there
+    /// are or, from a daemon before this one, only the one tested: the
+    /// rest stay as listed.
+    fn merged(&mut self, servers: Vec<McpServerInfo>) {
+        let mut all = std::mem::take(&mut self.servers);
+        all.retain(|listed| !servers.iter().any(|server| server.name == listed.name));
+        all.extend(servers);
+        self.listed(all);
     }
 
     /// Shows the list again, if the form that asked for something is
@@ -716,8 +714,12 @@ impl Mcp {
                 let view = RowView::new(name.as_str(), help, control).with_status(state, ink);
                 if let Some(failed) = self.sign_in_failed(server) {
                     view.noted(failed, Ink::Warning)
-                } else if server.detail.is_empty() || !server.trusted {
-                    // What needs review says so beside its button.
+                } else if server.detail.is_empty()
+                    || !server.trusted
+                    || server.state == McpState::NeedsLogin
+                {
+                    // What needs review, or a sign in, says so beside its
+                    // button.
                     view
                 } else if server.state == McpState::Error {
                     view.noted(&server.detail, Ink::Warning)
@@ -768,16 +770,28 @@ impl Mcp {
         match row {
             Row::Status => {
                 let (state, ink) = server::state_said(server);
-                let meaning = if server.detail.is_empty() || !server.trusted {
+                // What the daemon says of it, but for what its state says
+                // in plainer words already.
+                let plain = !server.trusted || server.state == McpState::NeedsLogin;
+                let meaning = if server.detail.is_empty() || plain {
                     server::state_meaning(server).to_owned()
                 } else {
                     server.detail.clone()
                 };
                 let view =
                     RowView::new("Connection", meaning, ControlView::None).with_status(state, ink);
-                match self.sign_in_failed(server) {
+                let view = match self.sign_in_failed(server) {
                     Some(failed) if failed != server.detail => view.noted(failed, Ink::Warning),
                     _ => view,
+                };
+                if form.changed_elsewhere() {
+                    view.noted(
+                        "It was saved as something else, somewhere else, since you opened it, \
+                         so saving this would be refused. Cancel, and open it again.",
+                        Ink::Caution,
+                    )
+                } else {
+                    view
                 }
             }
             Row::Review => RowView::new(
@@ -791,6 +805,13 @@ impl Mcp {
                     Look::Main,
                 )),
             ),
+            // It's the server as it's saved that's tested, not the form.
+            Row::Test if form.changed() => RowView::new(
+                "Test",
+                "Connects to it as it's saved, and lists its tools. Save your changes first, \
+                 to test it with them.",
+                button(ButtonView::plain("Test").disabled()),
+            ),
             Row::Test => RowView::new(
                 "Test",
                 "Connects to it and lists its tools, without using any.",
@@ -803,8 +824,9 @@ impl Mcp {
             ),
             Row::Reconnect => RowView::new(
                 "Reconnect",
-                "Drops the chats' connections to it, for them to connect again. A call under \
-                 way isn't sent twice.",
+                "Starts the chats' connections to it again, without testing it first. A call \
+                 under way fails, and isn't sent twice. Chats connect again by themselves \
+                 when a server drops, so this is for one that's stuck.",
                 button(server::asking(
                     "Reconnect",
                     "Reconnecting…",
@@ -814,7 +836,8 @@ impl Mcp {
             ),
             Row::SignIn => RowView::new(
                 "Sign in",
-                "Opens its sign in in your browser.",
+                "Opens its sign in in your browser. The chats waiting for it connect once \
+                 you've signed in.",
                 button(
                     self.sign_in_button(server)
                         .unwrap_or_else(|| ButtonView::plain("Sign in")),
@@ -829,8 +852,8 @@ impl Mcp {
             Row::ForgetLogin => RowView::new(
                 "Forget the sign in",
                 format!(
-                    "Removes the login saved for {name} {}. Chats using it are cut off until \
-                     you sign in again.",
+                    "Removes the login saved for {name} {}. The chats using it then wait for \
+                     you to sign in again.",
                     self.kept_where()
                 ),
                 button(if form.forgetting {
@@ -881,6 +904,8 @@ impl Mcp {
                 },
                 "Enabling it…",
             ),
+            // Greyed while the form has changes: see its row.
+            Row::Test if form.changed() => Did::Nothing,
             Row::Test => self.ask(McpAction::Test { name }, "Testing it…"),
             Row::Reconnect => self.ask(McpAction::Reconnect { name }, "Reconnecting…"),
             Row::SignIn => self.ask(
@@ -1090,16 +1115,7 @@ impl Catalogue for Mcp {
     }
 
     fn form(&self) -> Option<FormView> {
-        let saving = self.asked.as_ref().is_some_and(|asked| {
-            asked.from_form
-                && matches!(
-                    asked.action,
-                    McpAction::Save { .. }
-                        | McpAction::Secret { .. }
-                        | McpAction::CompleteLogin { .. }
-                        | McpAction::Import { .. }
-                )
-        });
+        let saving = (self.asked.iter()).any(|asked| asked.from_form && saves(&asked.action));
         let save =
             |save: &str, saving_said: &str| if saving { saving_said } else { save }.to_owned();
         Some(match &self.view {
@@ -1119,12 +1135,14 @@ impl Catalogue for Mcp {
                 },
                 changed: form.changed(),
                 save: save("Save", "Saving…"),
+                saving,
             },
             View::Credential { name, value } => FormView {
                 title: "Private credential".into(),
                 subtitle: format!("Kept {}, where only you can read it.", self.kept_where()),
                 changed: !name.is_empty() || !value.is_empty(),
                 save: save("Save", "Saving…"),
+                saving,
             },
             View::Callback { form, url } => FormView {
                 title: format!("Finish signing in to {}", form.name()),
@@ -1133,6 +1151,7 @@ impl Catalogue for Mcp {
                     .into(),
                 changed: !url.is_empty(),
                 save: save("Finish", "Finishing…"),
+                saving,
             },
             View::Import {
                 provider, picked, ..
@@ -1144,6 +1163,7 @@ impl Catalogue for Mcp {
                     .into(),
                 changed: picked.contains(&true),
                 save: save("Copy", "Copying…"),
+                saving,
             },
         })
     }
@@ -1206,9 +1226,11 @@ impl Catalogue for Mcp {
                 if name.is_empty() {
                     return fail(self, "Give the credential a name.");
                 }
+                // A value copied with a blank at its end isn't meant to
+                // have one, and can't be seen to.
                 let action = McpAction::Secret {
                     name,
-                    value: value.clone(),
+                    value: value.trim().to_owned(),
                 };
                 self.ask(action, "Saving it…")
             }
@@ -1247,7 +1269,7 @@ impl Catalogue for Mcp {
     fn cancel(&mut self) -> usize {
         self.typing = None;
         self.notice.take_if(|notice| notice.of_form());
-        if let Some(asked) = &mut self.asked {
+        for asked in &mut self.asked {
             asked.from_form = false;
         }
         match std::mem::replace(&mut self.view, View::List) {
@@ -1279,6 +1301,41 @@ impl Catalogue for Mcp {
         self.typing = None;
         self.notice = None;
         Did::Went(0)
+    }
+
+    fn takes_away(&self, at: usize) -> bool {
+        self.rows().get(at).is_some_and(Self::row_takes_away)
+    }
+
+    fn disarm(&mut self) {
+        if let View::Server(form) = &mut self.view
+            && (form.removing || form.forgetting)
+        {
+            form.removing = false;
+            form.forgetting = false;
+            self.notice
+                .take_if(|notice| matches!(notice, Notice::Confirm(_)));
+        }
+    }
+}
+
+impl Mcp {
+    /// Whether `row` is a button that takes something away for good.
+    fn row_takes_away(row: &Row) -> bool {
+        matches!(row, Row::Remove | Row::ForgetLogin)
+    }
+}
+
+/// How a test of `server` went, as it's listed after it.
+fn tested_said(server: &McpServerInfo) -> Notice {
+    let name = &server.name;
+    match server.state {
+        McpState::Ready | McpState::Connected => Notice::Done(format!(
+            "{name} answered, with {}.",
+            form::counted(server.tools.len(), "tool", "tools")
+        )),
+        McpState::NeedsLogin => Notice::Done(format!("{name} answered that it needs a sign in.")),
+        _ => Notice::Failed(format!("{name} didn't answer: {}", server.detail)),
     }
 }
 

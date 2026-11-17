@@ -232,6 +232,11 @@ impl SettingsMenu {
         self.catalogue()?.form()
     }
 
+    /// Whether the page shows a form with changes that aren't saved.
+    pub(super) fn form_changed(&self) -> bool {
+        self.form_shown().is_some_and(|form| form.changed)
+    }
+
     /// Whether the page shown is a form, rather than a list or settings.
     pub(super) fn form_open(&self) -> bool {
         self.form_shown().is_some()
@@ -305,6 +310,11 @@ impl SettingsMenu {
         let Some((catalogue, _)) = self.catalogue_mut() else {
             return Outcome::Nothing;
         };
+        // What's been sent to be saved is what's saved: nothing in the
+        // form changes until the daemon answers.
+        if catalogue.form().is_some_and(|form| form.saving) {
+            return Outcome::Nothing;
+        }
         // A click in a box of text puts the caret there.
         let did = match part {
             Some(Part::Caret(caret)) => {
@@ -324,6 +334,15 @@ impl SettingsMenu {
         let Some((catalogue, easy)) = self.catalogue_mut() else {
             return Outcome::Nothing;
         };
+        // What's been sent to be saved is what's saved: until the daemon
+        // answers, the keys move about the form, and cancel it, no more.
+        let moves = matches!(
+            stroke,
+            Stroke::Escape | Stroke::Tab | Stroke::BackTab | Stroke::Up | Stroke::Down
+        );
+        if catalogue.form().is_some_and(|form| form.saving) && !moves {
+            return Outcome::Nothing;
+        }
         match form::key(catalogue, &mut easy.focus, stroke) {
             Keyed::Nothing => Outcome::Nothing,
             Keyed::Changed => {
@@ -362,8 +381,7 @@ impl SettingsMenu {
     /// first time it's not, and the foot asks; asked again straight
     /// after, it is.
     pub(super) fn may_leave(&mut self) -> bool {
-        let changed = self.form_shown().is_some_and(|form| form.changed);
-        if changed && !self.confirming {
+        if self.form_changed() && !self.confirming {
             self.discarding = true;
             return false;
         }
@@ -393,11 +411,18 @@ impl SettingsMenu {
         let Some((catalogue, easy)) = self.catalogue_mut() else {
             return Outcome::Nothing;
         };
-        if form::paste(catalogue, easy.focus, text) {
-            easy.reveal = true;
-            Outcome::Changed
-        } else {
-            Outcome::Nothing
+        if catalogue.form().is_some_and(|form| form.saving) {
+            return Outcome::Nothing;
+        }
+        match form::paste(catalogue, easy.focus, text) {
+            form::Pasted::Nowhere => Outcome::Nothing,
+            form::Pasted::Typed => {
+                easy.reveal = true;
+                Outcome::Changed
+            }
+            form::Pasted::TooLong => {
+                self.refuse("that's more than this box holds: none of it was typed")
+            }
         }
     }
 
@@ -413,36 +438,133 @@ impl SettingsMenu {
         }
     }
 
+    /// Opens the file of the skill at `at`, if it has one, in an editor.
     fn open_skill(&self, at: usize) -> Outcome {
-        self.skills.get(at).map_or(Outcome::Nothing, |skill| {
-            Outcome::OpenFile(super::Place {
-                file: skill.path.clone().into(),
-                line: 1,
+        (self.skills.get(at))
+            .filter(|skill| is_skill_file(skill))
+            .map_or(Outcome::Nothing, |skill| {
+                Outcome::OpenFile(super::Place {
+                    file: skill.path.clone().into(),
+                    line: 1,
+                })
             })
-        })
+    }
+
+    /// The Skills page's rows: the skills there are to use, each with a
+    /// switch, then what was found but can't be used, with why.
+    fn skill_sections(&self) -> Vec<Section> {
+        let off = |skill: &clackatoo_protocol::Skill| self.skills_off.contains(&skill.name);
+        let usable = |skill: &clackatoo_protocol::Skill| skill.problem.is_none() || off(skill);
+        let rows = |wanted: bool| -> Vec<Shown> {
+            (self.skills.iter().enumerate())
+                .filter(|(_, skill)| usable(skill) == wanted)
+                .map(|(at, _)| Shown::Skill(at))
+                .collect()
+        };
+        let unused = rows(false);
+        let mut sections = vec![Section::new("", rows(true))];
+        if !unused.is_empty() {
+            sections.push(Section {
+                heading: "Not loaded".into(),
+                note: Some(
+                    "Found, but not offered to agents, each with why. A project's skills, \
+                     skillsets and specialists load once you trust its folder, with :trust."
+                        .into(),
+                ),
+                rows: unused,
+            });
+        }
+        sections
+    }
+
+    /// Whether the skill at `at` is switched on, if it has a switch: one
+    /// that could be used, on a daemon that keeps a list of those
+    /// switched off.
+    fn skill_switch(&self, at: usize, facts: &Facts) -> Option<bool> {
+        let skill = self.skills.get(at)?;
+        let info = find(SKILLS_OFF).ok()?;
+        if !facts.daemon.is_some_and(|daemon| daemon.knows(info)) {
+            return None;
+        }
+        let off = self.skills_off.contains(&skill.name);
+        (skill.problem.is_none() || off).then_some(!off)
+    }
+
+    /// Enter on the skill at `at`, or a click on its switch: its switch
+    /// goes over, if it has one; else its file opens.
+    fn skill_pressed(&mut self, at: usize, facts: &Facts, history: &mut History) -> Outcome {
+        if self.skill_switch(at, facts).is_some() {
+            self.skill_switched(at, facts, history)
+        } else {
+            self.open_skill(at)
+        }
+    }
+
+    /// Switches the skill at `at` off, or on again, by its name in the
+    /// daemon's list of those switched off, saved as its other options
+    /// are.
+    fn skill_switched(&mut self, at: usize, facts: &Facts, history: &mut History) -> Outcome {
+        let Some(name) = self.skills.get(at).map(|skill| skill.name.clone()) else {
+            return Outcome::Nothing;
+        };
+        let Ok(info) = find(SKILLS_OFF) else {
+            return Outcome::Nothing;
+        };
+        let mut off = self.skills_off.clone();
+        match off.iter().position(|each| *each == name) {
+            Some(listed) => {
+                off.remove(listed);
+            }
+            None => off.push(name),
+        }
+        let value = Value::Text(off.join(", "));
+        self.change(info, value.clone(), Some(value), facts, history)
+    }
+
+    /// Takes in which skills the daemon's option says are switched off.
+    fn follow_skills_off(&mut self, facts: &Facts) {
+        self.skills_off = match find(SKILLS_OFF).map(|info| facts.configured_value(info)) {
+            Ok(Value::Text(names)) => names
+                .split([',', ' '])
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        };
     }
 
     /// Goes to the page of `catalogue` and opens the thing at `at` in its
     /// list, as a search that found it does.
     fn open_found(&mut self, catalogue: Catalogued, at: usize) -> Outcome {
-        let name = match catalogue {
+        let server = match catalogue {
             Catalogued::Servers => self.mcp.servers().get(at).map(|server| server.name.clone()),
-            Catalogued::Specialists => {
-                (self.specialists.files().get(at)).map(|file| file.definition.name.clone())
-            }
-            Catalogued::Rules => None,
+            Catalogued::Specialists | Catalogued::Rules => None,
         };
         self.show_catalogue(catalogue);
-        let went = match (catalogue, name) {
+        let went = match (catalogue, server) {
             (Catalogued::Servers, Some(name)) => self.mcp.open_named(&name),
-            (Catalogued::Specialists, Some(name)) => self.specialists.open_named(&name),
+            (Catalogued::Specialists, _) => self.specialists.open_listed(at),
             (Catalogued::Rules, _) => self.permissions.open_at(at),
-            _ => None,
+            (Catalogued::Servers, None) => None,
         };
         if let Some(row) = went {
             self.easy_went(row);
         }
         Outcome::Changed
+    }
+
+    /// Takes in the daemon's rules as `facts` have them. The keys stay on
+    /// the rule they're on, wherever a change made elsewhere puts it, so
+    /// Enter never opens another.
+    pub(super) fn follow_rules(&mut self, facts: &Facts) {
+        let listed = self.catalogue_shown() == Some(Catalogued::Rules) && !self.form_open();
+        let on = (listed && self.easy.focus >= self.before_catalogue())
+            .then(|| self.permissions.rule_at(self.easy_focus()))
+            .flatten();
+        self.permissions.follow(facts);
+        if let Some(row) = on.and_then(|rule| self.permissions.row_of(&rule)) {
+            self.easy_keep_focus(row);
+        }
     }
 
     /// The settings the Permissions page shows over its rules.
@@ -488,8 +610,7 @@ impl SettingsMenu {
             return sections;
         }
         if page == Page::Skills {
-            let rows = (0..self.skills.len()).map(Shown::Skill).collect();
-            return vec![Section::new("", rows)];
+            return self.skill_sections();
         }
         let mut sections: Vec<Section> = Vec::new();
         for entry in easy::on(page).filter(|entry| shown(entry)) {
@@ -739,7 +860,7 @@ impl SettingsMenu {
         match self.easy_focused() {
             Some(Shown::Advanced(index)) => self.go_to_advanced(index),
             Some(Shown::Entry(entry)) => self.activate(entry, None, facts, history),
-            Some(Shown::Skill(at)) => self.open_skill(at),
+            Some(Shown::Skill(at)) => self.skill_pressed(at, facts, history),
             Some(Shown::Row(at)) => self.catalogue_press(at, None),
             Some(Shown::Found(catalogue, at)) => self.open_found(catalogue, at),
             None => Outcome::Nothing,
@@ -865,6 +986,9 @@ impl SettingsMenu {
                 };
                 let did = catalogue.step(at, by);
                 self.did(did)
+            }
+            Some(Shown::Skill(at)) if self.skill_switch(at, facts).is_some() => {
+                self.skill_switched(at, facts, history)
             }
             _ => Outcome::Nothing,
         }
@@ -1022,8 +1146,11 @@ impl SettingsMenu {
 
     /// `o`: opens the line that set the row focused, if a line did.
     pub(super) fn easy_open(&mut self, facts: &Facts) -> Outcome {
-        let Some(Shown::Entry(entry)) = self.easy_focused() else {
-            return Outcome::Nothing;
+        let entry = match self.easy_focused() {
+            Some(Shown::Entry(entry)) => entry,
+            // A skill's file, which says what it does.
+            Some(Shown::Skill(at)) => return self.open_skill(at),
+            _ => return Outcome::Nothing,
         };
         // Where it's locked first, as Enter and its place open.
         let by = locked(entry, facts).or_else(|| {
@@ -1119,6 +1246,16 @@ impl SettingsMenu {
             return Outcome::Changed;
         }
         self.easy.keys = false;
+        // A click anywhere but on a control takes back the first press of
+        // a button that asks for two, and puts away a list of choices.
+        if !matches!(hit, SettingsHit::Control(..) | SettingsHit::Font(_)) {
+            if let Some((catalogue, _)) = self.catalogue_mut() {
+                catalogue.disarm();
+            }
+            if matches!(self.editing, Some(Editing::Choice(_))) {
+                self.editing = None;
+            }
+        }
         match hit {
             SettingsHit::Panel => Outcome::Nothing,
             SettingsHit::Backdrop | SettingsHit::Close => Outcome::Close,
@@ -1218,6 +1355,8 @@ impl SettingsMenu {
                 Outcome::Nothing => Outcome::Changed,
                 outcome => outcome,
             },
+            // Its switch; or its button, which opens its file.
+            (Shown::Skill(at), Some(Part::Whole)) => self.skill_pressed(at, facts, history),
             (Shown::Skill(at), Some(_)) => self.open_skill(at),
             (Shown::Found(catalogue, at), Some(_)) => self.open_found(catalogue, at),
             (Shown::Advanced(index), Some(_)) => self.go_to_advanced(index),
@@ -1354,7 +1493,8 @@ impl SettingsMenu {
     /// What Easy draws.
     #[allow(clippy::too_many_lines, reason = "the page, then each row")]
     pub(crate) fn easy_view(&mut self, facts: &Facts) -> EasyView {
-        self.permissions.follow(facts);
+        self.follow_rules(facts);
+        self.follow_skills_off(facts);
         self.mcp.machine = facts.daemon.and_then(|daemon| daemon.elsewhere.clone());
         self.know_names();
         let sections = self.easy_sections();
@@ -1409,8 +1549,23 @@ impl SettingsMenu {
         };
         let form = self.form_shown();
         let words = self.page_words(facts, searching, found);
-        let (footer, warning, ticked) = self.foot_said(facts, daemons, &words);
-        let hints = self.hints(searching, form.as_ref(), lists);
+        let (footer, warning, ticked) = self.foot_said(facts, daemons);
+        // What Enter does to the row the keys are on, for the foot to say.
+        let on = match self.easy_focused() {
+            None => On::Nothing,
+            Some(Shown::Entry(_)) => On::Setting,
+            Some(Shown::Row(at)) => match catalogued.get(at) {
+                Some(row) if row.control != ControlView::None => On::Opens,
+                _ => On::Nothing,
+            },
+            Some(Shown::Skill(at)) => match self.skill_switch(at, facts) {
+                Some(_) => On::Switch,
+                None if self.skills.get(at).is_some_and(is_skill_file) => On::Opens,
+                None => On::Nothing,
+            },
+            Some(Shown::Advanced(_) | Shown::Found(..)) => On::Opens,
+        };
+        let hints = self.hints(searching, form.as_ref(), lists, on);
         let buttons = match &form {
             Some(form) => vec![
                 FootButton {
@@ -1499,7 +1654,8 @@ impl SettingsMenu {
         let place = self.whereabouts(facts);
         if self.offline && page.group() == "Agents" {
             words.banner = Some(
-                "The connection to the daemon is lost. What's here may be out of date, and is                  read again once it's back."
+                "The connection to the daemon is lost. What's here may be out of date, and is \
+                 read again once it's back."
                     .into(),
             );
         }
@@ -1533,7 +1689,8 @@ impl SettingsMenu {
                 words.subtitle = format!("What agents know how to do, for {place}.");
                 words.empty = listing(&self.skills_listing, "Reading the skills…").or_else(|| {
                     self.skills.is_empty().then(|| {
-                        "No skills yet. Add one as .agents/skills/NAME/SKILL.md in the                          project, or under ~/.agents for every project."
+                        "No skills yet. Add one as .agents/skills/NAME/SKILL.md in the \
+                         project, or under ~/.agents for every project."
                             .to_owned()
                     })
                 });
@@ -1551,7 +1708,8 @@ impl SettingsMenu {
                     words.empty = Some(if self.offline {
                         "Not connected to the daemon: its rules show once it's back.".into()
                     } else {
-                        "The daemon hasn't said its settings, so its rules can't be shown. It                          may be older than this window."
+                        "The daemon hasn't said its settings, so its rules can't be shown. It \
+                         may be older than this window."
                             .into()
                     });
                 }
@@ -1582,7 +1740,7 @@ impl SettingsMenu {
     /// question, how the page's last action went, how to type what's
     /// being typed, what was saved last, or why the daemon's config
     /// doesn't run.
-    fn foot_said(&self, facts: &Facts, daemons: bool, words: &PageWords) -> (String, bool, bool) {
+    fn foot_said(&self, facts: &Facts, daemons: bool) -> (String, bool, bool) {
         if let Some((said, warning)) = &self.said {
             return (said.clone(), *warning, false);
         }
@@ -1634,9 +1792,7 @@ impl SettingsMenu {
         }
         // A page of settings saves each as it's changed; a list has
         // nothing to say until something's done.
-        let lists = words.within.is_some()
-            || (self.catalogue_shown().is_some() && self.easy.page() != Page::Permissions)
-            || self.easy.page() == Page::Skills;
+        let lists = self.catalogue_shown().is_some() || self.easy.page() == Page::Skills;
         if lists && !self.searching() {
             (String::new(), false, false)
         } else {
@@ -1650,6 +1806,7 @@ impl SettingsMenu {
         searching: bool,
         form: Option<&form::FormView>,
         lists: bool,
+        on: On,
     ) -> Vec<(&'static str, &'static str)> {
         let typing_in_form =
             (self.catalogue()).is_some_and(|catalogue| catalogue.typing().is_some());
@@ -1666,8 +1823,17 @@ impl SettingsMenu {
         if self.typing {
             return vec![("Enter", "keep"), ("Esc", "clear")];
         }
+        // What Enter, and the letters, do to the row the keys are on.
+        let row: &[(&str, &str)] = match on {
+            On::Nothing => &[],
+            On::Opens => &[("Enter", "open")],
+            On::Switch => &[("Enter", "on or off"), ("o", "open its file")],
+            On::Setting => &[("u", "undo"), ("r", "default")],
+        };
         if searching {
-            return vec![("Enter", "open"), ("m", "Advanced"), ("Esc", "clear")];
+            return (row.iter().copied())
+                .chain([("m", "Advanced"), ("Esc", "clear")])
+                .collect();
         }
         // The question the foot asks says its own keys.
         if self.discarding {
@@ -1677,7 +1843,7 @@ impl SettingsMenu {
             return vec![
                 ("Enter", "next field"),
                 ("Ctrl+S", "save"),
-                ("Esc", "undo typing"),
+                ("Esc", "done typing"),
             ];
         }
         if let Some(form) = form {
@@ -1694,7 +1860,8 @@ impl SettingsMenu {
         };
         if lists {
             return (adds.into_iter())
-                .chain([("Enter", "open"), ("/", "search"), ("Esc", "close")])
+                .chain(row.iter().copied())
+                .chain([("/", "search"), ("Esc", "close")])
                 .collect();
         }
         vec![
@@ -1712,7 +1879,7 @@ impl SettingsMenu {
             // Drawn with its catalogue's others (see `easy_view`).
             Shown::Row(_) => return RowView::new("", "", ControlView::None),
             Shown::Found(catalogue, at) => return self.found_row(catalogue, at),
-            Shown::Skill(at) => return self.skill_row(at, searching),
+            Shown::Skill(at) => return self.skill_row(at, searching, facts),
             Shown::Entry(entry) => entry,
             Shown::Advanced(at) => {
                 let (label, help) = match &self.entries[at] {
@@ -1902,41 +2069,60 @@ impl SettingsMenu {
         }
     }
 
-    /// A skill's row: what it's for, where it's from, and who starts it.
-    fn skill_row(&self, at: usize, searching: bool) -> RowView {
+    /// A skill's row: what it's for, where it's from, who starts it or
+    /// why it can't be used, its file, and its switch.
+    fn skill_row(&self, at: usize, searching: bool, facts: &Facts) -> RowView {
         let Some(skill) = self.skills.get(at) else {
             return RowView::new("", "", ControlView::None);
         };
         let name = &skill.name;
-        let (starts, ink) = match (&skill.problem, skill.implicit, skill.user_invocable) {
-            (Some(problem), ..) => (format!("It can't run: {problem}"), Ink::Warning),
-            (None, false, false) => (
-                "Turned off: neither you nor agents can start it.".to_owned(),
-                Ink::Muted,
+        let switch = self.skill_switch(at, facts);
+        let (starts, ink) = match (switch, &skill.problem) {
+            (Some(false), _) => (
+                "Switched off: agents aren't offered it, and its command is gone.".to_owned(),
+                Ink::Caution,
             ),
-            (None, false, true) => (format!("Only you start it, with /{name}."), Ink::Muted),
-            (None, true, false) => (
-                "Only agents start it, when it fits what they're doing.".to_owned(),
-                Ink::Muted,
-            ),
-            (None, true, true) => (
-                format!("You start it with /{name}; agents use it when it fits."),
-                Ink::Muted,
-            ),
+            (_, Some(problem)) => (format!("It can't be used: {problem}"), Ink::Warning),
+            (_, None) => match (skill.implicit, skill.user_invocable) {
+                (false, false) => (
+                    "Its file says neither you nor agents start it.".to_owned(),
+                    Ink::Muted,
+                ),
+                (false, true) => (format!("Only you start it, with /{name}."), Ink::Muted),
+                (true, false) => (
+                    "Only agents start it, when it fits what they're doing.".to_owned(),
+                    Ink::Muted,
+                ),
+                (true, true) => (
+                    format!("You start it with /{name}; agents use it when it fits."),
+                    Ink::Muted,
+                ),
+            },
         };
         let help = if searching {
             format!("Skills · {}", skill.description)
         } else {
             skill.description.clone()
         };
-        RowView::new(
-            format!("/{name}"),
-            help,
-            ControlView::Button(ButtonView::plain("Open its file")),
-        )
-        .with_status(&skill.source, Ink::Muted)
-        .noted(starts, ink)
-        .noted(form::tilde(&skill.path, &self.home), Ink::Muted)
+        // What isn't a skill's file is a specialist's or a skillset's
+        // folder, which there's nothing to open of.
+        let file = is_skill_file(skill);
+        let open = ButtonView::plain("Open its file");
+        let control = match (switch, file) {
+            (Some(on), true) => ControlView::Switched { on, button: open },
+            (Some(on), false) => ControlView::Toggle(on),
+            (None, true) => ControlView::Button(open),
+            (None, false) => ControlView::None,
+        };
+        let label = if file {
+            format!("/{name}")
+        } else {
+            name.clone()
+        };
+        RowView::new(label, help, control)
+            .with_status(&skill.source, Ink::Muted)
+            .noted(starts, ink)
+            .noted(form::tilde(&skill.path, &self.home), Ink::Muted)
     }
 
     /// The row of something a search found in a catalogue's list: its
@@ -2051,6 +2237,29 @@ impl SettingsMenu {
             scale,
         }
     }
+}
+
+/// The daemon's option that lists the skills switched off, by name.
+const SKILLS_OFF: &str = "skills.disabled";
+
+/// Whether what `skill` says is at its path is a skill's file, which can
+/// be opened, rather than the folder of a specialist or a skillset that
+/// wasn't loaded, which the daemon lists with the skills.
+fn is_skill_file(skill: &clackatoo_protocol::Skill) -> bool {
+    std::path::Path::new(&skill.path).extension().is_some()
+}
+
+/// What the row the keys are on is, as far as the keys the foot names go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum On {
+    /// No row, or one that only says something.
+    Nothing,
+    /// One Enter opens, or presses the button of.
+    Opens,
+    /// A skill, which Enter switches off or on, and `o` opens the file of.
+    Switch,
+    /// A setting, which `u` undoes and `r` puts back.
+    Setting,
 }
 
 /// What a page says round its rows.

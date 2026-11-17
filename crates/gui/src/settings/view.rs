@@ -236,6 +236,8 @@ pub(crate) struct FieldView {
 pub(crate) enum ControlView {
     /// A switch, on or off.
     Toggle(bool),
+    /// A button, then a switch, on or off, which is what the keys press.
+    Switched { on: bool, button: ButtonView },
     /// Buttons side by side, the one picked lit, if one is.
     Segmented {
         labels: Vec<&'static str>,
@@ -1886,6 +1888,10 @@ fn lock_width(lay: &mut Lay<'_>, row: &RowView) -> f32 {
 fn control_size(lay: &mut Lay<'_>, control: &ControlView, room: f32) -> [f32; 2] {
     match control {
         ControlView::Toggle(_) => [lay.u(44.0), lay.u(26.0)],
+        ControlView::Switched { button, .. } => [
+            pill_width(lay, button) + lay.u(12.0) + lay.u(44.0),
+            lay.u(28.0),
+        ],
         ControlView::Segmented { labels, .. } => {
             let mut width = lay.u(6.0);
             for label in labels {
@@ -2086,6 +2092,8 @@ fn lay_row(
             .get(*at)
             .copied()
             .unwrap_or(control),
+        // And round the switch, which is what they press.
+        ControlView::Switched { .. } => switch_beside(lay, control),
         _ => control,
     };
     if focused && !locked && row.control != ControlView::None {
@@ -2117,28 +2125,20 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
     let edge = lay.geometry.edge;
     let whole = SettingsHit::Control(row, Part::Whole);
     match control {
-        ControlView::Toggle(on) => {
-            let track = if *on && !locked {
-                Paint::Accent
-            } else {
-                Paint::Track
+        ControlView::Toggle(on) => lay_switch_knob(lay, *on, rect, locked, whole),
+        ControlView::Switched { on, button } => {
+            let switch = switch_beside(lay, rect);
+            let pill = Rect {
+                width: pill_width(lay, button),
+                ..rect
             };
-            lay.fill(Fill::rounded(rect.to_array(), track, rect.height / 2.0));
-            let knob = rect.height - lay.u(6.0);
-            let x = if *on {
-                rect.right() - lay.u(3.0) - knob
-            } else {
-                rect.x + lay.u(3.0)
-            };
-            let paint = if locked { Paint::Icon } else { Paint::Ink };
-            lay.fill(Fill::rounded(
-                [x, rect.y + lay.u(3.0), knob, knob],
-                paint,
-                knob / 2.0,
-            ));
-            if !locked {
-                lay.hit(rect, whole);
-            }
+            lay_pill(
+                lay,
+                button,
+                pill,
+                SettingsHit::Control(row, Part::Segment(0)),
+            );
+            lay_switch_knob(lay, *on, switch, locked, whole);
         }
         ControlView::Segmented { labels, picked } => {
             lay.fill(
@@ -2352,6 +2352,44 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
     }
 }
 
+/// Where the switch goes in `rect`, the room of a button and a switch: at
+/// its right, centred.
+fn switch_beside(lay: &Lay<'_>, rect: Rect) -> Rect {
+    let (width, height) = (lay.u(44.0), lay.u(26.0));
+    Rect {
+        x: rect.right() - width,
+        y: (rect.y + (rect.height - height) / 2.0).round(),
+        width,
+        height,
+    }
+}
+
+/// Lays out a switch in `rect`, on or off, a click on it being `hit`:
+/// greyed, taking none, if it's `locked`.
+fn lay_switch_knob(lay: &mut Lay<'_>, on: bool, rect: Rect, locked: bool, hit: SettingsHit) {
+    let track = if on && !locked {
+        Paint::Accent
+    } else {
+        Paint::Track
+    };
+    lay.fill(Fill::rounded(rect.to_array(), track, rect.height / 2.0));
+    let knob = rect.height - lay.u(6.0);
+    let x = if on {
+        rect.right() - lay.u(3.0) - knob
+    } else {
+        rect.x + lay.u(3.0)
+    };
+    let paint = if locked { Paint::Icon } else { Paint::Ink };
+    lay.fill(Fill::rounded(
+        [x, rect.y + lay.u(3.0), knob, knob],
+        paint,
+        knob / 2.0,
+    ));
+    if !locked {
+        lay.hit(rect, hit);
+    }
+}
+
 /// How wide `button` is drawn.
 fn pill_width(lay: &mut Lay<'_>, button: &ButtonView) -> f32 {
     lay.width(&button.label, HELP, Ink::Accent) + lay.u(28.0)
@@ -2414,6 +2452,9 @@ fn lay_foot_button(lay: &mut Lay<'_>, button: &FootButton, right: f32, middle: f
     rect.x
 }
 
+/// What a credential's box shows while it isn't being typed into.
+const MASKED: &str = "••••••••";
+
 /// Lays out a box of text in `rect`, for row `row`: as much of it as
 /// fits, with the caret in view while it's typed into, a dot for each
 /// character of one that's masked, and what it's for, greyed, while it's
@@ -2430,6 +2471,18 @@ fn lay_field(lay: &mut Lay<'_>, field: &FieldView, rect: Rect, row: u16, locked:
     );
     let middle = rect.y + rect.height / 2.0;
     let left = rect.x + lay.u(12.0);
+    // A credential not being typed is so many dots, however long it is:
+    // only while it's typed do they count its characters, to type by.
+    if field.masked && field.caret.is_none() && !field.text.is_empty() {
+        lay.text_mid(left, middle, MASKED, Ink::Plain, VALUE);
+        let end = Stop {
+            x: left,
+            at: u32::try_from(field.text.len()).unwrap_or(u32::MAX),
+        };
+        lay.laid.fields.push((row, vec![end]));
+        lay.hit(rect, SettingsHit::Control(row, Part::Caret(0)));
+        return;
+    }
     let advance = lay.sizes.mono_em * VALUE.scale();
     // Each character, where it starts in the text and in cells.
     let mut cells = 0;
@@ -2444,14 +2497,21 @@ fn lay_field(lay: &mut Lay<'_>, field: &FieldView, rect: Rect, row: u16, locked:
         .floor()
         .max(1.0)) as usize;
     // The cells shown: from the start, or with a caret too far along to
-    // show from there, as far along as shows it and a little after it.
+    // show from there, from half a box's width at a time further on, so
+    // the text stays still as the caret moves about in what's shown, and
+    // a click leaves what's clicked where it is.
     let caret_cell = field.caret.map(|caret| {
         (chars.iter())
             .find(|(at, ..)| *at >= caret)
             .map_or(cells, |&(_, _, cell)| cell)
     });
     let from = match caret_cell {
-        Some(caret) if cells >= fits => (caret + 8).min(cells).saturating_sub(fits - 1),
+        Some(caret) if cells >= fits => {
+            let (quarter, half) = (fits / 4, (fits / 2).max(1));
+            let stepped = caret.saturating_sub(quarter) / half * half;
+            // No further than shows the text's end, and the caret after it.
+            stepped.min(cells + 1 - fits)
+        }
         _ => 0,
     };
     let shown: Vec<&(usize, char, usize)> = (chars.iter())
@@ -3067,6 +3127,23 @@ mod tests {
             assert_eq!(end.at as usize, long.len());
             assert!(end.x <= rect.right());
         }
+        // The text stays still as the caret moves about in what's shown,
+        // so each Left doesn't slide it, nor a click what's clicked.
+        let shown = |caret: usize| {
+            let laid = laid_out(&field(Some(caret)), [800, 800]);
+            (laid.texts.iter())
+                .find(|text| text.content.contains("example.com"))
+                .map(|text| text.content.clone())
+                .expect("its text")
+        };
+        let end = long.len();
+        assert_eq!(shown(end), shown(end - 1));
+        assert_eq!(shown(end - 1), shown(end - 5));
+        assert_ne!(
+            shown(end),
+            shown(40),
+            "it does move once the caret's out of it"
+        );
         // A click goes to the place nearest it, whichever part is shown.
         let short = page_of(RowView::new(
             "Name",
@@ -3093,6 +3170,10 @@ mod tests {
             click(rect.right() - 2.0),
             Some(SettingsHit::Control(0, Part::Caret(5)))
         );
+    }
+
+    #[test]
+    fn a_credential_is_dots_that_do_not_count_its_characters_until_it_is_typed() {
         // A credential's is dots, as many as it has characters.
         let masked = page_of(RowView::new(
             "Value",
@@ -3104,13 +3185,40 @@ mod tests {
             }),
         ));
         let laid = laid_out(&masked, [1280, 800]);
-        assert!(laid.texts.iter().any(|text| text.content == "••••••"));
+        // Not typed into, it's the same dots however long it is; a click
+        // puts the caret at its end.
+        assert!(laid.texts.iter().any(|text| text.content == MASKED));
+        let rect = control(&laid, Part::Caret(0));
+        assert_eq!(
+            laid.hit([rect.x + 14.0, rect.y + 4.0], Scrolled::default()),
+            Some(SettingsHit::Control(0, Part::Caret(6)))
+        );
         assert!(
             !laid
                 .texts
                 .iter()
                 .any(|text| text.content.contains("secret"))
         );
+    }
+
+    #[test]
+    fn a_switch_beside_a_button_takes_its_own_clicks() {
+        let view = page_of(RowView::new(
+            "/deploy",
+            "Deploys.",
+            ControlView::Switched {
+                on: true,
+                button: ButtonView::plain("Open its file"),
+            },
+        ));
+        for size in [[1280, 800], [640, 800]] {
+            let laid = laid_out(&view, size);
+            let switch = control(&laid, Part::Whole);
+            let button = control(&laid, Part::Segment(0));
+            assert!(button.right() <= switch.x, "{size:?}: they overlap");
+            let panel = panel(&Geometry::new(size, METRICS));
+            assert!(switch.right() <= panel.right(), "{size:?}");
+        }
     }
 
     #[test]

@@ -314,15 +314,16 @@ pub(crate) const ENTRIES: &[Entry] = &[
         Permissions,
         "Default for new chats",
         (
-            "Permission engine",
-            "Whether an agent's own settings decide what it may do, or the rules below. Under \
-             the rules, Claude Code runs in Manual and Codex with Workspace access. A chat \
-             already open keeps its own, changed in its permissions menu.",
+            "Who answers agents' requests",
+            "The agent's own permission settings, or the rules below, asking you when none \
+             matches. Under the rules, Claude Code and Codex are kept to the modes in which \
+             they ask before they act. A chat already open keeps its own, changed in its \
+             permissions menu.",
         ),
         &["permissions.engine"],
         &[
-            choice("Provider permissions", &["provider"]),
-            choice("Clackatoo rules", &["clackatoo"]),
+            choice("The agent's own settings", &["provider"]),
+            choice("clackatoo's rules", &["clackatoo"]),
         ],
     ),
     // Appearance.

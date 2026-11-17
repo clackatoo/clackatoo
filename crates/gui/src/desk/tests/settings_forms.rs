@@ -268,12 +268,28 @@ fn a_letter_typed_in_a_form_is_text_or_nothing_and_never_a_command() {
             if field.text == "Reviews changes" && field.caret.is_none()),
         "{described:?}"
     );
-    // Esc while typing puts back what the box held, and no more.
-    type_keys(&mut desk, "oops");
+    // Esc while typing stops typing, and keeps what was typed: it's the
+    // question before the form goes that guards it.
+    type_keys(&mut desk, "After a change");
     named(&mut desk, NamedKey::Escape);
     let (_, when) = easy_row(&mut desk, "When to use it");
-    assert!(matches!(&when.control, ControlView::Field(field) if field.text.is_empty()));
-    assert_eq!(easy(&mut desk).title, "New specialist");
+    assert!(
+        matches!(&when.control, ControlView::Field(field)
+            if field.text == "After a change" && field.caret.is_none()),
+        "{when:?}"
+    );
+    named(&mut desk, NamedKey::Escape);
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "New specialist");
+    assert!(view.footer.starts_with("Discard"), "{}", view.footer);
+    // The keys that edit text start it too, without a letter first.
+    press(&mut desk, Key::Character("u".into()), None, CTRL);
+    let (_, when) = easy_row(&mut desk, "When to use it");
+    assert!(
+        matches!(&when.control, ControlView::Field(field)
+            if field.text.is_empty() && field.caret == Some(0)),
+        "{when:?}"
+    );
 }
 
 #[test]
@@ -303,11 +319,13 @@ fn a_lost_connection_fails_what_was_asked_and_everything_is_read_again_once_it_i
     // The page isn't dead: Cancel goes back to the list.
     desk.settings_pointer(SettingsHit::Foot(Foot::Cancel));
     assert_eq!(easy(&mut desk).title, "MCP Servers");
-    // What's asked while it's out of reach fails at once, saying so.
+    // What's asked while it's out of reach fails at once, saying that
+    // nothing was sent, not that it may have been done.
     click(&mut desk, "search");
     click(&mut desk, "Test");
     assert!(sent(&mut desk).is_empty());
-    assert!(easy(&mut desk).banner.is_some());
+    let banner = easy(&mut desk).banner.expect("it says so");
+    assert!(banner.contains("nothing was sent"), "{banner}");
 
     // A specialist's save, lost with the connection, leaves its form
     // open to cancel, or save again.
@@ -430,9 +448,12 @@ fn the_foot_names_keys_that_work_on_the_page_shown() {
     let (mut desk, _dir) = mcp_page(vec![server("search")]);
     // A list: nothing to save, undo or put back.
     let view = easy(&mut desk);
-    assert_eq!(hints(&view), ["a", "Enter", "/", "Esc"]);
+    assert_eq!(hints(&view), ["a", "/", "Esc"], "the keys are on the pages");
     assert!(view.buttons.is_empty());
     assert_eq!(view.primary.as_deref(), Some("Add a server"));
+    // Into the page, on a server: Enter opens it.
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(hints(&easy(&mut desk)), ["a", "Enter", "/", "Esc"]);
     // `a` is its button.
     type_keys(&mut desk, "a");
     let view = easy(&mut desk);
@@ -447,21 +468,33 @@ fn the_foot_names_keys_that_work_on_the_page_shown() {
     // Typing: Esc is the text's.
     type_keys(&mut desk, "docs");
     let view = easy(&mut desk);
-    assert_eq!(view.hints.last(), Some(&("Esc", "undo typing")));
+    assert_eq!(view.hints.last(), Some(&("Esc", "done typing")));
     let said: Vec<&str> = view.buttons.iter().map(|each| &*each.label).collect();
     assert_eq!(said, ["Cancel", "Save"], "there's something to lose now");
     named(&mut desk, NamedKey::Escape);
+    assert_eq!(easy(&mut desk).hints.last(), Some(&("Esc", "cancel")));
+    named(&mut desk, NamedKey::Escape);
+    assert!(
+        easy(&mut desk).hints.is_empty(),
+        "the question says its keys"
+    );
     named(&mut desk, NamedKey::Escape);
 
     // A page of settings: its rows undo and go back as they start.
     go_to(&mut desk, Page::Appearance);
     assert_eq!(hints(&easy(&mut desk)), ["u", "r", "m", "Esc"]);
-    // Skills: a list with nothing to add from here.
+    // Skills, with none: nothing for Enter to do.
     go_to(&mut desk, Page::Skills);
-    assert_eq!(hints(&easy(&mut desk)), ["Enter", "/", "Esc"]);
-    // The rules save from their form, with Ctrl+S.
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(hints(&easy(&mut desk)), ["/", "Esc"]);
+    // Permissions: who answers is a setting, undone and put back as one,
+    // and the foot doesn't say rules save as they're made.
     go_to(&mut desk, Page::Permissions);
-    assert_eq!(hints(&easy(&mut desk)), ["a", "Enter", "/", "Esc"]);
+    named(&mut desk, NamedKey::Enter);
+    let view = easy(&mut desk);
+    assert_eq!(hints(&view), ["a", "u", "r", "/", "Esc"]);
+    assert_eq!(view.footer, "");
+    // The rules save from their form, with Ctrl+S.
     type_keys(&mut desk, "a");
     assert_eq!(hints(&easy(&mut desk)), ["Tab", "Ctrl+S", "Esc"]);
 }
@@ -555,7 +588,7 @@ fn rules_this_window_cannot_read_are_said_to_be_and_never_saved_over() {
     assert!(!hints(&view).contains(&"a"));
     assert_eq!(
         labels(&view),
-        ["Permission engine"],
+        ["Who answers agents' requests"],
         "none is shown as if there were none"
     );
     // Nor by its key.
@@ -953,6 +986,8 @@ fn a_specialist_that_is_not_yours_is_copied_and_yours_is_saved_where_it_is() {
     assert_eq!(saved.saved.as_deref(), Some("the file as it was"));
     // Another menu's answer closes no form of this one's.
     let saved = saved.clone();
+    desk.settings_pointer(SettingsHit::Close);
+    desk.settings_pointer(SettingsHit::Close);
     command(&mut desk, "Settings");
     go_to(&mut desk, Page::Specialists);
     desk.settings_specialists(Response::SpecialistFiles(vec![specialist("reviewer")]));
@@ -1061,5 +1096,359 @@ fn the_agents_page_says_what_each_choice_of_an_agents_own_servers_does() {
         !labels(&easy(&mut desk))
             .iter()
             .any(|label| label.contains("own"))
+    );
+}
+
+#[test]
+fn every_way_of_closing_the_menu_asks_before_a_changed_form_goes() {
+    let (mut desk, _dir) = specialists_page(Vec::new());
+    let changed = |desk: &mut Desk| {
+        desk.settings_pointer(SettingsHit::Primary);
+        type_keys(desk, "reviewer");
+        named(desk, NamedKey::Enter);
+    };
+    // The key that goes back to normal mode from anywhere.
+    changed(&mut desk);
+    normal_mode(&mut desk);
+    assert!(desk.settings_open(), "Ctrl+; closed it");
+    assert!(easy(&mut desk).footer.starts_with("Discard"));
+    // Another key between, and it asks again.
+    named(&mut desk, NamedKey::Tab);
+    normal_mode(&mut desk);
+    assert!(desk.settings_open());
+    normal_mode(&mut desk);
+    assert!(!desk.settings_open(), "asked twice, it goes");
+
+    // `:Settings` again, as a script or an agent's command runs it, and
+    // the cog by a chat's specialists, leave the form as it is.
+    command(&mut desk, "Settings");
+    go_to(&mut desk, Page::Specialists);
+    desk.settings_specialists(Response::SpecialistFiles(Vec::new()));
+    changed(&mut desk);
+    desk.open_settings("wrap");
+    let view = easy(&mut desk);
+    assert_eq!(
+        (view.title.as_str(), view.query.as_str()),
+        ("New specialist", "")
+    );
+    named(&mut desk, NamedKey::Tab);
+    desk.open_specialist_settings();
+    assert_eq!(easy(&mut desk).title, "New specialist");
+    let (_, name) = easy_row(&mut desk, "Name");
+    assert!(matches!(&name.control, ControlView::Field(field) if field.text == "reviewer"));
+    // And so does anything else that opens over the menu.
+    named(&mut desk, NamedKey::Tab);
+    desk.close_finder();
+    assert!(desk.settings_open());
+    // A form with no changes is no reason to stay.
+    named(&mut desk, NamedKey::Escape);
+    named(&mut desk, NamedKey::Escape);
+    desk.settings_pointer(SettingsHit::Primary);
+    normal_mode(&mut desk);
+    assert!(!desk.settings_open());
+}
+
+#[test]
+fn enter_never_goes_on_to_delete_and_any_key_takes_back_its_first_press() {
+    let (mut desk, _dir) = easy_configured("");
+    let one = r#"[{"decision":"allow","kind":"command","target":"cargo test"}]"#;
+    desk.daemon_settings_came(&with_rules(one), None);
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    go_to(&mut desk, Page::Permissions);
+    click(&mut desk, "Allow the command `cargo test`");
+    // To the command, more typed, and Enter: the keys stay on it, as
+    // Delete is next. Enter again only starts typing again.
+    named(&mut desk, NamedKey::Tab);
+    named(&mut desk, NamedKey::Tab);
+    type_keys(&mut desk, " --all");
+    let (command_row, _) = easy_row(&mut desk, "Command");
+    for _ in 0..3 {
+        named(&mut desk, NamedKey::Enter);
+        assert_eq!(easy(&mut desk).focus, Some(usize::from(command_row)));
+    }
+    assert!(sent(&mut desk).is_empty(), "nothing was deleted");
+    named(&mut desk, NamedKey::Escape);
+    // Tab reaches Delete; its first press arms it, and says so.
+    named(&mut desk, NamedKey::Tab);
+    let delete = |desk: &mut Desk| match easy_row(desk, "Delete this rule").1.control {
+        ControlView::Button(button) => button.label,
+        other => panic!("{other:?}"),
+    };
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(delete(&mut desk), "Really delete");
+    assert!(easy(&mut desk).footer.starts_with("Delete this rule?"));
+    // Any other key takes that back, and the question with it.
+    named(&mut desk, NamedKey::ArrowUp);
+    assert_eq!(delete(&mut desk), "Delete");
+    assert_eq!(easy(&mut desk).footer, "");
+    // And so does a click on anything but its button.
+    named(&mut desk, NamedKey::ArrowDown);
+    named(&mut desk, NamedKey::Enter);
+    let (row, _) = easy_row(&mut desk, "Command");
+    desk.settings_pointer(SettingsHit::Row(row));
+    assert_eq!(delete(&mut desk), "Delete");
+    // Pressed twice, it deletes.
+    click(&mut desk, "Delete this rule");
+    click(&mut desk, "Delete this rule");
+    let asked = sent(&mut desk);
+    assert!(
+        matches!(&asked[..], [Request::SetPermissionRules { rules, .. }] if rules == "[]"),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn a_rule_is_never_saved_into_a_list_that_became_unreadable_under_its_form() {
+    let (mut desk, _dir) = on_page(Page::Permissions);
+    type_keys(&mut desk, "a");
+    named(&mut desk, NamedKey::Tab);
+    named(&mut desk, NamedKey::Tab);
+    type_keys(&mut desk, "clackatoo/list_panes");
+    // Another window, of a newer build, saves a rule this one can't read.
+    let newer = r#"[{"decision":"deny","kind":"network","target":"example.com"}]"#;
+    desk.daemon_settings_came(&with_rules(newer), None);
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    assert!(
+        sent(&mut desk).is_empty(),
+        "it would save over the rule it can't read"
+    );
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "New rule", "the form is kept");
+    assert!(
+        view.banner
+            .as_deref()
+            .is_some_and(|said| said.contains("can't read"))
+    );
+}
+
+#[test]
+fn a_form_being_saved_changes_no_more_and_a_list_of_choices_goes_with_its_form() {
+    let (mut desk, _dir) = specialists_page(vec![specialist("reviewer")]);
+    click(&mut desk, "reviewer");
+    click(&mut desk, "You can start it");
+    desk.settings_pointer(SettingsHit::Foot(Foot::Save));
+    let asked = sent(&mut desk);
+    let [
+        Request::SaveSpecialistFile {
+            specialist: saved, ..
+        },
+    ] = &asked[..]
+    else {
+        panic!("{asked:?}")
+    };
+    // While the daemon has it, neither keys nor clicks change the form.
+    let described = |desk: &mut Desk| match easy_row(desk, "Description").1.control {
+        ControlView::Field(field) => field.text,
+        other => panic!("{other:?}"),
+    };
+    let (row, _) = easy_row(&mut desk, "Description");
+    desk.settings_pointer(SettingsHit::Control(row, Part::Caret(0)));
+    type_keys(&mut desk, "late ");
+    desk.paste_into_settings("later");
+    click(&mut desk, "Agents can hand work to it");
+    assert_eq!(described(&mut desk), "Reviews");
+    assert_eq!(
+        easy_row(&mut desk, "Agents can hand work to it").1.control,
+        ControlView::Toggle(true)
+    );
+    // Saved: what's saved is what was sent, and the form goes.
+    desk.settings_specialist_saved(&saved.clone(), Response::SpecialistSaved);
+    assert_eq!(easy(&mut desk).title, "Specialists");
+
+    // A list of choices open under a row goes when its form is cancelled.
+    click(&mut desk, "reviewer");
+    click(&mut desk, "Agent");
+    assert!(easy(&mut desk).fonts.is_some());
+    desk.settings_pointer(SettingsHit::Foot(Foot::Cancel));
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "Specialists");
+    assert_eq!(view.fonts, None, "no list left over the page");
+    type_keys(&mut desk, "a");
+    assert_eq!(
+        easy(&mut desk).title,
+        "New specialist",
+        "and the keys are the page's"
+    );
+}
+
+#[test]
+fn a_built_in_specialist_looked_at_closes_without_a_question() {
+    let builtin = SpecialistFile {
+        path: String::new(),
+        scope: SpecialistScope::Personal,
+        editable: false,
+        ..specialist("explore")
+    };
+    // One of the user's own has its name: each row opens its own.
+    let (mut desk, _dir) = specialists_page(vec![builtin, specialist("explore")]);
+    let view = easy(&mut desk);
+    let rows: Vec<(String, Option<String>)> = (view.sections.iter())
+        .flat_map(|section| &section.rows)
+        .map(|row| (row.label.clone(), row.status.clone().map(|(said, _)| said)))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("explore".to_owned(), Some("This project".to_owned())),
+            ("explore".to_owned(), Some("Built in".to_owned()))
+        ]
+    );
+    desk.settings_pointer(SettingsHit::Control(1, Part::Whole));
+    assert_eq!(easy(&mut desk).title, "Copy of explore");
+    named(&mut desk, NamedKey::Escape);
+    let view = easy(&mut desk);
+    assert_eq!(
+        view.title, "Specialists",
+        "nothing was changed, so nothing's asked"
+    );
+    assert_eq!(view.focus, Some(1), "back on the built-in's row");
+    desk.settings_pointer(SettingsHit::Control(0, Part::Whole));
+    assert_eq!(easy(&mut desk).title, "explore");
+}
+
+#[test]
+fn a_paste_loses_its_line_breaks_and_one_too_long_says_so() {
+    let (mut desk, _dir) = mcp_page(Vec::new());
+    type_keys(&mut desk, "a");
+    // A name copied as a line.
+    desk.paste_into_settings("docs\n");
+    let name = |desk: &mut Desk| match easy_row(desk, "Name").1.control {
+        ControlView::Field(field) => field.text,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(name(&mut desk), "docs");
+    // More than the box holds: none of it goes in, and the foot says so.
+    desk.paste_into_settings(&"x".repeat(80));
+    assert_eq!(name(&mut desk), "docs");
+    let view = easy(&mut desk);
+    assert!(
+        view.warning && view.footer.contains("more than this box holds"),
+        "{}",
+        view.footer
+    );
+}
+
+/// A skill the daemon lists, with why it can't be used, if it can't.
+fn skill(name: &str, path: &str, problem: Option<&str>) -> clackatoo_protocol::Skill {
+    clackatoo_protocol::Skill {
+        name: name.into(),
+        description: "Does something.".into(),
+        path: path.into(),
+        source: "Project".into(),
+        problem: problem.map(str::to_owned),
+        implicit: true,
+        user_invocable: true,
+    }
+}
+
+#[test]
+fn a_skill_is_switched_off_by_its_switch_and_what_is_not_loaded_says_why() {
+    let (mut desk, _dir) = on_page(Page::Skills);
+    let untrusted = "not loaded: this folder isn't trusted (clackatoo trust, or :trust, trusts it)";
+    desk.settings_skills(Response::Skills(vec![
+        skill("deploy", "/p/.agents/skills/deploy/SKILL.md", None),
+        skill("migrate", "/p/.agents/skills/migrate/SKILL.md", None),
+        skill(
+            "broken",
+            "/p/.agents/skills/broken/SKILL.md",
+            Some("no front matter"),
+        ),
+        skill("auditor", "/p/.agents/specialists/auditor", Some(untrusted)),
+    ]));
+    let view = easy(&mut desk);
+    let headings: Vec<&str> = view.sections.iter().map(|each| &*each.heading).collect();
+    assert_eq!(headings, ["", "Not loaded"]);
+    assert!(
+        view.sections[1]
+            .note
+            .as_deref()
+            .is_some_and(|said| said.contains(":trust"))
+    );
+    // What can be used has a switch, on, and a button for its file.
+    let (_, deploy) = easy_row(&mut desk, "/deploy");
+    assert!(
+        matches!(&deploy.control, ControlView::Switched { on: true, button }
+            if button.label == "Open its file"),
+        "{deploy:?}"
+    );
+    // What can't says why, as the daemon does; a broken skill's file can
+    // still be opened, a specialist's folder can't.
+    let (_, broken) = easy_row(&mut desk, "/broken");
+    assert!(
+        matches!(&broken.control, ControlView::Button(_)),
+        "{broken:?}"
+    );
+    assert!(
+        broken
+            .notes
+            .iter()
+            .any(|(note, _)| note.contains("no front matter"))
+    );
+    let (_, auditor) = easy_row(&mut desk, "auditor");
+    assert_eq!(auditor.control, ControlView::None);
+    assert!(
+        auditor
+            .notes
+            .iter()
+            .any(|(note, _)| note.contains("isn't trusted"))
+    );
+
+    // Enter on a skill switches it off: the daemon's option names it.
+    named(&mut desk, NamedKey::Enter);
+    let view = easy(&mut desk);
+    assert_eq!(hints(&view), ["Enter", "o", "/", "Esc"]);
+    named(&mut desk, NamedKey::Enter);
+    let asked = sent(&mut desk);
+    let off = |asked: &[Request]| match asked {
+        [Request::SetDaemonOption { name, value }] if name == "skills.disabled" => value.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(off(&asked).as_deref(), Some("deploy"));
+    let (_, deploy) = easy_row(&mut desk, "/deploy");
+    assert!(
+        matches!(&deploy.control, ControlView::Switched { on: false, .. }),
+        "{deploy:?}"
+    );
+    assert!(
+        deploy
+            .notes
+            .iter()
+            .any(|(note, _)| note.starts_with("Switched off"))
+    );
+    // A click on another's switch adds it; its button opens its file.
+    let (row, _) = easy_row(&mut desk, "/migrate");
+    desk.settings_pointer(SettingsHit::Control(row, Part::Whole));
+    assert_eq!(off(&sent(&mut desk)).as_deref(), Some("deploy, migrate"));
+    // The daemon lists a skill switched off with that as its problem: it
+    // stays among the skills, with its switch.
+    desk.settings_skills(Response::Skills(vec![
+        skill(
+            "deploy",
+            "/p/.agents/skills/deploy/SKILL.md",
+            Some("switched off"),
+        ),
+        skill(
+            "migrate",
+            "/p/.agents/skills/migrate/SKILL.md",
+            Some("switched off"),
+        ),
+    ]));
+    assert_eq!(easy(&mut desk).sections.len(), 1);
+    // `l` switches the one the keys are on, the one last clicked, on
+    // again, as it steps any switch.
+    type_keys(&mut desk, "l");
+    assert_eq!(off(&sent(&mut desk)).as_deref(), Some("deploy"));
+    // `o`, or its button, opens its file.
+    type_keys(&mut desk, "o");
+    assert!(!desk.settings_open());
+    let asked = sent(&mut desk);
+    assert!(
+        asked
+            .iter()
+            .any(|request| matches!(request, Request::Split {
+            terminal: PaneTerminal::File(OpenFile { path, .. }), ..
+        } if path.ends_with("migrate/SKILL.md"))),
+        "{asked:?}"
     );
 }

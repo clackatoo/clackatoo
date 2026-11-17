@@ -1,5 +1,6 @@
-# The Skills page: shared skills, where each is from and who starts it;
-# found by a search; and the page with none.
+# The Skills page: shared skills, where each is from and who starts it,
+# each with its switch; one switched off; those that aren't loaded, with
+# why; found by a search; and narrow.
 size 1280x800
 file .agents/skillsets/database/skillset.toml <<END
 format = 1
@@ -30,12 +31,26 @@ context: fork
 ---
 Research the reported problem.
 END
-keys <C-;>:Settings<CR>
+file .agents/skills/broken/SKILL.md <<END
+no front matter here
+END
+# The project's own load only once its folder is trusted.
+keys <C-;>
+type :trust $PROJECT
+keys <CR>
+sleep 500
+keys :Settings<CR>
 wait-for Appearance
 shot general
 keys }}}}}}}
 wait-for /migrate-db
 shot skills
+# One switched off, by its switch.
+keys <CR>
+sleep 600
+shot skill-off
+keys G
+shot skills-not-loaded
 keys /migration
 shot skills-search
 keys <Esc><Esc>
