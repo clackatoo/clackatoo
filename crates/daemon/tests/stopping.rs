@@ -72,6 +72,9 @@ struct Setup {
     agent: Option<Vec<String>>,
     /// The user's shell, if not `/bin/sh`.
     shell: Option<&'static str>,
+    /// Whether chats' agents are given clackatoo's MCP servers, served by
+    /// the fake agent's `mcp`.
+    mcp: bool,
 }
 
 /// A daemon in a process of its own, in a directory of its own, which is
@@ -219,6 +222,12 @@ fn spawn(root: &Path, setup: &Setup, nohup: bool, args: &[&str]) -> Child {
         Some(agent) => command.env("CLACKATOO_AGENT", agent),
         None => command.env_remove("CLACKATOO_AGENT"),
     };
+    if setup.mcp {
+        let serving = format!("{} mcp", example("fake_agent").display());
+        command.env("CLACKATOO_MCP", serving);
+    } else {
+        command.env_remove("CLACKATOO_MCP");
+    }
     command.spawn().unwrap()
 }
 
@@ -384,6 +393,7 @@ fn clackatoo_stop_has_the_daemon_stop_everything_it_started_and_exit_cleanly() {
             agent_child.display().to_string(),
         ]),
         shell: None,
+        mcp: false,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -447,6 +457,7 @@ fn ctrl_c_stops_the_daemon_and_a_second_signal_changes_nothing() {
         ]),
         agent: None,
         shell: None,
+        mcp: false,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -607,6 +618,7 @@ fn a_signal_that_comes_as_the_daemon_upgrades_stops_the_next_build() {
         ]),
         agent: None,
         shell: None,
+        mcp: false,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -662,6 +674,7 @@ fn a_signal_that_comes_as_the_daemon_goes_back_to_a_build_from_before_signals_st
         ]),
         agent: None,
         shell: None,
+        mcp: false,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -1446,5 +1459,188 @@ fn history_marked_off_or_forgotten_isnt_kept_but_a_block_kept_is() {
     // Still marked off, after the restart.
     eventually("the mark is still kept with the layout", || {
         std::fs::read_to_string(&kept).is_ok_and(|text| text.contains("\"history_off\": true"))
+    });
+}
+
+/// A managed MCP server's proxy, started as an agent starts it, with the
+/// agent's ends of its pipes.
+struct McpProxy {
+    child: Child,
+    input: Option<std::process::ChildStdin>,
+    output: std::sync::mpsc::Receiver<serde_json::Value>,
+}
+
+impl McpProxy {
+    /// Starts the proxy `entry` describes, as a session's `mcpServers`
+    /// gives it.
+    fn start(entry: &serde_json::Value) -> Self {
+        use std::io::BufRead as _;
+        let strings = |list: &serde_json::Value| -> Vec<String> {
+            let list = list.as_array().unwrap().iter();
+            list.map(|item| item.as_str().unwrap().to_owned()).collect()
+        };
+        let mut command = Command::new(entry["command"].as_str().unwrap());
+        command.args(strings(&entry["args"]));
+        for variable in entry["env"].as_array().unwrap() {
+            let (name, value) = (&variable["name"], &variable["value"]);
+            command.env(name.as_str().unwrap(), value.as_str().unwrap());
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let (said, output) = std::sync::mpsc::channel();
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if said.send(serde_json::from_str(&line).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            input: child.stdin.take(),
+            child,
+            output,
+        }
+    }
+
+    /// Sends the request `method`, numbered `id`, and returns its answer.
+    fn ask(&mut self, id: u32, method: &str, params: &serde_json::Value) -> serde_json::Value {
+        use std::io::Write as _;
+        let request = serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        writeln!(self.input.as_mut().unwrap(), "{request}").unwrap();
+        loop {
+            let message =
+                (self.output.recv_timeout(Duration::from_secs(20))).expect("the proxy answers");
+            if message.get("method").is_none() && message["id"] == id {
+                return message;
+            }
+        }
+    }
+}
+
+impl Drop for McpProxy {
+    fn drop(&mut self) {
+        self.input.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The chat `chat`, as it is now.
+fn chat_now(client: &mut Client, chat: TerminalId) -> clackatoo_protocol::ChatNode {
+    client.capture(chat).unwrap().chat().unwrap().clone()
+}
+
+/// A managed MCP server's proxy outlives a real upgrade of the daemon,
+/// with its server: calls are refused while the daemon is away, in words
+/// that say to try again, and go through once the next build has read
+/// the chat's servers, to the same server process. The next build shows
+/// the server connected, though it never saw it connect.
+#[test]
+fn a_managed_mcp_servers_proxy_and_server_go_on_through_an_upgrade() {
+    use clackatoo_protocol::{ChatAction, ChatState, Item, McpAction, McpState, Request, Response};
+    let setup = Setup {
+        agent: Some(Vec::new()),
+        mcp: true,
+        ..Setup::default()
+    };
+    let daemon = Process::start(&setup);
+    let started = daemon.root().join("started");
+    let server = r"import sys, json, os
+with open(sys.argv[1], 'a') as started: started.write(str(os.getpid()) + '\n')
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        result = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}},
+                  'serverInfo': {'name': 'fixture', 'version': '1'}}
+    elif method == 'tools/call':
+        result = {'content': [{'type': 'text', 'text': 'answered'}]}
+    else:
+        continue
+    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
+";
+    let servers = serde_json::json!({"servers": {"fixture": {
+        "command": "python3", "args": ["-u", "-c", server, started]}}});
+    std::fs::create_dir_all(daemon.root().join(".agents")).unwrap();
+    std::fs::write(daemon.root().join(".agents/mcp.json"), servers.to_string()).unwrap();
+
+    let mut client = daemon.client();
+    let chat = PaneTerminal::Agent(NewAgent {
+        size: Size::new(60, 10).unwrap(),
+        cwd: None,
+        agent: None,
+        tools: AgentTools::Allow,
+        task: true,
+        browser: false,
+        model: None,
+        resume: None,
+    });
+    client.new_workspace(None, chat).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    eventually("the chat is ready", || {
+        chat_now(&mut client, chat).state == ChatState::Ready
+    });
+    // The fake agent says which MCP servers its session was given.
+    client.chat(chat, ChatAction::Send("tools".into())).unwrap();
+    eventually("the agent has said its servers", || {
+        (chat_now(&mut client, chat).turns.last()).is_some_and(|turn| turn.end.is_some())
+    });
+    let node = chat_now(&mut client, chat);
+    let said: String = (node.turns.last().unwrap().items.iter())
+        .filter_map(|item| match item {
+            Item::Words(words) => Some(words.as_str()),
+            _ => None,
+        })
+        .collect();
+    let entries: serde_json::Value = serde_json::from_str(&said).unwrap();
+    let entry = (entries.as_array().unwrap().iter())
+        .find(|entry| entry["name"] == "managed_fixture")
+        .expect("the chat was given the managed server");
+    let mut proxy = McpProxy::start(entry);
+    let hello = serde_json::json!({"protocolVersion":"2025-06-18","capabilities":{},
+        "clientInfo":{"name":"test","version":"1"}});
+    assert!(proxy.ask(0, "initialize", &hello).get("result").is_some());
+    let call = serde_json::json!({"name":"echo","arguments":{}});
+    let answered =
+        |answer: &serde_json::Value| answer["result"]["content"][0]["text"] == "answered";
+    assert!(answered(&proxy.ask(1, "tools/call", &call)));
+
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+    // Until the next build has the chat's servers read, a call is
+    // refused, and only in words that say why and to try again.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut id = 2;
+    loop {
+        let answer = proxy.ask(id, "tools/call", &call);
+        if answered(&answer) {
+            break;
+        }
+        let why = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            why.contains("Try again") || why.contains("try again"),
+            "{answer}"
+        );
+        assert!(Instant::now() < deadline, "{answer}");
+        id += 1;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // One server process, all along.
+    let starts = std::fs::read_to_string(&started).unwrap();
+    assert_eq!(starts.lines().count(), 1, "{starts}");
+    let mut client = daemon.client();
+    eventually("the next build shows the server connected", || {
+        let listed = client.request(&Request::Mcp {
+            pane: None,
+            action: McpAction::List,
+        });
+        matches!(listed, Ok(Response::Mcp(reply)) if reply.servers[0].state == McpState::Connected)
     });
 }
