@@ -69,7 +69,10 @@ one of your own servers:
 - **Until you've reviewed and enabled it, chats there go on getting your
   own.** A file in a project can't switch one of your servers off by naming
   it. Settings lists the project's beside yours as needing review, saying it
-  will take yours' place once enabled.
+  will take yours' place once enabled. The two rows are told apart by where
+  they're kept. Yours opens as any server does; the project's opens as
+  `name, as this project has it`, showing its definition without fields to
+  change, with **Review and enable** as the one thing to do.
 - **Once enabled, the project's is the one chats there get.**
 
 An invalid shadowing entry stays invalid rather than enabling a lower-priority
