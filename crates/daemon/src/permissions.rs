@@ -302,6 +302,9 @@ pub(crate) struct Action {
     /// The file it reads or writes, if that is all it does: an absolute
     /// path.
     pub(crate) file: Option<(Kind, String)>,
+    /// Whether its file is a folder it searches, reading whatever lies
+    /// beneath it.
+    pub(crate) search: bool,
     /// Why no rule may allow it, if none may: it asks for consent or a
     /// change of authority, or holds something the rules can't read.
     pub(crate) consent: Option<&'static str>,
@@ -351,18 +354,15 @@ impl Action {
             None
         };
         let file_tool = name.and_then(|name| FileTool::of(agent, name));
-        let file = file_tool.as_ref().and_then(|tool| {
-            let path = field(&[tool.key]).or_else(|| tool.searches.then(|| cwd.to_owned()))?;
-            Some((tool.kind, path))
-        });
+        let file = file_tool
+            .as_ref()
+            .and_then(|tool| Some((tool.kind, tool.place(&input, cwd)?)));
         let touches_files = file_tool.is_some()
             || matches!(
                 kind,
                 Some(ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
             );
-        let reaches_elsewhere = file_tool
-            .as_ref()
-            .is_some_and(|tool| tool.reaches_elsewhere(&input));
+        let unvouched = file_tool.as_ref().and_then(|tool| tool.unvouched(&input));
         // The bundled Codex adapter puts non-HTTP network consent in
         // permission content, without structured network input. Its
         // presence requires consent; its text never grants permission.
@@ -393,8 +393,8 @@ impl Action {
             Some("Its input holds more than the command, which the rules don't read")
         } else if touches_files && file.is_none() {
             Some("The files it changes could not be read")
-        } else if reaches_elsewhere {
-            Some("Its input names more places than the one the rules read")
+        } else if unvouched.is_some() {
+            unvouched
         } else if name.is_none() && command.is_none() {
             Some("The provider did not name the tool")
         } else {
@@ -406,6 +406,7 @@ impl Action {
             arguments: input,
             command,
             file,
+            search: file_tool.is_some_and(|tool| tool.glob.is_some()),
             consent,
         }
     }
@@ -426,6 +427,7 @@ impl Action {
             command: None,
             cwd: None,
             file: None,
+            search: false,
             consent,
         }
     }
@@ -450,52 +452,107 @@ struct FileTool {
     kind: Kind,
     /// The key of its input that holds the place.
     key: &'static str,
-    /// Whether it searches a folder, and the agent's working directory
-    /// when it names none.
-    searches: bool,
+    /// For a tool that searches a folder, the key of its input that
+    /// holds the glob saying which files there.
+    glob: Option<&'static str>,
+    /// Every key its input is known to take. Another is one the rules
+    /// never read, so a rule can't vouch for it.
+    known: &'static [&'static str],
 }
 
 impl FileTool {
     /// The agent `agent`'s tool `name`, if it is one: Claude Code's, the
     /// only ones whose inputs are known.
     fn of(agent: &str, name: &str) -> Option<Self> {
-        let (kind, key, searches) = match (agent, name) {
-            ("claude", "Read") => (Kind::Read, "file_path", false),
-            ("claude", "Grep" | "Glob") => (Kind::Read, "path", true),
-            ("claude", "Write" | "Edit") => (Kind::Edit, "file_path", false),
-            ("claude", "NotebookEdit") => (Kind::Edit, "notebook_path", false),
+        let (kind, key, glob, known): (_, _, _, &[&str]) = match (agent, name) {
+            ("claude", "Read") => (
+                Kind::Read,
+                "file_path",
+                None,
+                &["file_path", "offset", "limit", "pages"],
+            ),
+            ("claude", "Grep") => (
+                Kind::Read,
+                "path",
+                Some("glob"),
+                &[
+                    "pattern",
+                    "path",
+                    "glob",
+                    "type",
+                    "output_mode",
+                    "-A",
+                    "-B",
+                    "-C",
+                    "context",
+                    "-n",
+                    "-i",
+                    "head_limit",
+                    "offset",
+                    "multiline",
+                ],
+            ),
+            ("claude", "Glob") => (Kind::Read, "path", Some("pattern"), &["pattern", "path"]),
+            ("claude", "Write") => (Kind::Edit, "file_path", None, &["file_path", "content"]),
+            ("claude", "Edit") => (
+                Kind::Edit,
+                "file_path",
+                None,
+                &["file_path", "old_string", "new_string", "replace_all"],
+            ),
+            ("claude", "NotebookEdit") => (
+                Kind::Edit,
+                "notebook_path",
+                None,
+                &[
+                    "notebook_path",
+                    "cell_id",
+                    "new_source",
+                    "cell_type",
+                    "edit_mode",
+                ],
+            ),
             _ => return None,
         };
         Some(Self {
             kind,
             key,
-            searches,
+            glob,
+            known,
         })
     }
 
-    /// Whether `input` could have the tool read or change somewhere other
-    /// than the place in its key: it holds another key that looks like a
-    /// path, which the tool might go by, or a search pattern that leaves
-    /// the folder searched.
-    fn reaches_elsewhere(&self, input: &Value) -> bool {
-        let path_like = |key: &str| {
-            let key = key.to_lowercase();
-            ["path", "file", "dir"]
-                .iter()
-                .any(|part| key.contains(part))
-        };
-        let other_place = input
+    /// The place `input` has it read or change, for an agent working in
+    /// `cwd`. A search that names no folder searches where the agent
+    /// works, as far as the daemon knows: the directory its session
+    /// started in. `None` if the place can't be read from the input.
+    fn place(&self, input: &Value, cwd: &str) -> Option<String> {
+        match input.get(self.key) {
+            Some(Value::String(path)) => Some(path.clone()),
+            None | Some(Value::Null) if self.glob.is_some() => Some(cwd.to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Why a rule can't vouch for what `input` has the tool do, if it
+    /// can't: it holds a key the rules don't know, or its glob leaves the
+    /// folder searched or picks out files that hold credentials.
+    fn unvouched(&self, input: &Value) -> Option<&'static str> {
+        let known = input
             .as_object()
-            .is_some_and(|input| input.keys().any(|key| key != self.key && path_like(key)));
-        let leaves = |pattern: &str| {
-            pattern.starts_with(['/', '~']) || pattern.split('/').any(|part| part == "..")
-        };
-        let pattern_leaves = self.searches
-            && ["pattern", "glob"]
-                .iter()
-                .filter_map(|key| input.get(*key).and_then(Value::as_str))
-                .any(leaves);
-        other_place || pattern_leaves
+            .is_some_and(|input| input.keys().all(|key| self.known.contains(&key.as_str())));
+        if !known {
+            return Some("Its input holds more than the rules read");
+        }
+        let glob = self
+            .glob
+            .and_then(|key| input.get(key))
+            .and_then(Value::as_str)?;
+        let leaves = glob.starts_with(['/', '~']) || glob.split('/').any(|part| part == "..");
+        if leaves {
+            return Some("Its pattern reaches outside the folder it searches");
+        }
+        glob_names_secrets(glob).then_some("Its pattern picks out files that hold credentials")
     }
 }
 
@@ -690,6 +747,11 @@ impl Config {
             if let Some(why) = guarded(*kind, written, real, context) {
                 return Verdict::ask(why);
             }
+            if action.search && Roots::of(context).holds_guarded(real) {
+                return Verdict::ask(
+                    "Searching a folder that holds credential stores requires your direct approval",
+                );
+            }
         }
         if action
             .command
@@ -719,8 +781,15 @@ impl Rule {
                 .as_ref()
                 .is_some_and(|command| self.matches_command(command)),
             Kind::Read | Kind::Edit => file.is_some_and(|(kind, path)| {
-                kind == self.kind
-                    && rule_root(&self.target, context).is_some_and(|root| path.starts_with(root))
+                let Some(root) = rule_root(&self.target, context).filter(|_| kind == self.kind)
+                else {
+                    return false;
+                };
+                // A search reads whatever lies beneath its folder, so a
+                // rule that asks or refuses for part of that is about it.
+                let reaches =
+                    action.search && self.decision != Decision::Allow && root.starts_with(path);
+                path.starts_with(&root) || reaches
             }),
         }
     }
@@ -775,109 +844,211 @@ fn simple_command(command: &str) -> bool {
 }
 
 // What always asks, whatever rule would allow it. Each list below is one
-// class of place, in lower case, as a run of names: `[".config", "gh"]`
-// is the folder `gh` in `.config`, and everything in it. To guard
-// something new, add it to the list whose class it is.
+// class of place, in lower case. A place is a run of names:
+// `[".config", "gh"]` is the folder `gh` in `.config`, and everything in
+// it. To guard something new, add it to the list whose class it is.
 
-/// Agents' own instructions and settings, as folders or files in a
-/// project or the home directory: what an agent is told to do, and what
-/// it may do, when it next starts there. Edits ask.
-const AGENT_PLACES: [&[&str]; 7] = [
+/// Whether the filesystems of this system take `AGENTS.md` and
+/// `agents.md` for one file.
+const FOLDS_CASE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// Agents' own instructions and settings, as folders or files anywhere
+/// along a path: what an agent is told to do, and what it may do, when it
+/// next starts there. Edits ask.
+const AGENT_PLACES: [&[&str]; 16] = [
     &[".clackatoo"],
     &[".claude"],
     &[".codex"],
     &[".agents"],
+    &[".agent"],
     &[".cursor"],
     &[".gemini"],
+    &[".windsurf"],
+    &[".roo"],
+    &[".continue"],
+    &[".opencode"],
     &[".github", "copilot-instructions.md"],
+    &[".github", "instructions"],
+    &[".github", "prompts"],
+    &[".github", "agents"],
+    &[".claude.json"],
 ];
 
-/// Agents' instruction files, by name, in whatever folder. Edits ask.
-const AGENT_FILES: [&str; 6] = [
-    "claude.md",
-    "claude.local.md",
-    "agents.md",
-    "gemini.md",
-    ".cursorrules",
+/// Agents' instruction files that are known by a name in capitals, in
+/// whatever folder, as written: on a filesystem that tells cases apart,
+/// `agents.md` is some other file. Edits ask.
+const AGENT_FILES_AS_WRITTEN: [&str; 5] = [
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENTS.md",
+    "AGENT.md",
+    "GEMINI.md",
+];
+
+/// Agents' other instruction and settings files, by name, in whatever
+/// folder. Edits ask.
+const AGENT_FILES: [&str; 7] = [
     ".mcp.json",
+    ".cursorrules",
+    ".windsurfrules",
+    ".clinerules",
+    ".rules",
+    ".aider.conf.yml",
+    "opencode.json",
 ];
 
-/// Folders and files in a project that run code when it's opened, built,
-/// committed or pushed: git's own folder with its hooks and config,
-/// editors' tasks, dev containers, hook managers, CI workflows and
+/// Folders and files anywhere along a path that run code when a project
+/// is opened, built, committed or pushed: git's own folder with its hooks
+/// and config, editors' tasks, dev containers, hook managers, CI and
 /// cargo's config. Edits ask.
-const TOOLING_PLACES: [&[&str]; 9] = [
+const TOOLING_PLACES: [&[&str]; 14] = [
     &[".git"],
+    &[".githooks"],
     &[".vscode"],
     &[".zed"],
     &[".idea"],
     &[".devcontainer"],
     &[".husky"],
+    &[".mise"],
+    &[".circleci"],
+    &[".buildkite"],
     &[".github", "workflows"],
+    &[".github", "actions"],
     &[".cargo", "config.toml"],
     &[".cargo", "config"],
 ];
 
 /// Files that do the same, by name, in whatever folder: environments
-/// loaded on entering a folder, hook managers' and package managers'
-/// configs, git's submodules. Edits ask.
-const TOOLING_FILES: [&str; 8] = [
+/// loaded on entering a folder, hook managers', version managers' and
+/// package managers' configs, CI pipelines, git's submodules. Edits ask.
+const TOOLING_FILES: [&str; 19] = [
     ".envrc",
+    ".devcontainer.json",
     ".pre-commit-config.yaml",
     "lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yml",
+    "lefthook-local.yml",
     ".gitmodules",
     "mise.toml",
     ".mise.toml",
+    "mise.local.toml",
+    ".tool-versions",
+    ".yarnrc",
     ".yarnrc.yml",
     ".npmrc",
+    ".pnpmfile.cjs",
+    "bunfig.toml",
+    ".gitlab-ci.yml",
+    "jenkinsfile",
 ];
 
-/// What runs as the user logs in, opens a shell or uses git, from their
-/// home: shell startup files, git's config, systemd user units, desktop
-/// autostart, and their own programs. Edits ask.
-const STARTUP_PLACES: [&[&str]; 15] = [
+/// Files that do the same, by the end of their name: an editor's
+/// workspace, which names tasks to run. Edits ask.
+const TOOLING_EXTENSIONS: [&str; 1] = ["code-workspace"];
+
+/// What runs as the user logs in, opens a shell, an editor or a terminal,
+/// or uses git, from their home: startup files, git's config, systemd
+/// user units, desktop entries, version managers, and their own programs.
+/// Edits ask.
+const STARTUP_PLACES: [&[&str]; 30] = [
     &[".bashrc"],
     &[".bash_profile"],
     &[".bash_login"],
     &[".bash_logout"],
+    &[".bash_aliases"],
     &[".profile"],
     &[".zshrc"],
     &[".zshenv"],
     &[".zprofile"],
     &[".zlogin"],
-    &[".config", "fish"],
+    &[".xprofile"],
+    &[".xsessionrc"],
+    &[".pam_environment"],
+    &[".vimrc"],
+    &[".tmux.conf"],
+    &[".tool-versions"],
     &[".gitconfig"],
+    &[".config", "fish"],
     &[".config", "git"],
+    &[".config", "nvim"],
+    &[".config", "direnv"],
+    &[".config", "mise"],
+    &[".config", "environment.d"],
     &[".config", "systemd", "user"],
     &[".config", "autostart"],
+    &[".local", "share", "systemd", "user"],
+    &[".local", "share", "applications"],
     &[".local", "bin"],
+    &[".cargo", "bin"],
+    &["bin"],
 ];
 
-/// The user's credential stores, from their home: keys, cloud and
-/// registry sign-ins, and the agents' own. Reads and edits ask.
-const SECRET_PLACES: [&[&str]; 11] = [
-    &[".ssh"],
-    &[".aws"],
-    &[".gnupg"],
-    &[".kube"],
+/// The user's credential stores, from their home: cloud, registry and
+/// database sign-ins, password stores, the agents' own sign-ins, shell
+/// histories, browser profiles, and all clackatoo keeps for itself (its
+/// browser's profile, its web devices, the agents' adapters). Reads and
+/// edits ask.
+const SECRET_PLACES: [&[&str]; 31] = [
     &[".docker"],
+    &[".azure"],
+    &[".password-store"],
+    &[".terraform.d"],
+    &[".mozilla"],
+    &[".vault-token"],
+    &[".pgpass"],
+    &[".my.cnf"],
+    &[".npmrc"],
+    &[".claude.json"],
+    &[".bash_history"],
+    &[".zsh_history"],
     &[".config", "gh"],
     &[".config", "gcloud"],
+    &[".config", "sops"],
+    &[".config", "op"],
+    &[".config", "rclone"],
+    &[".config", "google-chrome"],
+    &[".config", "chromium"],
+    &[".config", "git", "credentials"],
+    &[".config", "containers", "auth.json"],
+    &[".local", "share", "keyrings"],
+    &[".local", "share", "fish", "fish_history"],
+    &[".local", "share", "clackatoo"],
     &[".claude", ".credentials.json"],
     &[".codex", "auth.json"],
     &[".cargo", "credentials.toml"],
     &[".cargo", "credentials"],
+    &[".m2", "settings.xml"],
+    &[".gradle", "gradle.properties"],
+    &[".gem", "credentials"],
 ];
+
+/// Folders that hold keys wherever they are, as in a backup or another
+/// user's home, and where clackatoo keeps what managed MCP servers sign
+/// in with. Reads and edits ask.
+const SECRET_FOLDERS: [&str; 5] = [".ssh", ".aws", ".gnupg", ".kube", "mcp-private"];
 
 /// Files that hold credentials, by name, in whatever folder. Reads and
 /// edits ask. `.env` files are known by their pattern (see
 /// [`env_file`]).
-const SECRET_FILES: [&str; 5] = [".netrc", ".git-credentials", ".npmrc", ".pypirc", ".envrc"];
+const SECRET_FILES: [&str; 8] = [
+    ".netrc",
+    ".git-credentials",
+    ".pypirc",
+    ".envrc",
+    ".dev.vars",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+];
 
-/// Where clackatoo keeps what managed MCP servers sign in with, under
-/// whichever folder holds the user's own agent files. Reads and edits
-/// ask.
-const PRIVATE_FOLDER: &str = "mcp-private";
+/// Files that hold keys or secret values, by the end of their name.
+/// Reads and edits ask.
+const SECRET_EXTENSIONS: [&str; 4] = ["pem", "key", "tfvars", "tfstate"];
+
+/// The endings of `.env` files that hold no secrets: the ones checked in
+/// to show what to set.
+const ENV_EXAMPLES: [&str; 3] = [".example", ".sample", ".template"];
 
 /// The names along `path`, in lower case: guarded names are compared so
 /// on every filesystem, as one that ignores case would open `.GIT` as
@@ -903,20 +1074,49 @@ fn begins_with(names: &[String], place: &[&str]) -> bool {
     names.len() >= place.len() && names.iter().zip(place).all(|(name, part)| name == part)
 }
 
-/// Whether a file called `name` is a `.env` file: `.env`, `.env.local`,
-/// `prod.env`.
-fn env_file(name: &str) -> bool {
-    let named_env = Path::new(name)
+/// Whether a file called `name`, in lower case, ends in one of
+/// `extensions`.
+fn has_extension(name: &str, extensions: &[&str]) -> bool {
+    Path::new(name)
         .extension()
-        .is_some_and(|extension| extension == "env");
-    name == ".env" || name.starts_with(".env.") || named_env
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extensions.contains(&extension))
+}
+
+/// Whether a file called `name`, in lower case, is a `.env` file: `.env`,
+/// `.env.local`, `prod.env`. One that only shows what to set, as
+/// `.env.example`, isn't.
+fn env_file(name: &str) -> bool {
+    let example = ENV_EXAMPLES.iter().any(|ending| name.ends_with(ending));
+    let named = name == ".env" || name.starts_with(".env.") || has_extension(name, &["env"]);
+    named && !example
+}
+
+/// Whether `glob`, which says which files a search reads, picks out files
+/// that hold credentials: it spells a name or an ending of theirs. A
+/// guard rail, as a glob can match a name without spelling it.
+fn glob_names_secrets(glob: &str) -> bool {
+    let glob = glob.to_lowercase();
+    let spells_name = SECRET_FILES
+        .iter()
+        .chain(&SECRET_FOLDERS)
+        .any(|name| glob.contains(name));
+    let spells_ending = SECRET_EXTENSIONS
+        .iter()
+        .any(|ending| glob.ends_with(&format!(".{ending}")));
+    spells_name || spells_ending || glob.contains(".env")
 }
 
 /// The chat's project and the user's home, as given and as they really
 /// are, which guarded places are told from.
 struct Roots {
+    /// The user's home. None, if it can't be told: it doesn't resolve,
+    /// or is the root of the filesystem, as with no `HOME` set.
     homes: Vec<PathBuf>,
+    /// The chat's project.
     projects: Vec<PathBuf>,
+    /// Clackatoo's own config and state, as they really are.
+    own: Vec<PathBuf>,
 }
 
 impl Roots {
@@ -928,8 +1128,11 @@ impl Roots {
             roots
         };
         Self {
-            homes: both(&context.home),
+            homes: usable_home(context).map_or_else(Vec::new, |_| both(&context.home)),
             projects: both(&context.project),
+            own: (context.protected.iter())
+                .filter_map(|root| resolve(root))
+                .collect(),
         }
     }
 
@@ -941,58 +1144,98 @@ impl Roots {
             .map(names)
     }
 
-    /// The names along `path` that count for guarded folders: from the
-    /// project or the home it's in, whichever is nearer, with that
-    /// folder's own name. Without them, the whole path.
+    /// The names along `path` that count for guarded folders: all of
+    /// them, from the root of the filesystem, so that where a chat is
+    /// started never unguards what lies there.
     ///
-    /// What lies above doesn't count: a project in a worktree under
-    /// `.claude/worktrees` is an ordinary project, though a `.claude`
-    /// folder in it, or one that is itself the project, is still guarded.
-    fn local_names(&self, path: &Path) -> Vec<String> {
-        let nearest = self
-            .projects
-            .iter()
-            .chain(&self.homes)
-            .filter(|root| path.starts_with(root))
-            .max_by_key(|root| root.components().count());
-        let above = nearest.and_then(|root| root.parent());
-        let local = above.and_then(|above| path.strip_prefix(above).ok());
-        names(local.unwrap_or(path))
+    /// But for one run. Claude Code keeps the worktrees its agents work
+    /// in under `.claude/worktrees`, each a project of its own. For a
+    /// file in a project that is in such a worktree, that `.claude` is
+    /// passed over, and left blank here. Any other on the way still
+    /// counts, as one inside the worktree does.
+    fn folder_names(&self, path: &Path) -> Vec<String> {
+        let mut all = names(path);
+        for project in self.projects.iter().filter(|root| path.starts_with(root)) {
+            let own = names(project);
+            for at in 0..own.len().saturating_sub(2) {
+                if own[at] == ".claude" && own[at + 1] == "worktrees" {
+                    all[at].clear();
+                }
+            }
+        }
+        all
     }
 
     /// Whether `path` is a file that tells agents what to do, or that runs
     /// as its project is worked in or its user logs in.
     fn instructs_or_runs(&self, path: &Path) -> bool {
-        let local = self.local_names(path);
+        let folders = self.folder_names(path);
         let in_place = AGENT_PLACES
             .iter()
             .chain(&TOOLING_PLACES)
-            .any(|place| passes_through(&local, place));
-        let is_file = local.last().is_some_and(|name| {
-            AGENT_FILES.contains(&name.as_str()) || TOOLING_FILES.contains(&name.as_str())
+            .any(|place| passes_through(&folders, place));
+        let as_written = path.file_name().and_then(std::ffi::OsStr::to_str);
+        let instructions = as_written.is_some_and(|name| {
+            AGENT_FILES_AS_WRITTEN
+                .iter()
+                .any(|file| *file == name || FOLDS_CASE && file.eq_ignore_ascii_case(name))
+        });
+        let is_file = folders.last().is_some_and(|name| {
+            AGENT_FILES.contains(&name.as_str())
+                || TOOLING_FILES.contains(&name.as_str())
+                || has_extension(name, &TOOLING_EXTENSIONS)
         });
         let at_startup = self.below_home(path).is_some_and(|from_home| {
             STARTUP_PLACES
                 .iter()
                 .any(|place| begins_with(&from_home, place))
         });
-        in_place || is_file || at_startup
+        in_place || instructions || is_file || at_startup
     }
 
     /// Whether `path` is in one of the user's credential stores, or is a
     /// file that holds credentials wherever it is.
     fn holds_secrets(&self, path: &Path) -> bool {
         let all = names(path);
-        let is_file = all
-            .last()
-            .is_some_and(|name| env_file(name) || SECRET_FILES.contains(&name.as_str()));
-        let private = all.iter().any(|name| name == PRIVATE_FOLDER);
+        let is_file = all.last().is_some_and(|name| {
+            env_file(name)
+                || SECRET_FILES.contains(&name.as_str())
+                || has_extension(name, &SECRET_EXTENSIONS)
+        });
+        let in_folder = all
+            .iter()
+            .any(|name| SECRET_FOLDERS.contains(&name.as_str()));
         let in_store = self.below_home(path).is_some_and(|from_home| {
             SECRET_PLACES
                 .iter()
                 .any(|place| begins_with(&from_home, place))
         });
-        is_file || private || in_store
+        is_file || in_folder || in_store
+    }
+
+    /// Whether `path` is in clackatoo's own config or state.
+    fn is_own(&self, path: &Path) -> bool {
+        self.own.iter().any(|root| path.starts_with(root))
+    }
+
+    /// Whether a place that always asks before a read lies in or beneath
+    /// the folder `folder`, as far as can be told without looking: the
+    /// credential stores in the user's home, and clackatoo's own config
+    /// and state. Files guarded by their names alone, as a `.env`
+    /// somewhere beneath it, can't be told so.
+    fn holds_guarded(&self, folder: &Path) -> bool {
+        let holds_home = self.homes.iter().any(|home| home.starts_with(folder));
+        let holds_store = self.below_home(folder).is_some_and(|from_home| {
+            SECRET_PLACES.iter().any(|place| {
+                place.len() >= from_home.len()
+                    && from_home
+                        .iter()
+                        .zip(*place)
+                        .all(|(name, part)| name == part)
+            })
+        });
+        let holds_own = self.own.iter().any(|root| root.starts_with(folder));
+        holds_home || holds_store || holds_own
     }
 }
 
@@ -1001,16 +1244,14 @@ impl Roots {
 /// that is a link to an ordinary place still asks.
 fn guarded(kind: Kind, written: &Path, real: &Path, context: &Context) -> Option<&'static str> {
     let roots = Roots::of(context);
+    if roots.homes.is_empty() {
+        return Some("Your home directory is not known, so no file can be told from your own");
+    }
     if roots.holds_secrets(written) || roots.holds_secrets(real) {
         return Some("Credential stores and .env files require your direct approval");
     }
     // Its state holds this machine's keys, so reading it asks too.
-    let own = context
-        .protected
-        .iter()
-        .filter_map(|root| resolve(root))
-        .any(|root| real.starts_with(root));
-    if own {
+    if roots.is_own(real) {
         return Some("Clackatoo's own config and state require your direct approval");
     }
     if kind == Kind::Edit && (roots.instructs_or_runs(written) || roots.instructs_or_runs(real)) {
@@ -1021,25 +1262,32 @@ fn guarded(kind: Kind, written: &Path, real: &Path, context: &Context) -> Option
     None
 }
 
+/// The user's home as it really is, if it can be told from the rest of
+/// the filesystem: `None` for one that doesn't resolve, or that is the
+/// root, which is what the daemon takes for home when none is set.
+fn usable_home(context: &Context) -> Option<PathBuf> {
+    resolve(&context.home).filter(|home| home.parent().is_some())
+}
+
 /// The directory a file rule's `target` names, with `~` and `{project}`
 /// filled in, as it really is. These stand for something only here: a
 /// path an agent gives is taken as written.
 ///
-/// `{project}` names nothing when the project is the user's home or holds
-/// it, as for a chat started in `/home` outside any repository, or when
-/// the home can't be told: a rule about a project must not come to cover
-/// everything the user has.
+/// Neither names anything when the home can't be told. `{project}` names
+/// nothing either when the project is the user's home or holds it, as for
+/// a chat started in `/home` outside any repository: a rule about a
+/// project must not come to cover everything the user has.
 fn rule_root(target: &str, context: &Context) -> Option<PathBuf> {
     let below = |root: &Path, rest: &str| root.join(rest.trim_start_matches('/'));
     let written = if let Some(rest) = target.strip_prefix("{project}") {
-        let home = resolve(&context.home)?;
+        let home = usable_home(context)?;
         let project = resolve(&context.project)?;
         if home.starts_with(&project) {
             return None;
         }
         below(&project, rest)
     } else if let Some(rest) = target.strip_prefix('~') {
-        below(&context.home, rest)
+        below(&usable_home(context)?, rest)
     } else {
         PathBuf::from(target)
     };
@@ -1107,6 +1355,7 @@ mod tests {
             command: Some(command.into()),
             cwd: None,
             file: None,
+            search: false,
             consent: None,
         }
     }
@@ -1119,6 +1368,7 @@ mod tests {
             command: None,
             cwd: None,
             file: Some((kind, path.display().to_string())),
+            search: false,
             consent: None,
         }
     }
@@ -1471,6 +1721,18 @@ mod tests {
             (".github/workflows/ci.yml", Ask),
             (".github/copilot-instructions.md", Ask),
             (".github/ISSUE_TEMPLATE.md", Allow),
+            (".github/actions/build/action.yml", Ask),
+            (".github/instructions/rust.instructions.md", Ask),
+            (".gitlab-ci.yml", Ask),
+            (".circleci/config.yml", Ask),
+            ("Jenkinsfile", Ask),
+            (".githooks/pre-push", Ask),
+            (".devcontainer.json", Ask),
+            (".tool-versions", Ask),
+            ("app.code-workspace", Ask),
+            (".windsurf/rules/a.md", Ask),
+            (".clinerules", Ask),
+            ("AGENT.md", Ask),
             ("GEMINI.md", Ask),
             (".cursorrules", Ask),
             (".cursor/rules/style.mdc", Ask),
@@ -1483,8 +1745,11 @@ mod tests {
             (".git/hooks/pre-commit", Ask),
             // Compared in any letter case, as some filesystems open them.
             (".GIT/hooks/pre-commit", Ask),
-            ("claude.MD", Ask),
             (".Cargo/Config.toml", Ask),
+            (".MCP.json", Ask),
+            // An instruction file in capitals is told from a file of the
+            // same letters where the filesystem tells them apart.
+            ("docs/agents.md", if FOLDS_CASE { Ask } else { Allow }),
             // Names that only resemble guarded ones are ordinary files.
             ("notes/CLAUDE.md.txt", Allow),
             ("cargo/config.toml", Allow),
@@ -1535,7 +1800,19 @@ mod tests {
             ("src/project/.env.production", Ask),
             ("src/project/prod.env", Ask),
             ("src/project/.envrc", Ask),
-            ("src/project/.npmrc", Ask),
+            // Checked in to show what to set, with nothing set.
+            ("src/project/.env.example", Allow),
+            ("src/project/deploy.pem", Ask),
+            ("src/project/prod.tfvars", Ask),
+            ("src/project/id_ed25519", Ask),
+            ("backup/laptop/.ssh/config", Ask),
+            (".npmrc", Ask),
+            (".claude.json", Ask),
+            (".config/git/credentials", Ask),
+            (".bash_history", Ask),
+            (".password-store/mail.gpg", Ask),
+            (".local/share/clackatoo/web/devices", Ask),
+            (".local/share/other/notes.txt", Allow),
             ("src/project/env.rs", Allow),
             (".agents/mcp-private/docs.json", Ask),
             ("elsewhere/mcp-private/docs.json", Ask),
@@ -1577,6 +1854,12 @@ mod tests {
             (".config/systemd/user/sync.service", Ask),
             (".config/autostart/app.desktop", Ask),
             (".local/bin/tool", Ask),
+            (".cargo/bin/tool", Ask),
+            ("bin/tool", Ask),
+            (".bash_aliases", Ask),
+            (".config/nvim/init.lua", Ask),
+            (".config/environment.d/path.conf", Ask),
+            (".local/share/applications/app.desktop", Ask),
             (".local/share/notes.txt", Allow),
             (".config/systemd/notes.txt", Allow),
             // Only the user's own: a project's file of the name is its own.
@@ -1612,19 +1895,20 @@ mod tests {
     }
 
     #[test]
-    fn guarded_folders_are_told_from_the_project_and_not_from_what_lies_above_it() {
+    fn where_a_chat_starts_unguards_nothing_but_a_worktree_of_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let repo = home.join("repo");
-        // A worktree an agent works in, as Claude Code makes them.
-        let worktree = repo.join(".claude/worktrees/fix");
-        std::fs::create_dir_all(worktree.join("src")).unwrap();
         let rules = policy(
             r#"[
             {"decision":"allow","kind":"edit","target":"{project}"},
             {"decision":"allow","kind":"edit","target":"~"}
         ]"#,
         );
+        // A worktree an agent works in, as Claude Code makes them, is a
+        // project like any other.
+        let worktree = repo.join(".claude/worktrees/fix");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
         let mut context = context(&worktree);
         context.home = home.clone();
         for (path, wanted) in [
@@ -1634,7 +1918,8 @@ mod tests {
             (worktree.join(".claude/settings.json"), Ask),
             (worktree.join(".git"), Ask),
             (worktree.join("CLAUDE.md"), Ask),
-            // The folder above it is still the repository's own.
+            // The folder above it is still the repository's own, and so
+            // are the other worktrees.
             (repo.join(".claude/settings.json"), Ask),
             (repo.join(".claude/worktrees/other/src/main.rs"), Ask),
             (repo.join("src/main.rs"), Allow),
@@ -1647,27 +1932,67 @@ mod tests {
                 path.display()
             );
         }
-        // A chat started in a guarded folder itself doesn't unguard it.
-        context.project = repo.join(".claude");
-        let request = file_action("Write", Kind::Edit, &repo.join(".claude/settings.json"));
-        assert_eq!(rules.decide(&request, &context).decision, Ask);
+        // A chat started inside a guarded folder, as an agent can start
+        // one, is still asked about what lies there: its project is that
+        // folder when no repository holds it.
+        for (project, file) in [
+            (home.join(".claude/skills"), "review/SKILL.md"),
+            (home.join(".claude"), "settings.json"),
+            (home.join(".claude/worktrees"), "notes.txt"),
+            (home.join(".codex/prompts"), "fix.md"),
+            (home.join(".agents/skills/review"), "SKILL.md"),
+            (home.join(".claude/plugins/marketplaces/some"), "README.md"),
+            (home.join("notes/.github/workflows"), "ci.yml"),
+            (home.join("notes/.git/hooks"), "pre-commit"),
+        ] {
+            std::fs::create_dir_all(&project).unwrap();
+            context.project.clone_from(&project);
+            let request = file_action("Write", Kind::Edit, &project.join(file));
+            assert_eq!(
+                rules.decide(&request, &context).decision,
+                Ask,
+                "{}",
+                project.display()
+            );
+        }
     }
 
     #[test]
-    fn searches_read_the_folder_they_search() {
+    fn files_ask_when_the_home_directory_cant_be_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"claude/Read"},
+            {"decision":"allow","kind":"read","target":"~"},
+            {"decision":"allow","kind":"read","target":"{project}"}
+        ]"#,
+        );
+        let request = file_action("Read", Kind::Read, &project.join("src/main.rs"));
+        let mut context = context(&project);
+        context.home = dir.path().join("home");
+        assert_eq!(rules.decide(&request, &context).decision, Allow);
+        // With no home set, the daemon takes the root for it; one that
+        // isn't absolute names nowhere. Either way the credential stores
+        // can't be told from other files, so every file asks.
+        for home in ["/", "home"] {
+            context.home = home.into();
+            assert_eq!(rules.decide(&request, &context).decision, Ask, "{home}");
+        }
+    }
+
+    #[test]
+    fn a_search_is_judged_on_what_lies_beneath_the_folder_it_searches() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let project = home.join("project");
+        let state = home.join(".local/state/clackatoo");
         std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
         let mut context = context(&project);
         context.home = home.clone();
-        let rules = policy(
-            r#"[
-            {"decision":"allow","kind":"tool","target":"claude/Grep"},
-            {"decision":"allow","kind":"tool","target":"claude/Glob"},
-            {"decision":"deny","kind":"read","target":"{project}/vendor"}
-        ]"#,
-        );
+        context.protected.push(state);
         let cwd = project.display().to_string();
         let search = |name: &str, input: Value| {
             let wire = json!({"toolCallId":"1","name":name,"kind":"search","rawInput":input});
@@ -1675,6 +2000,13 @@ mod tests {
             Action::provider("claude", &cwd, &tool)
         };
         let at = |path: &str| home.join(path).display().to_string();
+        let allowed = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"claude/Grep"},
+            {"decision":"allow","kind":"tool","target":"claude/Glob"},
+            {"decision":"allow","kind":"read","target":"~"}
+        ]"#,
+        );
         for (request, wanted) in [
             (
                 search("Grep", json!({"pattern":"fn","path":at("project/src")})),
@@ -1685,7 +2017,13 @@ mod tests {
                 Allow,
             ),
             (search("Glob", json!({"pattern":"**/*.rs"})), Allow),
-            // The same read through the Read tool would ask.
+            (
+                search("Glob", json!({"pattern":"**/*.rs","path":null})),
+                Allow,
+            ),
+            // What Grep looks for is no path, whatever it looks like.
+            (search("Grep", json!({"pattern":"/api/v1/../users"})), Allow),
+            // A guarded place searched asks, as reading a file there would.
             (
                 search("Grep", json!({"pattern":".","path":at(".aws")})),
                 Ask,
@@ -1698,24 +2036,84 @@ mod tests {
                 search("Glob", json!({"pattern":"*","path":at(".ssh")})),
                 Ask,
             ),
-            // A pattern can leave the folder searched.
+            // So does a folder with one beneath it: the home and what
+            // holds it, a folder a credential store is in, and what holds
+            // clackatoo's own state.
+            (
+                search("Grep", json!({"pattern":"PRIVATE KEY","path":at("")})),
+                Ask,
+            ),
+            (
+                search("Grep", json!({"pattern":".","path":dir.path()})),
+                Ask,
+            ),
+            (
+                search("Grep", json!({"pattern":"token","path":at(".config")})),
+                Ask,
+            ),
+            (
+                search("Glob", json!({"pattern":"**","path":at(".local/state")})),
+                Ask,
+            ),
+            (
+                search("Grep", json!({"pattern":".","path":at(".local/lib")})),
+                Allow,
+            ),
+            // A glob that picks out files that hold credentials asks.
+            (search("Grep", json!({"pattern":"KEY","glob":".env*"})), Ask),
+            (
+                search("Grep", json!({"pattern":"KEY","glob":"**/*.pem"})),
+                Ask,
+            ),
+            (search("Glob", json!({"pattern":"**/id_rsa"})), Ask),
+            (search("Glob", json!({"pattern":"**/.npmrc"})), Allow),
+            // A glob can leave the folder searched.
             (search("Glob", json!({"pattern":at(".ssh/*")})), Ask),
             (search("Glob", json!({"pattern":"../../.ssh/*"})), Ask),
             (search("Grep", json!({"pattern":".","glob":"../*"})), Ask),
+            // A place the rules can't read asks.
             (search("Grep", json!({"pattern":".","path":"src"})), Ask),
-            // A Read rule is about what a search reads, too.
             (
-                search("Grep", json!({"pattern":".","path":at("project/vendor/x")})),
-                Deny,
+                search("Grep", json!({"pattern":".","path":[at(".ssh")]})),
+                Ask,
             ),
+            (search("Grep", json!({"pattern":".","follow":true})), Ask),
         ] {
             assert_eq!(
-                rules.decide(&request, &context).decision,
+                allowed.decide(&request, &context).decision,
                 wanted,
                 "{:?}",
                 request.arguments
             );
         }
+        // A rule that asks or refuses for part of what a search reads is
+        // about the search; one that allows part of it allows no more.
+        let restricted = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"claude/Grep"},
+            {"decision":"deny","kind":"read","target":"{project}/vendor"},
+            {"decision":"ask","kind":"read","target":"{project}/private"},
+            {"decision":"allow","kind":"read","target":"{project}/src"}
+        ]"#,
+        );
+        for (path, wanted) in [
+            ("project/vendor/lib", Deny),
+            ("project/vendor", Deny),
+            ("project", Deny),
+            ("project/private", Ask),
+            ("project/src", Allow),
+            ("project/docs", Allow),
+        ] {
+            let request = search("Grep", json!({"pattern":".","path":at(path)}));
+            assert_eq!(
+                restricted.decide(&request, &context).decision,
+                wanted,
+                "{path}"
+            );
+        }
+        let only_src = policy(r#"[{"decision":"allow","kind":"read","target":"{project}/src"}]"#);
+        let whole = search("Grep", json!({"pattern":".","path":at("project")}));
+        assert_eq!(only_src.decide(&whole, &context).decision, Ask);
     }
 
     #[test]

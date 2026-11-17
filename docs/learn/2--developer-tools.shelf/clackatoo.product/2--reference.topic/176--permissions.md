@@ -208,45 +208,98 @@ file tools:
 | Tool | Matched as | Path |
 | --- | --- | --- |
 | Read | Read | The file |
-| Grep, Glob | Read | The folder searched, or the chat's working directory when none is given |
+| Grep, Glob | Read | The folder searched |
 | Write, Edit, NotebookEdit | Edit | The file |
 
-A request from one of these tools that names a second path, or a search
-pattern that leaves its folder, asks you. An opaque or multi-file provider
-approval asks you too. Codex approvals carrying additional consent content
-also ask directly, including network-access consent. Clackatoo's own
-file-opening tools ask only for a file outside the project, and that
-question is always yours to answer; a Deny on a Read rule still refuses it.
+A request from one of these tools that carries an input the rules do not
+know asks you. An opaque or multi-file provider approval asks you too.
+Codex approvals carrying additional consent content also ask directly,
+including network-access consent. Clackatoo's own file-opening tools ask
+only for a file outside the project, and that question is always yours to
+answer; a Deny on a Read rule still refuses it.
+
+### Searches
+
+Grep and Glob read whatever lies beneath the folder they search, so they are
+judged on more than the folder's own path:
+
+- A Deny or Ask rule on a Read applies when its directory is the folder
+  searched, contains it, or lies beneath it. A Deny on `{project}/vendor`
+  refuses a search of `{project}`.
+- An Allow rule applies only when its directory contains the folder
+  searched.
+- A search asks you when one of the home-directory credential stores, or
+  Clackatoo's own config and state, lies in or beneath the folder. A search
+  of your home directory, or of `~/.config`, therefore always asks.
+- A search asks you when its file pattern leaves the folder, or spells the
+  name of a credential file, such as `.env*` or `*.pem`.
+
+Two limits apply:
+
+- Files that are protected by name only, such as a `.env` somewhere beneath
+  the folder, are not found in advance. A search of a project that holds
+  one is allowed, and can print its lines. Add a Deny or Ask rule for the
+  folders that hold such files.
+- A search that names no folder is taken to search the directory the chat's
+  session started in. If the agent has since changed directory in a
+  command, the search runs somewhere else. Clackatoo cannot see that.
 
 ### Files that always ask
 
 Some files ask you even if an Allow matches, whether the Allow is a file
-rule or a rule for the whole tool. A Deny still refuses them. Their names
-are compared in any letter case, and a protected name that is a symbolic
-link is still protected.
+rule or a rule for the whole tool. A Deny still refuses them. Names are
+compared in any letter case, and a protected name that is a symbolic link
+is still protected. The exception is the instruction files written in
+capitals, such as `AGENTS.md`: on a filesystem that distinguishes case, a
+file named `agents.md` is an ordinary file.
 
-| Request | Always asks for |
+**Credentials, for Read and Edit:**
+
+| Where | What |
 | --- | --- |
-| Read or Edit | `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gh` and `~/.config/gcloud` |
-| Read or Edit | `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.cargo/credentials.toml` |
-| Read or Edit | `.env`, `.env.*` and `*.env` files, `.envrc`, `.netrc`, `.git-credentials`, `.npmrc` and `.pypirc`, in any folder |
-| Read or Edit | Clackatoo's config and state, and its `mcp-private` folder |
-| Edit | Agent instructions and settings: `.clackatoo`, `.claude`, `.codex`, `.agents`, `.cursor` and `.gemini` folders, including skills and specialists; `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.mcp.json` and `.github/copilot-instructions.md` |
-| Edit | Project files that run code: `.git` (hooks and config), `.vscode`, `.zed`, `.idea`, `.devcontainer`, `.husky`, `.github/workflows`, `.cargo/config.toml`, `.pre-commit-config.yaml`, `lefthook.yml`, `.gitmodules`, `mise.toml`, `.yarnrc.yml` |
-| Edit | What runs when you log in or open a shell: `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/systemd/user`, `~/.config/autostart` and `~/.local/bin` |
+| In your home directory | `.docker`, `.azure`, `.password-store`, `.terraform.d`, `.mozilla`, `.vault-token`, `.pgpass`, `.my.cnf`, `.npmrc`, `.claude.json`, `.bash_history`, `.zsh_history` |
+| In `~/.config` | `gh`, `gcloud`, `sops`, `op`, `rclone`, `google-chrome`, `chromium`, `git/credentials`, `containers/auth.json` |
+| In `~/.local/share` | `keyrings`, `fish/fish_history`, and `clackatoo` (the browser profile, web devices and agent adapters) |
+| Agent and tool sign-ins | `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.cargo/credentials.toml`, `~/.cargo/credentials`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.gem/credentials` |
+| Folders, wherever they are | `.ssh`, `.aws`, `.gnupg`, `.kube`, and Clackatoo's `mcp-private` |
+| Files, wherever they are | `.env`, `.env.*` and `*.env` (but not `.env.example`, `.env.sample` or `.env.template`), `.envrc`, `.netrc`, `.git-credentials`, `.pypirc`, `.dev.vars`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `*.pem`, `*.key`, `*.tfvars`, `*.tfstate` |
+| Clackatoo | Its config and state directories |
 
-Folder names such as `.claude` and `.git` count inside the chat's project
-and inside your home directory, not in the path above the project. A chat
-whose project is a worktree under `.claude/worktrees` can therefore use an
-Edit rule on `{project}`.
+**Agent instructions and settings, for Edit:**
 
-This table applies to the file tools listed above. It does not apply to
-other tools that reach files, such as an MCP filesystem server or a command:
-a rule that allows `managed_fs/write_file` or `claude/Bash` allows writes to
+| Where | What |
+| --- | --- |
+| Folders, wherever they are | `.clackatoo`, `.claude`, `.codex`, `.agents`, `.agent`, `.cursor`, `.gemini`, `.windsurf`, `.roo`, `.continue`, `.opencode`, including skills and specialists; `.github/instructions`, `.github/prompts`, `.github/agents` |
+| Files, wherever they are | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT.md`, `GEMINI.md`, `.mcp.json`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.rules`, `.aider.conf.yml`, `opencode.json`, `.claude.json`, `.github/copilot-instructions.md` |
+
+**Files that run code, for Edit:**
+
+| Where | What |
+| --- | --- |
+| Folders, wherever they are | `.git` (hooks and config), `.githooks`, `.vscode`, `.zed`, `.idea`, `.devcontainer`, `.husky`, `.mise`, `.circleci`, `.buildkite`, `.github/workflows`, `.github/actions` |
+| Files, wherever they are | `.envrc`, `.devcontainer.json`, `.pre-commit-config.yaml`, `lefthook.yml`, `lefthook.yaml`, `.lefthook.yml`, `lefthook-local.yml`, `.gitmodules`, `mise.toml`, `.mise.toml`, `mise.local.toml`, `.tool-versions`, `.yarnrc`, `.yarnrc.yml`, `.npmrc`, `.pnpmfile.cjs`, `bunfig.toml`, `.gitlab-ci.yml`, `Jenkinsfile`, `*.code-workspace`, `.cargo/config.toml`, `.cargo/config` |
+| In your home directory | `.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`, `.xprofile`, `.xsessionrc`, `.pam_environment`, `.vimrc`, `.tmux.conf`, `.tool-versions`, `.gitconfig`, `bin`, `.local/bin`, `.cargo/bin` |
+| In `~/.config` | `fish`, `git`, `nvim`, `direnv`, `mise`, `environment.d`, `systemd/user`, `autostart` |
+| In `~/.local/share` | `systemd/user`, `applications` |
+
+Folder names count anywhere along a file's path, so a chat started inside
+`~/.claude/skills` is still asked before it edits a skill. There is one
+exception. Claude Code keeps agents' worktrees in `.claude/worktrees`, and a
+chat whose project is one of those worktrees is not asked about that
+`.claude` folder. It can use an Edit rule on `{project}` like any other
+project. A `.claude` folder inside the worktree still asks.
+
+When Clackatoo cannot tell where your home directory is, every file asks,
+and rules written with `~` or `{project}` match nothing. That happens when
+the daemon runs without `HOME` set.
+
+These lists apply to the file tools named above. They do not apply to other
+tools that reach files, such as an MCP filesystem server or a command: a
+rule that allows `managed_fs/write_file` or `claude/Bash` allows writes to
 these files. Allow such tools only when you accept that.
 
-The list is a guard against accidents. It does not cover every file that
-can run code, such as a build script.
+The lists are a guard against accidents. They do not cover every file that
+can run code, such as a build script, or every place a secret can be kept.
 
 ## Recent decisions
 
@@ -266,20 +319,27 @@ again against the new rules. A question you have already been asked is
 checked again too. It stays open unless the new rules now allow or deny
 what it asks about; then they answer it.
 
-A question stays open for you to answer when its check against the new rules
-could not finish: the check timed out, or more than 64 questions were open
-at once. A new Deny does not close such a question, so read it before you
-allow it.
+A question stays open for you to answer when it could not be checked
+against the new rules:
+
+- the check timed out;
+- more than 64 questions were open at once;
+- the question was asked before a daemon upgrade.
+
+A new Deny does not close such a question, so read it before you allow it.
 
 A check is **Cancelled** when nothing was decided:
 
 - You stopped the turn. Nothing runs, and the agent is told you stopped it
   and not to try again. This holds across a daemon upgrade. It affects that
   turn only: a turn the agent starts later, such as when a background task
-  ends, is checked as usual.
+  ends, is checked as usual, before and after an upgrade.
 - The turn ended, or the chat moved to another session, before the check
   finished. Nothing runs, and the agent is told nobody refused, so it may
   ask again.
+
+A request whose agent exits while it is checked is dropped. No question is
+asked for it.
 
 Pending checks become human questions before an upgrade; they are never
 replayed.

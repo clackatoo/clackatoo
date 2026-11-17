@@ -219,6 +219,9 @@ struct Pending {
     session: Option<String>,
     agent: String,
     turn: Option<TurnUid>,
+    /// Whether that turn was being answered when it asked. One that has
+    /// ended since is not gone on with.
+    turn_open: bool,
     /// What is checked, kept to evaluate again.
     action: Action,
     context: Context,
@@ -260,6 +263,12 @@ impl Daemon {
         mut asked: ProviderRequest,
         checked: Option<Verdict>,
     ) {
+        // The agent that asked went while the rules were checked. No one
+        // waits for an answer, and a question now would outlive it: its
+        // answer would go to whichever agent has its name by then.
+        if checked.is_some() && !self.agents.running.contains_key(&asked.agent) {
+            return;
+        }
         let serving = self
             .chat_in(&asked.name, &asked.session)
             .map(|(id, _)| id)
@@ -400,6 +409,7 @@ impl Daemon {
             session: own.session().map(str::to_owned),
             agent: own.agent().to_owned(),
             turn: own.last_uid(),
+            turn_open: own.answering(),
             action,
             context: Context {
                 project: own.project().to_owned(),
@@ -570,7 +580,8 @@ impl Daemon {
         }
         // A turn the agent takes later by itself is another turn: only
         // the turn that was stopped stays stopped.
-        if chat.last_uid() != pending.turn {
+        let ended = pending.turn_open && !chat.answering();
+        if ended || chat.last_uid() != pending.turn {
             return Some(Cancelled::TurnEnded);
         }
         if chat.permission_stopped() {
@@ -918,6 +929,7 @@ mod tests {
             command: Some(command.into()),
             cwd: None,
             file: None,
+            search: false,
             consent: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1169,5 +1181,46 @@ mod tests {
         // nothing is noted as allowed that the user decided.
         assert!(daemon.permissions.asked.is_empty());
         assert_eq!(daemon.permissions.history.len(), noted);
+    }
+
+    #[test]
+    fn a_question_is_never_asked_for_an_agent_that_went_or_a_turn_that_ended() {
+        let asks = |daemon: &mut Daemon, chat| daemon.chat(chat).unwrap().asks_agent(&json!(7));
+        // The agent exits while its request is checked.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        rules(&mut daemon, chat);
+        let agent = running_agent(&mut daemon);
+        daemon.provider_permission(bash_request(agent, 7, "ls -la"), None);
+        daemon.agents.running.remove(&agent);
+        settle(&mut daemon);
+        assert!(!asks(&mut daemon, chat), "no one would get its answer");
+        assert!(daemon.permissions.asked.is_empty());
+
+        // The turn it asked in ends while its request is checked.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        rules(&mut daemon, chat);
+        let agent = running_agent(&mut daemon);
+        assert!(daemon.chat(chat).unwrap().wake(None));
+        daemon.provider_permission(bash_request(agent, 7, "ls -la"), None);
+        daemon
+            .chat(chat)
+            .unwrap()
+            .answered(Ok(agent_client_protocol_schema::v1::StopReason::EndTurn));
+        settle(&mut daemon);
+        assert!(!asks(&mut daemon, chat), "its turn is over");
+        let record = daemon.permissions.history.front().unwrap();
+        assert_eq!(record.decision, "Cancelled");
+
+        // While both go on, it is asked.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        rules(&mut daemon, chat);
+        let agent = running_agent(&mut daemon);
+        assert!(daemon.chat(chat).unwrap().wake(None));
+        daemon.provider_permission(bash_request(agent, 7, "ls -la"), None);
+        settle(&mut daemon);
+        assert!(asks(&mut daemon, chat));
     }
 }

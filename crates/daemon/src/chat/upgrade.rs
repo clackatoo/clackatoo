@@ -102,8 +102,6 @@ impl HostedChat {
             .push(Item::Other("Continuing after a daemon upgrade.".into()));
         self.patch_turn(index);
         self.stop_requested = false;
-        // The turn goes on, so it's no longer one that was stopped.
-        self.stopped_turn = None;
         self.queued = Some(prompt);
         self.link = Link::Opening;
         self.pause_queue(continuation.queue_paused);

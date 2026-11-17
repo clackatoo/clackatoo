@@ -476,4 +476,30 @@ mod tests {
         assert!(handed_over(true).permission_stopped());
         assert!(!handed_over(false).permission_stopped());
     }
+
+    #[test]
+    fn a_turn_the_agent_took_after_a_stop_is_not_stopped_after_a_daemon_upgrade() {
+        let spec = crate::AgentConfig::default().find("claude").unwrap();
+        let mut chat = chat();
+        open(&mut chat, "default");
+        chat.act(ChatAction::Send("Do work".into()));
+        chat.act(ChatAction::Stop);
+        chat.answered(Ok(agent_client_protocol_schema::v1::StopReason::Cancelled));
+        // Something it ran in the background ends, and it takes a turn.
+        assert!(chat.wake(None));
+        assert!(!chat.permission_stopped());
+        // Handed over and resumed as the server does it: which turns the
+        // agent took by itself comes with the chat's standing, first.
+        let mut talk = crate::handover::Talk::default();
+        chat.hand_over_standing(&mut talk);
+        let (handed, live) = chat.hand_over_live();
+        let mut resumed = HostedChat::resume(handed, &spec);
+        resumed.resume_standing(&mut talk, true);
+        resumed.resume_live(live);
+        assert!(
+            resumed.held_by_stop(),
+            "it still holds what waits for the user"
+        );
+        assert!(!resumed.permission_stopped());
+    }
 }
