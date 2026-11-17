@@ -25,10 +25,10 @@ Try `viw` to select a word, then `aw` to extend it. Brackets, quotes, sentences,
 ## Opening a chat
 
 Open `:Settings`, then **Permissions** under **Agents**, to choose who reviews
-new chats' approval requests. **Provider permissions** uses the provider's
-mode. **Clackatoo rules** applies your Allow, Ask and Deny rules, asking when
+new chats' approval requests. **The agent's own settings** uses the agent's
+mode. **clackatoo's rules** applies your Allow, Ask and Deny rules, asking when
 nothing matches. Existing chats keep their selection; change one through
-**Permission engine** in its permissions menu while it is idle.
+**Who answers agents' requests** in its permissions menu while it is idle.
 
 On that settings page, add a Command rule for `git status`, choose Allow, and
 save with the button or Ctrl+S if you want that exact request approved. Tool

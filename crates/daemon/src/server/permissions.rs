@@ -519,7 +519,9 @@ impl Daemon {
         } else if self.uses_permission_rules(pending.chat) {
             Checked::Decided(verdict)
         } else {
-            Checked::Decided(Verdict::ask("This chat no longer uses Clackatoo rules"))
+            Checked::Decided(Verdict::ask(
+                "clackatoo's rules no longer answer this chat's requests",
+            ))
         };
         self.note_permission(&pending, &checked);
         (pending.resume)(self, checked);
