@@ -36,6 +36,9 @@ pub(super) struct History {
     /// the store doesn't know isn't asked about again.
     looked: BTreeMap<TerminalId, BTreeSet<(u32, usize)>>,
     asked: Asked<Lookup, Result<Option<store::Message>, store::Problem>>,
+    /// How many lookups were put off to be asked again.
+    #[cfg(test)]
+    pub(super) retried: u32,
 }
 
 #[cfg(test)]
@@ -97,13 +100,14 @@ impl Daemon {
         for (lookup, outcome) in settled {
             let found = match outcome {
                 Outcome::Answered(Ok(found)) => found,
-                Outcome::Answered(Err(problem)) => {
-                    unread.get_or_insert(problem);
+                // Asked again when the chat is next looked through: the
+                // store was only held by someone else, or the workers slow.
+                Outcome::Answered(Err(store::Problem::Busy)) | Outcome::TimedOut => {
+                    self.forget_looked(&lookup);
                     None
                 }
-                Outcome::TimedOut => {
-                    // Asked again when the chat is next looked through.
-                    self.forget_looked(&lookup);
+                Outcome::Answered(Err(problem)) => {
+                    unread.get_or_insert(problem);
                     None
                 }
                 Outcome::Lost => None,
@@ -124,6 +128,10 @@ impl Daemon {
     /// `lookup` got no answer in time: its prompt counts as not looked up,
     /// and its chat is looked through again.
     fn forget_looked(&mut self, lookup: &Lookup) {
+        #[cfg(test)]
+        {
+            self.contexts.history.retried += 1;
+        }
         if let Some(looked) = self.contexts.history.looked.get_mut(&lookup.chat) {
             looked.remove(&(lookup.uid, lookup.original.len()));
         }
@@ -203,7 +211,7 @@ impl Daemon {
                 &mut self.work.scheduler,
                 Question {
                     name: "context-history",
-                    scope: None,
+                    scope: Some(store::SCOPE.into()),
                     wait: WAIT,
                     priority: Priority::Background,
                 },

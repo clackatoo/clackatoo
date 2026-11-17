@@ -20,6 +20,15 @@ pub(super) struct Capture {
     pub keep: Keep,
 }
 
+impl Capture {
+    /// Whether the job opens the snapshot store: to keep what it captures,
+    /// or to read a snapshot kept before.
+    pub(super) fn opens_store(&self) -> bool {
+        let reads = (self.prepared.iter()).any(|item| matches!(item, Prepared::Stored(..)));
+        reads || !matches!(self.keep, Keep::Nothing)
+    }
+}
+
 /// What becomes of the snapshots captured.
 pub(super) enum Keep {
     /// They're only shown: a preview.

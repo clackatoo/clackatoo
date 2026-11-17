@@ -24,9 +24,28 @@ pub(super) const CAP: u64 = 256 * 1024 * 1024;
 const MOST_RECORD: usize = 512 * 1024;
 
 /// The store's layout: 1 added when each snapshot was last used, and which
-/// snapshots each message has; 2, the indexes a message's rows are found
-/// by.
-const VERSION: i64 = 2;
+/// snapshots each message has.
+const VERSION: i64 = 1;
+
+/// The newest layout this build reads. 2 has layout 1's tables with the
+/// indexes below, which are now made without moving the version, so that
+/// an older build still reads the store after a rollback; a build between
+/// wrote 2 for them.
+const NEWEST_READ: i64 = 2;
+
+/// How long another connection is waited for. The store is used from
+/// workers, each question with a deadline of its own, and the file may be
+/// held a moment by this daemon's other worker or by a daemon taking
+/// over from it.
+const BUSY_WAIT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(50)
+} else {
+    std::time::Duration::from_secs(5)
+};
+
+/// The scheduler scope of every job that opens the store: they run one at
+/// a time, so this daemon's two workers never wait on each other's lock.
+pub(super) const SCOPE: &str = "clackatoo: context store";
 
 /// How many snapshots are let go of in one transaction, so a big clear-out
 /// never holds the store's write lock for long.
@@ -39,7 +58,10 @@ pub(super) enum Problem {
     Io(std::io::Error),
     /// Something other than a plain file is where the database should be.
     NotAFile,
-    /// The database refused: it's full, busy, read-only or damaged.
+    /// Another connection held the store for longer than it's waited for.
+    /// Trying again later may well work.
+    Busy,
+    /// The database refused: it's full, read-only or damaged.
     Database(rusqlite::Error),
     /// A newer clackatoo laid it out, in a way this one can't read.
     Newer,
@@ -54,6 +76,7 @@ impl std::fmt::Display for Problem {
         match self {
             Self::Io(err) => write!(f, "The context store can't be opened: {err}."),
             Self::NotAFile => f.write_str("The context store isn't a regular file."),
+            Self::Busy => f.write_str("The context store is busy."),
             Self::Database(err) => write!(f, "The context store can't be used: {err}."),
             Self::Newer => f.write_str("The context store was made by a newer clackatoo."),
             Self::Gone => f.write_str("That captured context is no longer kept."),
@@ -64,7 +87,11 @@ impl std::fmt::Display for Problem {
 
 impl From<rusqlite::Error> for Problem {
     fn from(err: rusqlite::Error) -> Self {
-        Self::Database(err)
+        use rusqlite::ErrorCode::{DatabaseBusy, DatabaseLocked};
+        match err.sqlite_error_code() {
+            Some(DatabaseBusy | DatabaseLocked) => Self::Busy,
+            _ => Self::Database(err),
+        }
     }
 }
 
@@ -102,7 +129,7 @@ fn open(path: &Path) -> Result<Connection, Problem> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    connection.busy_timeout(std::time::Duration::from_millis(200))?;
+    connection.busy_timeout(BUSY_WAIT)?;
     connection.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;
         PRAGMA mmap_size=0; PRAGMA max_page_count=131072;",
@@ -113,14 +140,15 @@ fn open(path: &Path) -> Result<Connection, Problem> {
 
 /// Makes the store's tables, or adds to an older store's what it lacks: the
 /// time each snapshot was last used, and each message's snapshots, read
-/// from the records it has.
+/// from the records it has. A store already laid out gets only the
+/// indexes it's missing.
 fn lay_out(connection: &mut Connection) -> Result<(), Problem> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == VERSION {
-        return Ok(());
-    }
-    if version > VERSION {
+    if version > NEWEST_READ {
         return Err(Problem::Newer);
+    }
+    if version >= VERSION {
+        return index(connection);
     }
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -140,11 +168,9 @@ fn lay_out(connection: &mut Connection) -> Result<(), Problem> {
         transaction
             .execute_batch("ALTER TABLE snapshots ADD COLUMN used INTEGER NOT NULL DEFAULT 0;")?;
     }
-    transaction.execute_batch(
-        "CREATE INDEX IF NOT EXISTS snapshots_used ON snapshots(used);
-        CREATE INDEX IF NOT EXISTS refs_message ON refs(root,key);
-        CREATE INDEX IF NOT EXISTS anchors_message ON anchors(root,key);",
-    )?;
+    transaction.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS snapshots_used ON snapshots(used); {MESSAGE_INDEXES}"
+    ))?;
     {
         let mut records = transaction.prepare("SELECT root,key,metadata FROM messages")?;
         let mut add = transaction
@@ -164,6 +190,26 @@ fn lay_out(connection: &mut Connection) -> Result<(), Problem> {
     }
     transaction.pragma_update(None, "user_version", VERSION)?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// The indexes a message's rows are found by when a snapshot is let go.
+const MESSAGE_INDEXES: &str = "CREATE INDEX IF NOT EXISTS refs_message ON refs(root,key);
+    CREATE INDEX IF NOT EXISTS anchors_message ON anchors(root,key);";
+
+/// Gives a store laid out before they were thought of the indexes a
+/// message's rows are found by. Nothing is written if it has them, which
+/// is every time but the first.
+fn index(connection: &Connection) -> Result<(), Problem> {
+    let present: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master
+        WHERE type='index' AND name IN ('refs_message','anchors_message')",
+        [],
+        |row| row.get(0),
+    )?;
+    if present < 2 {
+        connection.execute_batch(MESSAGE_INDEXES)?;
+    }
     Ok(())
 }
 
@@ -566,7 +612,8 @@ mod tests {
         let root = dir.path().join("project");
         let none = BTreeSet::new();
         let body = "x".repeat(48 * 1024);
-        let snapshots: Vec<_> = (0..24)
+        // More than one batch's worth go.
+        let snapshots: Vec<_> = (0..80)
             .map(|number| snapshot(&format!("{number}.txt"), &format!("{number}{body}")))
             .collect();
         for (number, snapshot) in snapshots.iter().enumerate() {
@@ -584,7 +631,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(count(&connection, "snapshots"), 24);
+        assert_eq!(count(&connection, "snapshots"), 80);
         // A conversation in memory still shows the second.
         let in_use = BTreeSet::from([snapshots[1].id.clone()]);
         let cap = 512 * 1024;
@@ -596,9 +643,9 @@ mod tests {
         assert!(kept[0], "the one used last stays");
         assert!(kept[1], "the one a loaded turn refers to stays");
         assert!(!kept[2], "the one used longest ago goes");
-        assert!(kept[23], "the newest stays");
+        assert!(kept[79], "the newest stays");
         let left = kept.iter().filter(|kept| **kept).count();
-        assert!((2..24).contains(&left), "{left} left");
+        assert!((2..80 - EVICTED_AT_ONCE).contains(&left), "{left} left");
         // Its message went with it: nothing to tell again half.
         assert_eq!(count(&connection, "messages"), u32::try_from(left).unwrap());
         assert_eq!(count(&connection, "anchors"), u32::try_from(left).unwrap());
@@ -637,6 +684,72 @@ mod tests {
         let connection = open(&db).unwrap();
         assert_eq!(count(&connection, "refs"), 1);
         assert_eq!(read(&db, &snapshot.id).unwrap().text, snapshot.text);
+    }
+
+    #[test]
+    fn a_store_gets_its_indexes_without_a_layout_an_older_build_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("snapshots.sqlite");
+        let root = dir.path().join("project");
+        let snapshot = snapshot("kept.txt", "kept");
+        let none = BTreeSet::new();
+        remember(
+            &db,
+            &root,
+            "explain",
+            std::slice::from_ref(&snapshot),
+            &none,
+        )
+        .unwrap();
+        let version = |connection: &Connection| -> i64 {
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap()
+        };
+        let indexes = |connection: &Connection| -> u32 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index'
+                    AND name IN ('refs_message','anchors_message')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // As a build before the indexes left it: layout 1, without them.
+        let raw = Connection::open(&db).unwrap();
+        raw.execute_batch("DROP INDEX refs_message; DROP INDEX anchors_message;")
+            .unwrap();
+        assert_eq!((version(&raw), indexes(&raw)), (1, 0));
+        let opened = open(&db).unwrap();
+        assert_eq!((version(&opened), indexes(&opened)), (1, 2));
+        // One a build in between marked as layout 2 reads as it is.
+        raw.execute_batch("PRAGMA user_version=2").unwrap();
+        assert_eq!(read(&db, &snapshot.id).unwrap().text, "kept");
+        assert_eq!(version(&raw), 2);
+        // A layout from the future is refused, and nothing is written.
+        raw.execute_batch("PRAGMA user_version=3").unwrap();
+        let refused = remember(&db, &root, "again", std::slice::from_ref(&snapshot), &none);
+        assert!(matches!(refused, Err(Problem::Newer)));
+    }
+
+    #[test]
+    fn a_store_held_by_another_connection_is_busy_which_is_not_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("snapshots.sqlite");
+        let root = dir.path().join("project");
+        let snapshot = snapshot("kept.txt", "kept");
+        let none = BTreeSet::new();
+        let kept = std::slice::from_ref(&snapshot);
+        remember(&db, &root, "explain", kept, &none).unwrap();
+        let holder = Connection::open(&db).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(matches!(
+            remember(&db, &root, "again", kept, &none),
+            Err(Problem::Busy)
+        ));
+        holder.execute_batch("COMMIT").unwrap();
+        remember(&db, &root, "again", kept, &none).unwrap();
     }
 
     #[test]
