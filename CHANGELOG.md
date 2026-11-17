@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.46 (2026-11-17)
+
+### Fixes
+
+- **tools:** a command the shell never runs ends its activity and its wait (875cd100)
+
 ## 2026.11.45 (2026-11-17)
 
 ### Features
