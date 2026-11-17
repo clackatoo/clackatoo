@@ -16,6 +16,11 @@ agents' requests**, chooses for new chats:
 - **clackatoo's rules** reviews approval requests with your rules and asks you
   when none matches. There is no model reviewer.
 
+While the choice is the agent's own settings, new chats don't go by the
+rules, and the page says so under **Rules**: they're kept, and used by chats
+set to clackatoo's rules. Saving a rule then says the same, not that it's in
+force.
+
 Existing chats keep their selection. To change one, open its permissions
 menu beside the model and choose **Who answers agents' requests**. Finish or
 stop its
@@ -94,7 +99,13 @@ A rule that allows a whole tool which runs commands, such as `claude/Bash`,
 reads "Allow any command through `claude/Bash`", and its form says so as it's
 typed, since that is what it allows.
 
-The daemon validates and saves the complete rule list. A failed save keeps
+Rules that the daemon's own `init.lua` sets are locked: the page says so,
+each rule has a lock with the line that sets them, and <kbd>Enter</kbd> on a
+rule, or a click on its lock, opens that line.
+
+The daemon validates and saves the complete rule list. While it does, the
+form's button reads **Saving…** and nothing in it changes; a save from a form
+you've since cancelled doesn't hold up the next. A failed save keeps
 the form, and says why. A rule is saved into the list as the daemon has it
 then, so a change made meanwhile in another window is kept; a rule that was
 itself changed or deleted meanwhile is refused, for you to open again.

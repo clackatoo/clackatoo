@@ -65,9 +65,15 @@ name, description, source and path. With no skills, the page says where to
 put one.
 
 Each skill has a switch. <kbd>Enter</kbd>, `l` or `h`, or a click on it,
-switches the skill off, or on again, for every agent, by adding its name to
-[`skills.disabled`](#switching-skills-off) or taking it out; `o`, or **Open
-its file**, opens its file. A skill switched off stays in the list, saying so.
+switches the skill off, or on again, for every agent in every project, by
+adding its name to [`skills.disabled`](#switching-skills-off) or taking it
+out; `o`, or **Open its file**, opens its file. The skills are listed by
+name, and one switched off stays where it is in the list, saying so. The
+switch is by name: where two skills have one name, the switch is on the one
+that would be offered, and the other says its own reason under **Not
+loaded**. If the daemon's own `init.lua` sets `skills.disabled`, the switches
+are locked: each has a lock with the line that sets it, and
+<kbd>Enter</kbd>, or a click on the lock, opens that line.
 
 Under **Not loaded** are the skills that can't be used, each with the reason:
 its file is broken, it asks for something shared skills don't do, or its
