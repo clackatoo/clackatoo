@@ -93,7 +93,8 @@ pub(super) struct FormView {
     pub(super) subtitle: String,
     /// Whether anything in it differs from what's saved.
     pub(super) changed: bool,
-    /// What its button that finishes it says: `Save`, or `Saving…`.
+    /// What its button that finishes it says: `Save`, or `Saving…`; or
+    /// nothing, for a form that only shows something, which has none.
     pub(super) save: String,
     /// It's been sent to be saved, and the daemon hasn't answered: its
     /// fields don't change meanwhile, as what's saved is what was sent.

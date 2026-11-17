@@ -1452,3 +1452,162 @@ fn a_skill_is_switched_off_by_its_switch_and_what_is_not_loaded_says_why() {
         "{asked:?}"
     );
 }
+
+/// One of the user's own servers, and a project's nobody has reviewed
+/// that has its name.
+fn pair() -> (McpServerInfo, McpServerInfo) {
+    let yours = McpServerInfo {
+        source: "Personal".into(),
+        path: "/home/u/.config/clackatoo/mcp.json".into(),
+        scope: McpScope::Personal,
+        ..server("search")
+    };
+    let projects = McpServerInfo {
+        settings: r#"{"command":"other-search","args":["--all"],"enabled":true}"#.into(),
+        trusted: false,
+        revision: "unreviewed".into(),
+        ..server("search")
+    };
+    (yours, projects)
+}
+
+#[test]
+fn a_projects_unreviewed_server_is_listed_beside_yours_of_its_name_and_only_shown() {
+    let (yours, projects) = pair();
+    let (mut desk, _dir) = mcp_page(vec![projects, yours]);
+    // Two rows of one name, told apart by where they're kept: yours first.
+    let rows = |desk: &mut Desk| -> Vec<(String, String)> {
+        (easy(desk).sections[0].rows.iter())
+            .map(|row| {
+                let status = row.status.clone().map(|(said, _)| said).unwrap_or_default();
+                (row.label.clone(), status)
+            })
+            .collect()
+    };
+    assert_eq!(
+        rows(&mut desk),
+        [
+            ("search".to_owned(), "Not in use".to_owned()),
+            ("search".to_owned(), "Needs review".to_owned())
+        ]
+    );
+    let view = easy(&mut desk);
+    let waiting = &view.sections[0].rows[1];
+    assert!(waiting.help.starts_with("This project"), "{waiting:?}");
+    assert!(
+        waiting
+            .notes
+            .iter()
+            .any(|(note, _)| note.contains("takes its place"))
+    );
+    // Yours opens as any server does, to change, test and remove.
+    desk.settings_pointer(SettingsHit::Control(0, Part::Segment(0)));
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "search");
+    assert!(labels(&view).contains(&"Test".to_owned()));
+    assert!(labels(&view).contains(&"Remove search".to_owned()));
+    assert!(matches!(
+        easy_row(&mut desk, "Command").1.control,
+        ControlView::Field(_)
+    ));
+    named(&mut desk, NamedKey::Escape);
+    // The project's is only shown, with its one action.
+    desk.settings_pointer(SettingsHit::Control(1, Part::Segment(0)));
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "search, as this project has it");
+    assert!(
+        view.subtitle.contains("your own server called search"),
+        "{}",
+        view.subtitle
+    );
+    let shown = labels(&view);
+    assert!(shown.contains(&"Review and enable".to_owned()));
+    for label in ["Test", "Remove search", "Forget the sign in"] {
+        assert!(!shown.contains(&label.to_owned()), "{shown:?}");
+    }
+    let (_, command) = easy_row(&mut desk, "Command");
+    assert_eq!(command.control, ControlView::None, "nothing to type into");
+    assert!(command.notes.iter().any(|(note, _)| note == "other-search"));
+    let said: Vec<&str> = view.buttons.iter().map(|each| &*each.label).collect();
+    assert_eq!(said, ["Back"], "and nothing to save");
+    assert_eq!(hints(&view), ["Tab", "Esc"]);
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    type_keys(&mut desk, "x");
+    assert!(sent(&mut desk).is_empty());
+    // The keys start on its one button, which reviews the project's.
+    named(&mut desk, NamedKey::Enter);
+    let asked = sent(&mut desk);
+    assert!(
+        matches!(&asked[..], [Request::Mcp {
+            action: McpAction::Trust { name, expected },
+            ..
+        }] if name == "search" && expected == "unreviewed"),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn the_keys_and_a_search_tell_two_servers_of_one_name_apart() {
+    let (yours, projects) = pair();
+    let (mut desk, _dir) = mcp_page(vec![projects.clone(), yours.clone()]);
+    // On the project's row, the keys stay on it when the list is read
+    // again with another server before it.
+    named(&mut desk, NamedKey::Enter);
+    named(&mut desk, NamedKey::ArrowDown);
+    assert_eq!(easy(&mut desk).focus, Some(1));
+    let number = desk.settings.as_mut().unwrap().mcp_reading();
+    desk.settings_mcp(
+        number,
+        Response::Mcp(McpReply {
+            servers: vec![yours.clone(), server("alpha"), projects.clone()],
+            ..McpReply::default()
+        }),
+    );
+    assert_eq!(easy(&mut desk).focus, Some(2));
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(easy(&mut desk).title, "search, as this project has it");
+    named(&mut desk, NamedKey::Escape);
+
+    // A search finds both, and each opens its own.
+    type_keys(&mut desk, "/search");
+    named(&mut desk, NamedKey::Enter);
+    let view = easy(&mut desk);
+    let found: Vec<u16> = (view.sections.iter().flat_map(|section| &section.rows))
+        .enumerate()
+        .filter(|(_, row)| row.label == "search" && row.help.starts_with("MCP Servers"))
+        .map(|(at, _)| u16::try_from(at).unwrap())
+        .collect();
+    assert_eq!(found.len(), 2, "{view:?}");
+    assert!(
+        view.sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .any(|row| {
+                row.label == "search"
+                    && row.help == "MCP Servers · This project, waiting to be reviewed"
+            })
+    );
+    desk.settings_pointer(SettingsHit::Control(found[1], Part::Whole));
+    assert_eq!(easy(&mut desk).title, "search, as this project has it");
+
+    // Enabled, the daemon lists the project's alone: its form is one to
+    // change, as any other.
+    let enabled = McpServerInfo {
+        trusted: true,
+        ..projects
+    };
+    let number = desk.settings.as_mut().unwrap().mcp_reading();
+    desk.settings_mcp(
+        number,
+        Response::Mcp(McpReply {
+            servers: vec![enabled],
+            ..McpReply::default()
+        }),
+    );
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "search");
+    assert!(matches!(
+        easy_row(&mut desk, "Command").1.control,
+        ControlView::Field(_)
+    ));
+}
