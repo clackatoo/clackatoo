@@ -1041,11 +1041,11 @@ impl Daemon {
             self.refuse_mcp(token, ticket, why);
             return;
         }
-        let (tool, title) = mcp_call_named(method, request, &permission.server);
+        let title = mcp_call_title(method, request, &permission.server);
         permission.call = self.next_tool_question();
         let call = permission.call;
         if rules {
-            self.rule_on_mcp_call(permission, method, request, tool.as_deref(), title);
+            self.rule_on_mcp_call(permission, method, request, title);
         } else {
             self.managed_mcp.permissions.push(permission);
             self.put_mcp_call_to_user(call, &title, request);
@@ -1053,7 +1053,7 @@ impl Daemon {
     }
 
     /// Has the chat's permission rules say whether the call `permission`
-    /// waits for, of `tool` if it names one, may go ahead. They answer in
+    /// waits for may go ahead. They answer in
     /// [`mcp_call_ruled`](Self::mcp_call_ruled); if they say to ask, the
     /// user is asked with `title`.
     fn rule_on_mcp_call(
@@ -1061,7 +1061,6 @@ impl Daemon {
         mut permission: Permission,
         method: &str,
         request: &str,
-        tool: Option<&str>,
         title: String,
     ) {
         let (chat, call) = (permission.chat, permission.call);
@@ -1071,50 +1070,80 @@ impl Daemon {
             self.refuse_mcp(permission.token, permission.ticket, why.into());
             return;
         };
-        let action = crate::permissions::Action {
-            tool: format!(
-                "managed_{}/{}",
-                permission.server,
-                tool.unwrap_or("unknown")
-            ),
-            arguments: permission_arguments(method, &input),
-            command: None,
-            cwd: None,
-            file: None,
-            // A request that names no tool is never one a rule allows.
-            always_ask: tool.is_none(),
-        };
+        // A request that names no tool is never one a rule allows.
+        let action = crate::permissions::Action::managed(
+            &permission.server,
+            method,
+            &input,
+            permission_arguments(method, &input),
+        );
+        let asked_about = action.clone();
         permission.waits = Waits::Rules {
             until: Instant::now() + RULES_WAIT,
             title,
             whole: request.to_owned(),
         };
         self.managed_mcp.permissions.push(permission);
-        self.check_permission(chat, action, move |daemon, verdict| {
-            daemon.mcp_call_ruled(call, &verdict);
+        self.check_permission(chat, action, move |daemon, checked| {
+            daemon.mcp_call_ruled(call, checked, asked_about);
         });
     }
 
-    /// The chat's permission rules said `verdict` of the call numbered
-    /// `call`, if it still waits for them.
-    fn mcp_call_ruled(&mut self, call: u64, verdict: &crate::permissions::Verdict) {
+    /// The chat's permission rules said `checked` of the call numbered
+    /// `call`, which is `action` to them, if it still waits for them. One
+    /// they say to ask about is the user's to answer, and theirs to rule
+    /// on again should they change meanwhile.
+    fn mcp_call_ruled(
+        &mut self,
+        call: u64,
+        checked: crate::permissions::Checked,
+        action: crate::permissions::Action,
+    ) {
         let waits = (self.managed_mcp.permissions.iter())
             .any(|waiting| waiting.call == call && matches!(waiting.waits, Waits::Rules { .. }));
         if !waits {
             return;
         }
+        let verdict = match checked {
+            crate::permissions::Checked::Decided(verdict) => verdict,
+            // Nobody refused it: its turn ended, or its chat moved on.
+            crate::permissions::Checked::Cancelled(cancelled) => {
+                self.settle_mcp_call(call, Err(cancelled.told().to_owned()));
+                return;
+            }
+        };
         match verdict.decision {
             crate::permissions::Decision::Allow => self.settle_mcp_call(call, Ok(())),
             crate::permissions::Decision::Deny => {
-                let why = format!(
-                    "Clackatoo's permissions don't allow this call: {}. It was not sent; don't \
-                     try it another way.",
-                    verdict.reason
-                );
-                self.settle_mcp_call(call, Err(why));
+                self.settle_mcp_call(call, Err(rule_denial(&verdict)));
             }
-            crate::permissions::Decision::Ask => self.ask_about_mcp_call(call),
+            crate::permissions::Decision::Ask => {
+                self.ask_about_mcp_call(call);
+                let asked = (self.managed_mcp.permissions.iter())
+                    .find(|waiting| waiting.call == call)
+                    .map(|waiting| waiting.chat);
+                if let Some(chat) = asked {
+                    let question = super::permissions::Question::Tool(call);
+                    self.asked_under_rules(chat, question, action);
+                }
+            }
         }
+    }
+
+    /// The chat's permission rules, as they are now, refuse the call
+    /// numbered `call`, which the user was being asked about, if it's a
+    /// managed server's: its proxy is told a rule did, not the user.
+    /// Returns whether it was one.
+    pub(super) fn mcp_call_denied_by_rule(
+        &mut self,
+        call: u64,
+        verdict: &crate::permissions::Verdict,
+    ) -> bool {
+        if !(self.managed_mcp.permissions.iter()).any(|waiting| waiting.call == call) {
+            return false;
+        }
+        self.settle_mcp_call(call, Err(rule_denial(verdict)));
+        true
     }
 
     /// Puts the call numbered `call`, which waited for the chat's
@@ -1814,6 +1843,16 @@ fn selected<'a>(registry: &'a config::Registry, name: &str) -> Result<&'a Bound,
 
 /// Approves the server `name` as saved, if what's on disk is still the
 /// definition `intended`.
+/// What an agent is told of a call the chat's permission rules refuse,
+/// as `verdict` says.
+fn rule_denial(verdict: &crate::permissions::Verdict) -> String {
+    format!(
+        "Clackatoo's permissions don't allow this call: {}. It was not sent; don't try it \
+         another way.",
+        verdict.reason
+    )
+}
+
 fn approve_saved(
     registry: &config::Registry,
     name: &str,
@@ -2002,11 +2041,10 @@ fn keeping_call_timeout(settings: &str, current: Option<&Bound>) -> String {
     Value::Object(written).to_string()
 }
 
-/// What the request `method`, with the parameters `request`, to the
-/// server `server` is of: the tool a `tools/call` names, if it names
-/// one, or else the method; and the question about it, finishing "Allow
-/// the agent to …?".
-fn mcp_call_named(method: &str, request: &str, server: &str) -> (Option<String>, String) {
+/// The question about the request `method`, with the parameters
+/// `request`, to the server `server`, finishing "Allow the agent to …?":
+/// it names the tool a `tools/call` calls, if it says, or else the method.
+fn mcp_call_title(method: &str, request: &str, server: &str) -> String {
     let tool = if method == "tools/call" {
         serde_json::from_str::<Value>(request)
             .ok()
@@ -2015,12 +2053,11 @@ fn mcp_call_named(method: &str, request: &str, server: &str) -> (Option<String>,
         Some(method.to_owned())
     };
     let shown = crate::skills::line(tool.as_deref().unwrap_or("a tool"), 128);
-    let title = format!(
+    format!(
         "use {} on MCP server {}",
         clackatoo_protocol::code_span(&super::tools::visible(&shown)),
         clackatoo_protocol::code_span(server)
-    );
-    (tool, title)
+    )
 }
 
 /// Whether `bound`'s server reads the private credential called `name`,
@@ -2078,18 +2115,17 @@ mod tests {
             ..Config::default()
         };
         let context = Context {
-            cwd: ".".into(),
             project: ".".into(),
             home: ".".into(),
             protected: vec![],
         };
-        let action = |input: &Value| Action {
-            tool: "managed_fixture/resources/read".into(),
-            arguments: permission_arguments("resources/read", input),
-            command: None,
-            cwd: None,
-            file: None,
-            always_ask: false,
+        let action = |input: &Value| {
+            Action::managed(
+                "fixture",
+                "resources/read",
+                input,
+                permission_arguments("resources/read", input),
+            )
         };
         assert_eq!(
             policy.decide(&action(&public), &context).decision,

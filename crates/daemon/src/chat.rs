@@ -511,6 +511,10 @@ pub(crate) struct HostedChat {
     /// A Stop may still be waiting for the adapter's cancellation reply.
     /// Such a turn must not be continued by an upgrade.
     stop_requested: bool,
+    /// The turn that was last stopped, by its uid: what was asked in it
+    /// is not allowed by a permission rule after. Not handed over: an
+    /// upgrade asks the user about every check that waits.
+    stopped_turn: Option<TurnUid>,
     /// How many turns the chat had as the user last stopped it, while it
     /// holds for them: stopping it again, with none begun since, drops
     /// what waits. Not handed over: after an upgrade, nothing is dropped
@@ -857,6 +861,7 @@ impl HostedChat {
             link: Link::Opening,
             queued: None,
             stop_requested: false,
+            stopped_turn: None,
             stopped_at: None,
             slow: false,
             told: resume::Told::default(),
@@ -1847,6 +1852,7 @@ impl HostedChat {
             self.stopped_at = Some(turns);
         }
         self.stop_requested = true;
+        self.stopped_turn = self.last_uid();
         if let Some((id, _, _)) = self.user_queue.native {
             self.steered(id, Err("Stopped before acknowledgment".into()));
         }
