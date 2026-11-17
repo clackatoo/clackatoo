@@ -8,7 +8,7 @@ use mio::Token;
 
 use super::{Daemon, MOST_ASKED, QUERY_BUDGET, QUERY_WAIT, Source, Versions};
 use crate::outline::{Answer, Query, Status};
-use crate::work::{Asked, Outcome, Question};
+use crate::work::{Asked, Outcome, Priority, Question};
 
 /// The windows' outline requests waiting on workers.
 #[derive(Default)]
@@ -76,7 +76,7 @@ impl Daemon {
             );
         }
         let project = self.project(pane);
-        let home = self.config.home.clone();
+        let home = self.real_home().to_owned();
         let request = Request {
             token,
             id,
@@ -91,9 +91,10 @@ impl Daemon {
                 name: "outline-root",
                 scope: None,
                 wait: QUERY_WAIT,
+                priority: Priority::Interactive,
             },
             Stage::Root(request),
-            move |_| Reply::Root(project.root(&home)),
+            move |_| Reply::Root(real_root(project, &home)),
         );
         if let Err(err) = asked {
             self.code_failed(token, id, &err);
@@ -110,12 +111,18 @@ impl Daemon {
                 .projects
                 .iter()
                 .any(|entry| entry.project.root == root && entry.paused);
-        let project = self.outline_project(root)?;
-        if paused && let Some(entry) = self.outlines.projects.back_mut() {
+        let target = self.code_target(&request, root)?;
+        let project = match &target {
+            Some(_) => self.outline_for_file(root)?,
+            None => self.outline_project(root)?,
+        };
+        let entry = self.outlines.projects.back_mut();
+        // One never scanned whole has no indexing to show or wait for.
+        let scans = entry.as_ref().is_some_and(|entry| entry.whole);
+        if paused && let Some(entry) = entry {
             entry.paused = true;
         }
         project.notifications();
-        let target = self.code_target(&request, root)?;
         let overlays = self.outline_overlays(root, target.as_deref());
         let versions = self.outline_versions(root, &overlays, target.as_deref());
         let query = target.map_or_else(
@@ -138,6 +145,7 @@ impl Daemon {
                 name: "outline-ui",
                 scope: Some(root.to_string_lossy().into_owned()),
                 wait: QUERY_WAIT,
+                priority: Priority::Interactive,
             },
             Stage::Symbols { request, versions },
             move |context| {
@@ -145,7 +153,7 @@ impl Daemon {
                 let answer =
                     crate::outline::collect(&project, &query, &overlays, QUERY_BUDGET, &cancelled);
                 Reply::Symbols(answer.map(|mut answer| {
-                    answer.status.scanning |= !paused && project.needs_work();
+                    answer.status.scanning |= scans && !paused && project.needs_work();
                     answer
                 }))
             },
@@ -334,6 +342,20 @@ impl Daemon {
     pub(super) fn code_symbols_due(&self) -> Option<Instant> {
         self.outlines.gui.asked.next_due()
     }
+}
+
+/// The root of `project`, with links followed, against `home` as it
+/// really is. A terminal's directory is as its shell names it, which may
+/// be through a link (`/home` on some systems): followed first, so the
+/// root is found, and compared with home, as a chat's or a buffer's is.
+fn real_root(project: crate::find::Project, home: &Path) -> Result<PathBuf, String> {
+    let project = match project {
+        crate::find::Project::Dir(dir) => {
+            crate::find::Project::Dir(dir.canonicalize().unwrap_or(dir))
+        }
+        other => other,
+    };
+    project.root(home)
 }
 
 /// What the window is told of the index's gaps: the last scan's first

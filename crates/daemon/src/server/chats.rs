@@ -490,7 +490,8 @@ impl Daemon {
         // Worked out once, here, as it walks the disk: the chat's tools
         // and messages ask for it often.
         let dir = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
-        let project = clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir.clone());
+        // Against home as it really is: `dir` has its links followed.
+        let project = clackatoo_syntax::git_root(&dir, self.real_home()).unwrap_or(dir.clone());
         chat.show_cwd(shown, &dir, project);
         let engine = chat
             .relations()

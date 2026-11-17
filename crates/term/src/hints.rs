@@ -109,13 +109,21 @@ impl crate::Terminal {
     /// included, have any of `hints`.
     #[must_use]
     pub fn lines_hinted(&self, first: u64, last: u64, hints: Hints) -> u64 {
-        let hinted = self
-            .document_hints(first)
-            .into_iter()
-            .take_while(|&(line, _)| line <= last)
-            .filter(|&(_, had)| had.intersects(hints))
-            .count();
-        hinted as u64
+        // Counted as they're met, never gathered: a long secret region
+        // past `last` costs nothing.
+        let count = |lines: &mut dyn Iterator<Item = (u64, Hints)>| {
+            let within = lines
+                .skip_while(|&(line, _)| line < first)
+                .take_while(|&(line, _)| line <= last);
+            within.filter(|&(_, had)| had.intersects(hints)).count() as u64
+        };
+        if self.is_alternate_screen() {
+            let end = self.primary().scrollback_end();
+            let mut shown = self.grid().hints().map(|(line, hints)| (line + end, hints));
+            count(&mut shown)
+        } else {
+            count(&mut self.primary().hints_from(first))
+        }
     }
 
     /// The document's lines from `first` on with hints, in order, as

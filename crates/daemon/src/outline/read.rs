@@ -3,7 +3,7 @@
 use super::store::{self, Store, Symbol};
 use super::{Indexed, Project, Status, excluded, index_file, relative, with_parser};
 use clackatoo_syntax::Languages;
-use clackatoo_syntax::outline::Outline;
+use clackatoo_syntax::outline::{Failure, Outline};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -254,9 +254,10 @@ fn overlay_outline(
     }
     let pack = languages.find(Path::new(&overlay.path))?;
     let parsed = with_parser(&pack, |parser| {
-        parser.extract(&pack, &overlay.text.to_string(), cancelled)
-    });
-    if parsed.is_err() && cancelled() {
+        Ok(parser.extract(&pack, &overlay.text.to_string(), cancelled))
+    })
+    .unwrap_or_else(|why| Err(Failure::Unparseable(why)));
+    if matches!(parsed, Err(Failure::Stopped)) {
         // Stopped, not unparseable: the next query tries again.
         return None;
     }

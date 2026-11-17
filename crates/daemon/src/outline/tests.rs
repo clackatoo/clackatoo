@@ -261,6 +261,84 @@ fn a_folder_that_comes_or_goes_is_walked_alone_not_the_whole_project() {
 }
 
 #[test]
+fn a_folder_moved_away_and_made_again_is_watched_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(&dir);
+    project.watching(true);
+    std::fs::create_dir(project.root.join("sub")).unwrap();
+    std::fs::write(project.root.join("sub/a.curly"), "fn first() {}\n").unwrap();
+    scan(&project);
+    // Moved out of the project, as a file manager's trash does: its watch
+    // goes with it.
+    std::fs::rename(project.root.join("sub"), dir.path().join("elsewhere")).unwrap();
+    project.notifications();
+    scan(&project);
+    assert!(
+        search(&project, "first")["symbols"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Made again, as a checkout does.
+    std::fs::create_dir(project.root.join("sub")).unwrap();
+    std::fs::write(project.root.join("sub/a.curly"), "fn second() {}\n").unwrap();
+    project.notifications();
+    let status = scan(&project);
+    assert!(status.watched, "{status:?}");
+    assert_eq!(
+        search(&project, "second")["symbols"][0]["path"],
+        "sub/a.curly"
+    );
+    // An edit inside it is heard: the new folder has a watch of its own.
+    std::fs::write(project.root.join("sub/a.curly"), "fn third() {}\n").unwrap();
+    project.notifications();
+    assert!(
+        project
+            .dirty
+            .lock()
+            .unwrap()
+            .paths
+            .contains(Path::new("sub/a.curly")),
+        "the edit wasn't heard"
+    );
+    // An edit to the folder that left isn't taken for one here.
+    std::fs::write(dir.path().join("elsewhere/a.curly"), "fn far() {}\n").unwrap();
+    project.reconcile();
+    scan(&project);
+    assert_eq!(search(&project, "third")["symbols"][0]["name"], "third");
+    assert!(
+        search(&project, "far")["symbols"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_project_whose_root_went_is_not_taken_for_watched() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(&dir);
+    project.watching(true);
+    std::fs::write(project.root.join("a.curly"), "fn a() {}\n").unwrap();
+    scan(&project);
+    project.reconcile();
+    assert!(!project.needs_work());
+    // A worktree removed and made again.
+    std::fs::remove_dir_all(&project.root).unwrap();
+    project.notifications();
+    let gone = scan(&project);
+    assert!(!gone.watched && !gone.complete, "{gone:?}");
+    std::fs::create_dir(&project.root).unwrap();
+    std::fs::write(project.root.join("b.curly"), "fn back() {}\n").unwrap();
+    // Nothing was heard of that, so only the timed look finds it.
+    project.reconcile();
+    assert!(project.needs_work());
+    let back = scan(&project);
+    assert!(back.watched && back.complete, "{back:?}");
+    assert_eq!(search(&project, "back")["symbols"][0]["name"], "back");
+}
+
+#[test]
 fn a_project_whose_every_folder_is_watched_is_not_walked_again_on_a_timer() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(&dir);

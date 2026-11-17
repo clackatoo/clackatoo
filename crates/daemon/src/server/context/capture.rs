@@ -238,8 +238,11 @@ fn definition(
     let pack = languages
         .find(real)
         .ok_or("No language pack for this symbol.")?;
-    let outline =
-        crate::outline::with_parser(&pack, |parser| parser.extract(&pack, &full, cancelled))?;
+    let outline = crate::outline::with_parser(&pack, |parser| {
+        parser
+            .extract(&pack, &full, cancelled)
+            .map_err(|failure| failure.to_string())
+    })?;
     let definition = outline
         .definitions
         .into_iter()

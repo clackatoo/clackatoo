@@ -398,7 +398,9 @@ fn finish(state: &mut State, id: u64, outcome: WorkState) {
 
 /// Where in the queue the job to run next is: one whose project has
 /// nothing running, urgent before not, from another project than the
-/// last if there is one, and the longest queued of those.
+/// last if there is one, and the longest queued of those. A job of no
+/// project is held back by nothing: it shares nothing with the others of
+/// none, so one of them stuck on a slow disk mustn't stall the rest.
 fn pick(state: &State) -> Option<usize> {
     let now = Instant::now();
     state
@@ -407,7 +409,7 @@ fn pick(state: &State) -> Option<usize> {
         .enumerate()
         .filter(|(_, id)| {
             let scope = &state.entries[id].item.scope;
-            !state.running.values().any(|running| running == scope)
+            scope.is_none() || !state.running.values().any(|running| running == scope)
         })
         .max_by_key(|(at, id)| {
             let entry = &state.entries[id];

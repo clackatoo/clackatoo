@@ -15,7 +15,7 @@ use clackatoo_protocol::{ChatState, TerminalId};
 
 use super::{Daemon, quoted_snapshot, store};
 use crate::chat::TurnUid;
-use crate::work::{Asked, Outcome, Question};
+use crate::work::{Asked, Outcome, Priority, Question};
 
 /// The most lookups that wait on workers at once, and how far back in a
 /// chat prompts are looked up.
@@ -92,11 +92,13 @@ impl Daemon {
             .history
             .asked
             .take(&self.work.scheduler, Instant::now());
+        // A store that can't be read fails every lookup alike: said once.
+        let mut unread = None;
         for (lookup, outcome) in settled {
             let found = match outcome {
                 Outcome::Answered(Ok(found)) => found,
                 Outcome::Answered(Err(problem)) => {
-                    log::warn!("a chat's context couldn't be looked up: {problem}");
+                    unread.get_or_insert(problem);
                     None
                 }
                 Outcome::TimedOut => {
@@ -109,6 +111,9 @@ impl Daemon {
             if let Some(record) = found {
                 self.restore_context(&lookup, record);
             }
+        }
+        if let Some(problem) = unread {
+            log::warn!("chats' context couldn't be looked up: {problem}");
         }
         let waiting: Vec<TerminalId> = self.contexts.history.unlooked.iter().copied().collect();
         for chat in waiting {
@@ -200,6 +205,7 @@ impl Daemon {
                     name: "context-history",
                     scope: None,
                     wait: WAIT,
+                    priority: Priority::Background,
                 },
                 lookup,
                 move |_| store::lookup(&path, &root, &prompt),

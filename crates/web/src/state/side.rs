@@ -57,6 +57,12 @@ impl Control {
 /// is at work.
 const POLL: f64 = 500.0;
 
+/// Whether the side conversation `node` is changing by itself: its agent
+/// is starting or answering, or its last turn hasn't ended.
+fn working(node: &ChatNode) -> bool {
+    super::busy(node) || node.turns.last().is_some_and(|turn| turn.end.is_none())
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Side {
     pub open: bool,
@@ -169,11 +175,17 @@ impl State {
         // A conversation that waits for a question changes only when the
         // user does something, and each such request is answered with it
         // whole.
-        self.side.due = match &response {
-            Response::Side(reply) if reply.node.as_ref().is_some_and(|node| super::busy(node)) => {
-                self.now + POLL
-            }
-            _ => f64::INFINITY,
+        // An answer that isn't the conversation (a refusal, an attachment)
+        // says nothing of whether its agent still works: go by the
+        // conversation as last seen.
+        let at_work = match &response {
+            Response::Side(reply) => reply.node.as_deref().is_some_and(working),
+            _ => self.side.node.as_deref().is_some_and(working),
+        };
+        self.side.due = if at_work {
+            self.now + POLL
+        } else {
+            f64::INFINITY
         };
         match response {
             Response::Side(reply) => {
@@ -456,6 +468,17 @@ mod tests {
                 ..
             })]
         ));
+        // A follow-up refused mid-answer doesn't stop the sheet following
+        // the answer that's still coming.
+        state.receive(reply(clackatoo_protocol::ChatState::Answering));
+        state.side_control(Control::Stop);
+        state.take_outbox();
+        state.receive(clackatoo_protocol::ServerMessage::Response(
+            Response::Error(clackatoo_protocol::Error::Other("Not now.".into())),
+        ));
+        state.now += 2.0 * POLL;
+        state.side_poll();
+        assert_eq!(state.take_outbox().len(), 1);
         // The answer finished: the open sheet asks nothing more.
         state.receive(reply(clackatoo_protocol::ChatState::Ready));
         assert!(state.side.open);

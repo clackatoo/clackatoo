@@ -2,11 +2,11 @@
 
 mod gui;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{AgentTools, BufferId, TerminalId};
@@ -51,6 +51,9 @@ struct Entry {
     work: Option<u64>,
     /// The user cancelled indexing: it isn't started again unasked.
     paused: bool,
+    /// It's scanned whole. Otherwise it's too wide to (the home
+    /// directory), and holds only the single files asked about.
+    whole: bool,
     /// Set by the indexing job as it ends well.
     finished: Arc<AtomicBool>,
     used: Instant,
@@ -81,6 +84,9 @@ pub(super) struct Outlines {
     /// Numbers indexing jobs, so each has a key of its own.
     next: u64,
     asked: Asked<ToolAsk, Result<String, String>>,
+    /// The index files of the projects loaded, which the worker that
+    /// clears out unused indexes must leave.
+    in_use: Arc<Mutex<BTreeSet<PathBuf>>>,
     gui: gui::Gui,
 }
 
@@ -115,10 +121,16 @@ impl Daemon {
         cache.join(crate::outline::hex(&namespace.as_ref()[..8]))
     }
 
-    /// The index of the project at `root` if it's loaded, as used now.
-    /// Never loads one: for what only wants an index that's already
+    /// The index of the project at `root` if it's loaded whole, as used
+    /// now. Never loads one: for what only wants an index that's already
     /// there.
     pub(super) fn outline_loaded(&mut self, root: &Path) -> Option<Arc<Project>> {
+        let entry = self.outline_entry(root)?;
+        entry.whole.then(|| Arc::clone(&entry.project))
+    }
+
+    /// The loaded project at `root`, moved to the newest end as used now.
+    fn outline_entry(&mut self, root: &Path) -> Option<&mut Entry> {
         let at = self
             .outlines
             .projects
@@ -126,9 +138,16 @@ impl Daemon {
             .position(|entry| entry.project.root == root)?;
         let mut entry = self.outlines.projects.remove(at)?;
         entry.used = Instant::now();
-        let project = Arc::clone(&entry.project);
         self.outlines.projects.push_back(entry);
-        Some(project)
+        self.outlines.projects.back_mut()
+    }
+
+    /// Whether `root` is no project to index whole: the home directory,
+    /// or a folder it's in. Home is compared as it really is, as `root`
+    /// is: where `/home` is a link, the one in the environment never
+    /// matches.
+    fn too_wide(&self, root: &Path) -> bool {
+        self.real_home().starts_with(root)
     }
 
     /// The index of the project at `root`, loaded if it wasn't, which
@@ -140,19 +159,39 @@ impl Daemon {
     /// directory or above it: that's no project, and far too much to
     /// index.
     pub(super) fn outline_project(&mut self, root: &Path) -> Result<Arc<Project>, String> {
-        if let Some(project) = self.outline_loaded(root) {
-            if let Some(entry) = self.outlines.projects.back_mut() {
-                entry.paused = false;
-            }
-            return Ok(project);
-        }
-        if self.config.home.starts_with(root) {
+        if self.too_wide(root) {
             return Err(
                 "The home directory isn't a project, so it has no code outline. Work in a \
                  project's folder to get one."
                     .into(),
             );
         }
+        if let Some(entry) = self.outline_entry(root) {
+            entry.paused = false;
+            return Ok(Arc::clone(&entry.project));
+        }
+        self.load_outline(root, true)
+    }
+
+    /// An index to read single files of `root` into, for the outline of
+    /// one file: the project's own, or where `root` is too wide to index
+    /// (a loose file in the home directory), one that's never scanned and
+    /// holds only the files asked about.
+    ///
+    /// # Errors
+    /// If no language packs are installed.
+    pub(super) fn outline_for_file(&mut self, root: &Path) -> Result<Arc<Project>, String> {
+        if !self.too_wide(root) {
+            return self.outline_project(root);
+        }
+        if let Some(entry) = self.outline_entry(root) {
+            return Ok(Arc::clone(&entry.project));
+        }
+        self.load_outline(root, false)
+    }
+
+    /// Loads the index of `root`, to be scanned `whole` or not at all.
+    fn load_outline(&mut self, root: &Path, whole: bool) -> Result<Arc<Project>, String> {
         let languages = self.config.languages.clone().ok_or(
             "Outline indexing needs installed language packs. Install one with `clackatoo \
              language install LANGUAGE`.",
@@ -181,11 +220,18 @@ impl Daemon {
             }
         });
         project.watching(token.is_some());
+        // In use from now: before the clear-out below can run.
+        self.outlines
+            .in_use
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project.database.clone());
         self.outlines.projects.push_back(Entry {
             project: Arc::clone(&project),
             token,
             work: None,
             paused: false,
+            whole,
             finished: Arc::new(AtomicBool::new(false)),
             used: Instant::now(),
             reconcile: Instant::now() + RECONCILE,
@@ -195,19 +241,22 @@ impl Daemon {
     }
 
     /// Has a worker clear out of `cache` the indexes nobody uses, as a
-    /// project is loaded: the only time the folder grows.
+    /// project is loaded: the only time the folder grows. Which indexes
+    /// are in use is asked as each is about to go, not now: a project
+    /// loaded while the job waits or runs keeps its index.
     fn prune_outlines(&mut self, cache: PathBuf) {
-        let loaded: Vec<PathBuf> = self
-            .outlines
-            .projects
-            .iter()
-            .map(|entry| entry.project.database.clone())
-            .collect();
+        let in_use = Arc::clone(&self.outlines.in_use);
         let queued = self.work.scheduler.submit_hidden(
             "outline-prune".into(),
             None,
             Priority::Background,
             move |_| {
+                let loaded = |index: &Path| {
+                    in_use
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains(index)
+                };
                 crate::outline::prune(
                     &cache,
                     &loaded,
@@ -226,6 +275,11 @@ impl Daemon {
     /// its watch let go. Its index stays on disk.
     fn forget_oldest_outline(&mut self) {
         if let Some(entry) = self.outlines.projects.pop_front() {
+            self.outlines
+                .in_use
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&entry.project.database);
             if let Some(work) = entry.work {
                 let _ = self.work.scheduler.cancel(work);
             }
@@ -348,12 +402,15 @@ impl Daemon {
             .ok_or("The chat closed.")?
             .project()
             .to_owned();
-        let project = self.outline_project(&root)?;
-        project.notifications();
         let target = match &request {
             Query::File { path, .. } => Some(path.clone()),
             _ => None,
         };
+        let project = match &target {
+            Some(_) => self.outline_for_file(&root)?,
+            None => self.outline_project(&root)?,
+        };
+        project.notifications();
         let overlays = self.outline_overlays(&root, target.as_deref());
         let versions = self.outline_versions(&root, &overlays, target.as_deref());
         if let Query::Map { focus, .. } = &mut request
@@ -378,6 +435,7 @@ impl Daemon {
                 name: "outline-query",
                 scope: Some(root.to_string_lossy().into_owned()),
                 wait: QUERY_WAIT,
+                priority: Priority::Interactive,
             },
             ToolAsk {
                 token,
@@ -423,7 +481,8 @@ impl Daemon {
                 entry.project.reconcile();
                 entry.reconcile = now + RECONCILE;
             }
-            if entry.work.is_none() && !entry.paused && entry.project.needs_work() {
+            let wanted = entry.whole && !entry.paused;
+            if entry.work.is_none() && wanted && entry.project.needs_work() {
                 let project = Arc::clone(&entry.project);
                 let mut scan = None;
                 entry.finished.store(false, Ordering::Release);

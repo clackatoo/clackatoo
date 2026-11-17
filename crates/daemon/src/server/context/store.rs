@@ -24,8 +24,13 @@ pub(super) const CAP: u64 = 256 * 1024 * 1024;
 const MOST_RECORD: usize = 512 * 1024;
 
 /// The store's layout: 1 added when each snapshot was last used, and which
-/// snapshots each message has.
-const VERSION: i64 = 1;
+/// snapshots each message has; 2, the indexes a message's rows are found
+/// by.
+const VERSION: i64 = 2;
+
+/// How many snapshots are let go of in one transaction, so a big clear-out
+/// never holds the store's write lock for long.
+const EVICTED_AT_ONCE: usize = 32;
 
 /// Why the store couldn't do what was asked.
 #[derive(Debug)]
@@ -135,7 +140,11 @@ fn lay_out(connection: &mut Connection) -> Result<(), Problem> {
         transaction
             .execute_batch("ALTER TABLE snapshots ADD COLUMN used INTEGER NOT NULL DEFAULT 0;")?;
     }
-    transaction.execute_batch("CREATE INDEX IF NOT EXISTS snapshots_used ON snapshots(used);")?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS snapshots_used ON snapshots(used);
+        CREATE INDEX IF NOT EXISTS refs_message ON refs(root,key);
+        CREATE INDEX IF NOT EXISTS anchors_message ON anchors(root,key);",
+    )?;
     {
         let mut records = transaction.prepare("SELECT root,key,metadata FROM messages")?;
         let mut add = transaction
@@ -175,7 +184,8 @@ pub(super) fn retain(
     let transaction = connection.transaction()?;
     insert_snapshots(&transaction, snapshots)?;
     transaction.commit()?;
-    evict(&mut connection, CAP, &protected(snapshots, in_use))
+    make_room(&mut connection, &protected(snapshots, in_use));
+    Ok(())
 }
 
 /// Keeps `snapshots` and the message `text` they were sent with from the
@@ -233,7 +243,8 @@ pub(super) fn remember(
         )?;
     }
     transaction.commit()?;
-    evict(&mut connection, CAP, &protected(snapshots, in_use))
+    make_room(&mut connection, &protected(snapshots, in_use));
+    Ok(())
 }
 
 /// The snapshots that may not be let go: those `in_use`, and those just
@@ -259,6 +270,14 @@ fn insert_snapshots(
         )?;
     }
     Ok(())
+}
+
+/// Brings the store back under its cap, if it's over. What was just kept
+/// is kept whether or not this works, so a failure here is only logged.
+fn make_room(connection: &mut Connection, in_use: &BTreeSet<String>) {
+    if let Err(problem) = evict(connection, CAP, in_use) {
+        log::warn!("the context store couldn't let go of old snapshots: {problem}");
+    }
 }
 
 /// Lets go of the snapshots used longest ago, and the messages they went
@@ -293,27 +312,30 @@ fn evict(connection: &mut Connection, cap: u64, in_use: &BTreeSet<String>) -> Re
             going.push(id);
         }
     }
-    let transaction = connection.transaction()?;
-    for id in &going {
-        // A message without one of its snapshots can't be told again whole.
-        transaction.execute(
-            "DELETE FROM messages WHERE (root,key) IN
-                (SELECT root,key FROM refs WHERE snapshot=?1)",
-            [id],
-        )?;
-        transaction.execute(
-            "DELETE FROM anchors WHERE (root,key) IN
-                (SELECT root,key FROM refs WHERE snapshot=?1)",
-            [id],
-        )?;
-        transaction.execute(
-            "DELETE FROM refs WHERE (root,key) IN
-                (SELECT root,key FROM refs WHERE snapshot=?1)",
-            [id],
-        )?;
-        transaction.execute("DELETE FROM snapshots WHERE id=?1", [id])?;
+    for batch in going.chunks(EVICTED_AT_ONCE) {
+        let transaction = connection.transaction()?;
+        for id in batch {
+            // A message without one of its snapshots can't be told again
+            // whole.
+            transaction.execute(
+                "DELETE FROM messages WHERE (root,key) IN
+                    (SELECT root,key FROM refs WHERE snapshot=?1)",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM anchors WHERE (root,key) IN
+                    (SELECT root,key FROM refs WHERE snapshot=?1)",
+                [id],
+            )?;
+            transaction.execute(
+                "DELETE FROM refs WHERE (root,key) IN
+                    (SELECT root,key FROM refs WHERE snapshot=?1)",
+                [id],
+            )?;
+            transaction.execute("DELETE FROM snapshots WHERE id=?1", [id])?;
+        }
+        transaction.commit()?;
     }
-    transaction.commit()?;
     if !going.is_empty() {
         log::info!(
             "the context store let go of its {} oldest snapshots to stay under its cap",

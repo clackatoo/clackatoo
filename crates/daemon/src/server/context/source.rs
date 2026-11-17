@@ -537,6 +537,10 @@ fn private_command(grid: &Terminal, block: &Block) -> bool {
 /// If every line is secret: there's nothing to attach, and the user is
 /// told why rather than sent a placeholder.
 fn open_text(grid: &Terminal, first: u64, last: u64) -> Result<String> {
+    if first > last {
+        // A command line so long that its output starts past what's taken.
+        return Ok(String::new());
+    }
     let secret = grid.lines_hinted(first, last, SECRET);
     if secret > last - first {
         return Err(
@@ -700,6 +704,12 @@ mod tests {
             grid.add_hints(1..2, mark);
             assert!(command_excerpt(&grid, ID, 0).is_err(), "{mark:?}");
         }
+    }
+
+    #[test]
+    fn output_that_starts_past_what_is_taken_is_empty_not_a_panic() {
+        let grid = terminal("one\r\ntwo\r\nthree");
+        assert_eq!(open_text(&grid, 2, 1), Ok(String::new()));
     }
 
     #[test]

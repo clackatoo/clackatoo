@@ -24,7 +24,7 @@ use clackatoo_protocol::{
 use mio::Token;
 
 use super::{Daemon, Held, Source};
-use crate::work::{Asked, Outcome, Question};
+use crate::work::{Asked, Outcome, Priority, Question};
 use capture::{Capture, Keep};
 use search::SearchJob;
 
@@ -339,6 +339,7 @@ impl Daemon {
                 name: "context-tool",
                 scope: None,
                 wait: PREVIEW_WAIT,
+                priority: Priority::Interactive,
             },
             Ask::Tool {
                 token,
@@ -505,7 +506,8 @@ impl Daemon {
     }
 
     /// The snapshots the conversations in memory refer to, in their turns
-    /// and drafts: the store never lets go of these.
+    /// (on every branch), their queues and their drafts: the store never
+    /// lets go of these.
     fn contexts_in_use(&self) -> BTreeSet<String> {
         let mut in_use = BTreeSet::new();
         for slot in self.terminals.values() {
@@ -513,8 +515,7 @@ impl Daemon {
                 continue;
             };
             let node = chat.node();
-            let attached = node.turns.iter().flat_map(|turn| &turn.context);
-            in_use.extend(attached.map(|snapshot| snapshot.id.clone()));
+            in_use.extend(chat.held_context().map(|snapshot| snapshot.id.clone()));
             for selection in &node.draft_context {
                 if let ContextRef::Retained { id, .. } = &selection.source {
                     in_use.insert(id.clone());
@@ -744,6 +745,7 @@ impl Daemon {
                 name,
                 scope: None,
                 wait,
+                priority: Priority::Interactive,
             },
             ask,
             move |context| capture::run(job, &|| context.cancelled()),
@@ -805,6 +807,7 @@ impl Daemon {
                 name: "context-search",
                 scope: None,
                 wait: SEARCH_WAIT,
+                priority: Priority::Interactive,
             },
             Ask::Search(place),
             move |context| {
@@ -943,6 +946,11 @@ impl Daemon {
                     snapshot.note.push(' ');
                 }
                 snapshot.note.push_str(NOT_KEPT);
+                // The identifier is the hash of all a snapshot holds, its
+                // note too. Nothing is kept under the old one.
+                if let Some(id) = identity(snapshot) {
+                    snapshot.id = id;
+                }
             }
         }
         for snapshot in &mut snapshots {

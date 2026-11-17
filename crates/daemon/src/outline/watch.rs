@@ -49,6 +49,26 @@ struct Dirs {
     paths: HashSet<PathBuf>,
 }
 
+impl Dirs {
+    /// Stops watching the folder `dir` and every folder under it: it was
+    /// deleted or moved away, and a watch follows the folder wherever it
+    /// went. Were its path left here, a folder made in its place later
+    /// would pass for watched.
+    fn forget_under(&mut self, fd: &OwnedFd, dir: &Path) {
+        let gone: Vec<i32> = (self.ids.iter())
+            .filter(|(_, path)| path.starts_with(dir))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in gone {
+            if let Some(path) = self.ids.remove(&id) {
+                self.paths.remove(&path);
+            }
+            // Fails if the kernel dropped it already, with the folder.
+            let _ = inotify::remove_watch(fd, id);
+        }
+    }
+}
+
 /// One project's inotify instance, and what it watches.
 #[derive(Debug)]
 pub(crate) struct Watch {
@@ -103,6 +123,16 @@ impl Watch {
         }
     }
 
+    /// Whether the project's root itself is watched. If it isn't (it was
+    /// deleted, or couldn't be watched), nothing under it is heard of.
+    pub(super) fn watches_root(&self) -> bool {
+        let dirs = self
+            .dirs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        dirs.paths.contains(Path::new(""))
+    }
+
     /// Reads what the kernel has reported, up to 4,096 events, as what
     /// changed. Anything it can't place, or more than it read, is reported
     /// as everything having changed.
@@ -131,13 +161,11 @@ impl Watch {
             };
             let flags = event.events();
             if flags.contains(ReadFlags::IGNORED) {
-                // The folder went, and its watch with it.
-                match dirs.ids.remove(&event.wd()) {
-                    Some(path) => {
-                        dirs.paths.remove(&path);
-                        result.under(path);
-                    }
-                    None => result.all = true,
+                // The folder went, and its watch with it. One not known
+                // here is one this let go of itself, already accounted for.
+                if let Some(path) = dirs.ids.remove(&event.wd()) {
+                    dirs.paths.remove(&path);
+                    result.under(path);
                 }
                 continue;
             }
@@ -145,13 +173,14 @@ impl Watch {
                 result.all = true;
                 continue;
             }
-            let Some(dir) = dirs.ids.get(&event.wd()) else {
+            let Some(dir) = dirs.ids.get(&event.wd()).cloned() else {
                 result.all = true;
                 continue;
             };
             let Some(name) = event.file_name() else {
                 // The watched folder itself was deleted or moved.
-                result.under(dir.clone());
+                dirs.forget_under(&self.fd, &dir);
+                result.under(dir);
                 continue;
             };
             let path = {
@@ -162,6 +191,9 @@ impl Watch {
                 // What's left out may have changed anywhere below.
                 result.all = true;
             } else if flags.contains(ReadFlags::ISDIR) {
+                if flags.intersects(ReadFlags::MOVED_FROM | ReadFlags::DELETE) {
+                    dirs.forget_under(&self.fd, &path);
+                }
                 result.under(path);
             } else if result.paths.len() < 4096 {
                 result.paths.insert(path);

@@ -434,6 +434,7 @@ fn questions_are_answered_time_out_or_are_lost_and_each_is_told_once() {
         name: "test",
         scope: None,
         wait,
+        priority: Priority::Interactive,
     };
     let hour = Duration::from_hours(1);
     asked
@@ -518,4 +519,28 @@ fn questions_are_answered_time_out_or_are_lost_and_each_is_told_once() {
     }
     assert_eq!(told, [("last", Outcome::Answered(2))]);
     assert_eq!(asked.len(), 0);
+}
+
+#[test]
+fn jobs_of_no_project_run_side_by_side() {
+    let mut scheduler = Scheduler::new(|| {});
+    let (release, wait) = mpsc::channel::<()>();
+    let (started, start) = mpsc::channel();
+    let wait = Arc::new(Mutex::new(wait));
+    for name in ["first", "second"] {
+        let (started, wait) = (started.clone(), Arc::clone(&wait));
+        scheduler
+            .submit_hidden(name.into(), None, Priority::Interactive, move |_| {
+                started.send(()).unwrap();
+                until(&wait.lock().unwrap());
+                Ok(Step::Done)
+            })
+            .unwrap();
+    }
+    // Both start while neither has finished: the first holds a worker
+    // until it's released, and the second isn't made to wait for it.
+    until(&start);
+    until(&start);
+    release.send(()).unwrap();
+    release.send(()).unwrap();
 }

@@ -25,6 +25,9 @@ pub(crate) struct Question<'a> {
     pub scope: Option<String>,
     /// How long the answer is waited for.
     pub wait: Duration,
+    /// Whether someone is waiting on the answer, so it goes ahead of
+    /// background work.
+    pub priority: Priority,
 }
 
 /// What became of a question.
@@ -111,7 +114,7 @@ impl<P, A: Send + 'static> Asked<P, A> {
         let work = scheduler.submit_hidden(
             format!("{}:{number}", question.name),
             question.scope,
-            Priority::Interactive,
+            question.priority,
             move |context| {
                 if let Some(answer) = answer.take() {
                     let answer = answer(context);

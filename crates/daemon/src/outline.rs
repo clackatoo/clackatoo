@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clackatoo_syntax::{Languages, outline::OutlineParser};
+use clackatoo_syntax::{
+    Languages,
+    outline::{Failure, OutlineParser},
+};
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +74,9 @@ pub(crate) struct Project {
     unread: AtomicBool,
     status: Mutex<Status>,
     dirty: Mutex<Dirty>,
+    /// A walk since the last whole one couldn't visit something, so the
+    /// index isn't whole, whatever later scans of single changes find.
+    missed: AtomicBool,
     /// The outlines of unsaved buffers, by buffer and version, so a query
     /// doesn't parse again what the last one parsed.
     overlays: Mutex<read::OverlayCache>,
@@ -99,6 +105,7 @@ impl Project {
                 all: true,
                 ..Dirty::default()
             }),
+            missed: AtomicBool::new(false),
             overlays: Mutex::default(),
         }
     }
@@ -120,7 +127,8 @@ impl Project {
     /// the watch, and the last scan could watch every folder. Otherwise
     /// only another scan finds them.
     fn hears_changes(&self) -> bool {
-        self.watch.is_some() && self.watching.load(Ordering::Acquire) && self.status().watched
+        let rooted = (self.watch.as_ref()).is_some_and(|watch| watch.watches_root());
+        rooted && self.watching.load(Ordering::Acquire) && self.status().watched
     }
 
     /// Time to look the project over, in case changes were missed: only
@@ -234,8 +242,8 @@ pub(crate) struct Scan {
     dirs: VecDeque<PathBuf>,
     paths: VecDeque<PathBuf>,
     generation: i64,
-    /// A walk couldn't visit something, so the index isn't whole.
-    missed: bool,
+    /// How many files this scan has met, against [`MOST_FILES`].
+    visited: u64,
     status: Status,
 }
 
@@ -260,6 +268,9 @@ impl Scan {
         store.set_metadata("root", &project.root.to_string_lossy())?;
         let dirty = std::mem::take(&mut *project.dirty());
         let full = dirty.all;
+        if full {
+            project.missed.store(false, Ordering::Release);
+        }
         let rules = Arc::new(crate::ignores::Rules::new(&project.root, false, false).bounded(4096));
         let mut status = if full {
             Status::default()
@@ -309,7 +320,7 @@ impl Scan {
             } else {
                 dirty.paths.into_iter().collect()
             },
-            missed: false,
+            visited: 0,
             status,
         };
         if full {
@@ -390,7 +401,8 @@ impl Scan {
                 Next::Again => {}
                 Next::File(path) => {
                     self.status.discovered += 1;
-                    if self.status.discovered > MOST_FILES {
+                    self.visited += 1;
+                    if self.visited > MOST_FILES {
                         return Err("Outline discovery reached its one-million-file limit.".into());
                     }
                     self.index(&path, context)?;
@@ -412,7 +424,7 @@ impl Scan {
                 Some(Ok(entry)) => entry,
                 Some(Err(err)) => {
                     // Something wasn't visited, so the index isn't whole.
-                    self.missed = true;
+                    self.project.missed.store(true, Ordering::Release);
                     self.error(&err.to_string());
                     return Ok(Next::Again);
                 }
@@ -492,7 +504,11 @@ impl Scan {
     fn finish(&mut self) -> Result<(), String> {
         let held = self.store.coverage()?;
         self.status.scanning = false;
-        self.status.complete = !self.missed && !self.project.needs_work();
+        // What a walk missed may have changed unheard: neither whole nor
+        // watched, so the project is looked over again in time.
+        let missed = self.project.missed.load(Ordering::Acquire);
+        self.status.watched &= !missed;
+        self.status.complete = !missed && !self.project.needs_work();
         self.status.indexed_files = held.files;
         self.status.truncated = held.truncated;
         self.status.failed = held.failed;
@@ -584,7 +600,8 @@ fn index_file(
     if text.len() as u64 > MAX_SOURCE {
         return skipped("Source grew beyond 4 MiB.".into());
     }
-    let outline = with_parser(pack, |parser| parser.extract(pack, &text, cancelled));
+    let outline = with_parser(pack, |parser| Ok(parser.extract(pack, &text, cancelled)))
+        .unwrap_or_else(|why| Err(Failure::Unparseable(why)));
     let after = crate::regular::open_below(&project.root, path).and_then(|file| file.metadata());
     if cancelled() || after.map_or(true, |after| stamp != self::stamp(&after)) {
         return skipped(
@@ -595,8 +612,12 @@ fn index_file(
     let (outline, state) = match outline {
         Ok(outline) if outline.truncated => (outline, FileState::Truncated),
         Ok(outline) => (outline, FileState::Ok),
+        // Out of time on a busy machine isn't the file's fault: nothing is
+        // kept of it, so the next whole scan, or a query for this file,
+        // parses it again.
+        Err(Failure::Stopped) => return skipped(Failure::Stopped.to_string()),
         // Kept as failed, so it isn't parsed again until it changes.
-        Err(_) => (
+        Err(Failure::Unparseable(_)) => (
             clackatoo_syntax::outline::Outline::default(),
             FileState::Failed,
         ),

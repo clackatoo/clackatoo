@@ -17,8 +17,11 @@ themselves don't. Queries can return useful partial results while the rest
 of the project is being indexed.
 
 The home directory, and any folder above it, is never indexed: it's no
-project, and far too much to walk. A chat or file there with no project of
-its own gets no outline, and says why.
+project, and far too much to walk. That's the home directory as it really
+is, with links followed. A chat there with no project of its own gets no
+symbol search or repository map, and says why. The outline of a single
+file there still works, in the editor and through `file_outline`: only
+that file is read.
 
 ## Editor outline
 
@@ -92,9 +95,11 @@ else. A change to ignore rules, or filesystem events the daemon missed,
 asks for the whole project to be walked again.
 
 While every directory is watched, that's all: the project isn't walked on
-a timer. If some couldn't be watched (there are more than 8,192, or the
-system has no watches left), the whole project is checked every two
-minutes while it remains in use. Unchanged files reuse their persistent
+a timer. If some couldn't be watched (there are more than 8,192, the
+system has no watches left, or the project's own folder was removed), the
+whole project is checked every two minutes while it remains in use. A
+directory moved out of the project stops being watched; one made in its
+place is watched afresh. Unchanged files reuse their persistent
 records, and a walk writes to the index in batches. Changing the installed
 grammar or extraction version invalidates those records the next time the
 file is met.
@@ -115,14 +120,18 @@ Coverage reports whether reconciliation is complete, which work is in
 progress, how many files were indexed or unsupported, cache hits, skipped
 files and errors. It also counts the indexed files that aren't whole:
 `truncated` ones, which have more than 4,096 definitions and keep the
-first, and `failed` ones, which couldn't be parsed or took longer than the
-parsing budget.
+first, and `failed` ones, which can't be parsed as they are: their grammar
+doesn't load.
 
 Complete reconciliation means the configured source set has been visited;
 it does not mean every language or generated file was indexed. A file that
 fails doesn't leave the index incomplete: it's recorded as failed, counted
-each time, and not parsed again until it or its grammar changes. A folder
-that couldn't be read does, as something in it may be missing.
+each time, and not parsed again until it or its grammar changes. A file
+that only ran out of its parsing budget, as on a busy machine, is left out
+and counted as skipped, and tried again on the next whole walk or when its
+own outline is asked for. A folder that couldn't be read leaves the index
+incomplete until a whole walk can read it, as something in it may be
+missing; the project is then checked on the two-minute timer too.
 Filesystem contents can change after any query's snapshot.
 
 Cancelling indexing leaves its existing cache available as partial data.
@@ -159,6 +168,8 @@ at 512 MiB.
 Cached databases remain available for later sessions, but not for ever.
 Each time a project's index is loaded, the daemon clears out the indexes
 whose project folder no longer exists, those not written to for 30 days,
-and then the least recently used until all of them together take no more
-than 2 GiB. An index in use is never removed. Indexes from before this
+and then the least recently written until all of them together take no
+more than 2 GiB. Loading a project writes to its index, so that's the one
+loaded longest ago. An index in use is never removed, even one loaded
+while the clear-out runs. Indexes from before this
 layout are built again and the old ones removed.

@@ -43,6 +43,39 @@ pub struct Outline {
     pub truncated: bool,
 }
 
+/// Why a source's outline couldn't be extracted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// It was stopped: cancelled, or out of its 500 ms. The same source
+    /// may well parse on another try, with the machine less busy.
+    Stopped,
+    /// It can't be extracted as things are, and why: the grammar can't be
+    /// loaded, or the source is too big. Trying again changes nothing
+    /// until the source or the grammar does.
+    Unparseable(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped => f.write_str("Outline parsing was cancelled or exceeded 500 ms."),
+            Self::Unparseable(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Self {
+        Self::Unparseable(why)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(why: &str) -> Self {
+        Self::Unparseable(why.to_owned())
+    }
+}
+
 /// One background parser and at most one loaded grammar. It may move between
 /// workers between slices; it never retains source trees or source text.
 pub struct OutlineParser {
@@ -122,18 +155,20 @@ impl OutlineParser {
     /// cancellation. Source larger than 4 MiB is deliberately refused.
     ///
     /// # Errors
-    /// If loading fails, the source exceeds a limit, or parsing is cancelled.
+    /// If loading fails or the source exceeds a limit, which another try
+    /// won't change, or parsing is cancelled or runs out of time, which
+    /// one may.
     pub fn extract(
         &mut self,
         pack: &Pack,
         text: &str,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<Outline, String> {
+    ) -> Result<Outline, Failure> {
         if text.len() > 4 * 1024 * 1024 {
             return Err("Source exceeds the 4 MiB outline limit.".into());
         }
         if cancelled() {
-            return Err("Outline extraction cancelled.".into());
+            return Err(Failure::Stopped);
         }
         let hash = self.fingerprint(pack)?;
         if self
@@ -179,7 +214,7 @@ impl OutlineParser {
                 None,
                 Some(ParseOptions::new().progress_callback(&mut progress)),
             )
-            .ok_or("Outline parsing was cancelled or exceeded 500 ms.")?;
+            .ok_or(Failure::Stopped)?;
         collect(&tree, text, &stop)
     }
 }
@@ -188,7 +223,7 @@ fn collect(
     tree: &tree_sitter::Tree,
     text: &str,
     stop: &dyn Fn() -> bool,
-) -> Result<Outline, String> {
+) -> Result<Outline, Failure> {
     let mut result = Outline {
         syntax_errors: tree.root_node().has_error(),
         ..Outline::default()
@@ -200,7 +235,7 @@ fn collect(
         let node = cursor.node();
         visited += 1;
         if visited % 256 == 0 && stop() {
-            return Err("Outline extraction cancelled or timed out.".into());
+            return Err(Failure::Stopped);
         }
         while scopes
             .last()
@@ -415,7 +450,10 @@ mod tests {
         let source = "fn example() {}";
         assert!(parser.extract(&pack, source, &|| false).is_ok());
         std::fs::write(&grammar, b"invalid wasm").unwrap();
-        assert!(parser.extract(&pack, source, &|| false).is_err());
+        assert!(matches!(
+            parser.extract(&pack, source, &|| false),
+            Err(Failure::Unparseable(_))
+        ));
         std::fs::write(&grammar, &wasm).unwrap();
         assert_eq!(
             parser
@@ -443,7 +481,11 @@ mod tests {
         );
         assert_eq!(outline.definitions[0].signature, "fn outer(a)");
         assert!(!outline.syntax_errors);
-        assert!(parser.extract(&pack(), "fn x() {}", &|| true).is_err());
+        assert_eq!(
+            parser.extract(&pack(), "fn x() {}", &|| true).err(),
+            Some(Failure::Stopped),
+            "stopped, not unparseable: another try may do"
+        );
     }
 
     #[test]
