@@ -20,8 +20,13 @@ use serde::{Deserialize, Serialize};
 
 /// Optional capabilities and launch restrictions shared by configured and
 /// packaged specialists. None means inherit, while an empty list selects none.
+///
+/// Kept with a chat, as JSON, for as long as the chat lasts: a field a
+/// later build adds is passed over by this one, rather than the whole
+/// definition being lost to a chat that's rolled back to it. Files are
+/// held to the fields known by `skills::skillsets::parse_specialist`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct Extras {
     pub(crate) when_to_use: String,
     pub(crate) user_invocable: bool,
@@ -52,8 +57,9 @@ impl Default for Extras {
 
 /// Per-request ceilings. USD is kept in millionths to avoid rounding while
 /// inheriting a ceiling. Turn and cost limits require native runtime support.
+/// Kept with a chat, as [`Extras`] is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct Budget {
     pub(crate) seconds: Option<u64>,
     pub(crate) turns: Option<u32>,
@@ -75,13 +81,30 @@ impl Budget {
         }
     }
 
-    pub(crate) fn check(self, agent: &str) -> Result<(), String> {
-        if agent != "claude" && (self.turns.is_some() || self.usd_micros.is_some()) {
-            return Err(format!(
-                "{agent} cannot enforce specialist turn or USD budgets through its adapter; use a time budget or Claude Code"
-            ));
-        }
-        Ok(())
+    /// Whether it sets a ceiling only an agent's adapter can hold a
+    /// session to: a number of turns, or a cost. Time is held by
+    /// clackatoo, whatever the agent.
+    pub(crate) fn needs_adapter(self) -> bool {
+        self.turns.is_some() || self.usd_micros.is_some()
+    }
+}
+
+/// A specialist's budget asks for what its chat's agent can't hold a
+/// session to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unenforced {
+    /// The agent, by name.
+    pub(crate) agent: String,
+}
+
+impl std::fmt::Display for Unenforced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} cannot enforce specialist turn or USD budgets through its adapter; \
+             use a time budget or Claude Code",
+            self.agent
+        )
     }
 }
 
@@ -356,11 +379,19 @@ impl Default for Specialist {
 }
 
 impl Specialist {
-    /// Supporting paths in instructions are relative to the owning bundle.
+    /// Its instructions, as its chat is given them: with the folder it
+    /// was read from, if it has one, as the supporting files they name
+    /// are beside it.
     pub(crate) fn instruction_text(&self) -> std::borrow::Cow<'_, str> {
-        self.extra.directories.first().and_then(|p|p.parent()).map_or_else(||std::borrow::Cow::Borrowed(self.instructions.as_str()),|directory| {
-            std::borrow::Cow::Owned(format!("Specialist directory: {}\nResolve relative supporting-file paths from this directory.\n\n{}",directory.display(),self.instructions))
-        })
+        let own_skills = self.extra.directories.first();
+        let Some(directory) = own_skills.and_then(|skills| skills.parent()) else {
+            return std::borrow::Cow::Borrowed(&self.instructions);
+        };
+        std::borrow::Cow::Owned(format!(
+            "Specialist directory: {}\nResolve relative supporting-file paths from this directory.\n\n{}",
+            directory.display(),
+            self.instructions
+        ))
     }
 
     /// The model it starts on with the agent called `agent`, if it names
@@ -387,43 +418,50 @@ pub(crate) const DEFAULT: &str = "general";
 
 /// The specialists clackatoo has, before the user's.
 pub(crate) fn built_in() -> Vec<Specialist> {
-    // The same Markdown format as user packages, embedded so installation needs
-    // no extra files. Parse once; listing and selecting roles do no disk work.
+    built_ins().to_vec()
+}
+
+/// The specialists clackatoo has built in, in the same Markdown format as
+/// the user's, embedded so installing clackatoo needs no extra files, and
+/// read once: listing and choosing them does no disk work.
+fn built_ins() -> &'static [Specialist] {
+    const FILES: [(&str, &str); 4] = [
+        (
+            "explore",
+            include_str!("../specialists/explore/SPECIALIST.md"),
+        ),
+        (
+            "research",
+            include_str!("../specialists/research/SPECIALIST.md"),
+        ),
+        ("plan", include_str!("../specialists/plan/SPECIALIST.md")),
+        (
+            DEFAULT,
+            include_str!("../specialists/general/SPECIALIST.md"),
+        ),
+    ];
     static BUILT_IN: std::sync::OnceLock<Vec<Specialist>> = std::sync::OnceLock::new();
-    BUILT_IN
-        .get_or_init(|| {
-            [
-                (
-                    "explore",
-                    include_str!("../specialists/explore/SPECIALIST.md"),
-                ),
-                (
-                    "research",
-                    include_str!("../specialists/research/SPECIALIST.md"),
-                ),
-                ("plan", include_str!("../specialists/plan/SPECIALIST.md")),
-                (
-                    DEFAULT,
-                    include_str!("../specialists/general/SPECIALIST.md"),
-                ),
-            ]
-            .into_iter()
-            .map(|(expected, text)| {
-                let (name, _, includes, specialist) = crate::skills::specialist_files::parse(text)
-                    .expect("valid built-in specialist");
-                assert_eq!(
-                    name, expected,
-                    "built-in specialist name matches its folder"
-                );
-                assert!(
-                    includes.is_empty(),
-                    "built-in specialists are self-contained"
-                );
-                specialist
-            })
-            .collect()
-        })
-        .clone()
+    BUILT_IN.get_or_init(|| {
+        let read = |(expected, text): (&str, &str)| {
+            let (name, _, includes, specialist) =
+                crate::skills::specialist_files::parse(text).expect("valid built-in specialist");
+            assert_eq!(
+                name, expected,
+                "built-in specialist name matches its folder"
+            );
+            assert!(
+                includes.is_empty(),
+                "built-in specialists are self-contained"
+            );
+            specialist
+        };
+        FILES.into_iter().map(read).collect()
+    })
+}
+
+/// Whether `name` is one of the specialists clackatoo has built in.
+pub(crate) fn is_built_in(name: &str) -> bool {
+    built_ins().iter().any(|specialist| specialist.name == name)
 }
 
 /// The choice `wanted` names, among `choices`: by its value, or else its

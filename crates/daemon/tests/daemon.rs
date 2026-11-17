@@ -17251,10 +17251,14 @@ fn a_specialist_time_budget_cancels_even_without_mcp_tools() {
 #[test]
 fn specialist_selection_scopes_skills_and_enforces_invocation_and_budget_controls() {
     let daemon = TestDaemon::start_with(|dir, config| {
+        // Started with a command of the user's, it says it's Claude
+        // Code's adapter, which is what holds a session to a budget of
+        // turns and cost: its name alone wouldn't do.
         config.agents.custom = vec![custom_agent(
             "claude",
             vec![
                 fake_agent().into(),
+                "--steering".into(),
                 "--log".into(),
                 dir.join("agent.log").into(),
             ],

@@ -7,6 +7,7 @@ model:
   codex: gpt-6-luna
 effort:
   codex: low
+skills: []
 limits: read-only
 ---
 

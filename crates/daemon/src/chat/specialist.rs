@@ -7,14 +7,21 @@ use super::{
 };
 use crate::specialists::{Budget, Specialist};
 
+/// What the chat's specialist is kept as, among what it has chosen: its
+/// definition, as JSON.
 const DEFINITION: &str = "clackatoo.specialist.definition";
+
+/// What the time its request must end by is kept as: milliseconds, as
+/// [`super::now`] counts them.
 const DEADLINE: &str = "clackatoo.specialist.deadline";
 
 impl HostedChat {
+    /// The specialist the chat was started as, as it was defined then.
     pub(crate) fn specialist_definition(&self) -> Option<&Specialist> {
         self.active_specialist.as_ref()
     }
 
+    /// Keeps `definition` as the chat's specialist, through upgrades too.
     pub(crate) fn remember_specialist(&mut self, definition: Specialist) {
         let json = serde_json::to_string(&definition).expect("specialist serializes");
         self.chosen.retain(|(id, _)| id != DEFINITION);
@@ -22,19 +29,38 @@ impl HostedChat {
         self.active_specialist = Some(definition);
     }
 
+    /// Takes the chat's specialist back from what it has chosen, as a
+    /// chat handed over by the build before is made again.
     pub(super) fn restore_specialist(&mut self) {
         for (id, _) in &mut self.chosen {
             if id == "clackatoo.profile" {
                 *id = SPECIALIST_SETTING.into();
             }
         }
-        self.active_specialist = self
-            .chosen
-            .iter()
-            .find(|(id, _)| id == DEFINITION)
-            .and_then(|(_, json)| serde_json::from_str(json).ok());
+        let kept = self.chosen.iter().find(|(id, _)| id == DEFINITION);
+        self.active_specialist = match kept.map(|(_, json)| serde_json::from_str(json)) {
+            None => None,
+            Some(Ok(definition)) => Some(definition),
+            // Kept by a build whose definitions this one can't read. Its
+            // limits on what the chat may do are kept apart, and hold.
+            Some(Err(err)) => {
+                log::warn!(
+                    "chat {}: its specialist's definition can't be read: {err}",
+                    self.id
+                );
+                self.notify(
+                    "This chat's specialist couldn't be read back, so its choice of skills \
+                     and MCP servers, who it may delegate to and its budgets are gone. Its \
+                     access limits still hold. Start a new chat to use the specialist whole."
+                        .to_owned(),
+                );
+                None
+            }
+        };
     }
 
+    /// Offers `specialists`, those the user may choose, in the chat's
+    /// settings.
     pub(crate) fn offer_specialists(&mut self, specialists: &[Specialist]) {
         self.specialist_choices = specialists
             .iter()
@@ -48,6 +74,7 @@ impl HostedChat {
         self.set_settings(self.agent_settings());
     }
 
+    /// The setting the chat's specialist is chosen with.
     pub(super) fn specialist_setting(&self) -> Setting {
         Setting {
             id: SPECIALIST_SETTING.into(),
@@ -58,15 +85,23 @@ impl HostedChat {
         }
     }
 
+    /// Starts the chat as `definition`, with `limits` on what it may do:
+    /// only before its first message, as a role changed later would leave
+    /// what was said under the old one. Its session is let go, and one
+    /// opened as the specialist says. The server has checked the chat's
+    /// agent can hold it to the specialist's budget.
     pub(crate) fn choose_specialist(
         &mut self,
         definition: Specialist,
         limits: crate::specialists::Limits,
     ) -> Result<Vec<Action>, String> {
         if self.answering() || !self.node.turns.is_empty() {
-            return Err("Choose a specialist before the first message. Open a new chat to use another specialist.".into());
+            return Err(
+                "Choose a specialist before the first message. Open a new chat to use another \
+                 specialist."
+                    .into(),
+            );
         }
-        definition.extra.budget.check(self.agent())?;
         let wanted = Wanted {
             model: definition.model_for(self.agent()).map(str::to_owned),
             effort: definition.effort_for(self.agent()).map(str::to_owned),
@@ -86,11 +121,14 @@ impl HostedChat {
         Ok(actions)
     }
 
+    /// The ceilings the chat's specialist puts on each request.
     pub(crate) fn specialist_budget(&self) -> Budget {
         self.specialist_definition()
             .map_or(Budget::default(), |s| s.extra.budget)
     }
 
+    /// Starts the time a request has, as one is sent, if the chat's
+    /// specialist gives it a time.
     pub(crate) fn start_specialist_clock(&mut self) {
         self.chosen.retain(|(id, _)| id != DEADLINE);
         if let Some(seconds) = self.specialist_budget().seconds {
@@ -103,6 +141,7 @@ impl HostedChat {
         }
     }
 
+    /// When the request being answered must end by, if it has a time.
     pub(crate) fn specialist_deadline(&self) -> Option<u64> {
         if !self.answering() {
             return None;
@@ -113,6 +152,7 @@ impl HostedChat {
             .and_then(|(_, s)| s.parse().ok())
     }
 
+    /// The request's time is up: it's cancelled, and the chat says so.
     pub(crate) fn specialist_timed_out(&mut self) -> Vec<Action> {
         self.chosen.retain(|(id, _)| id != DEADLINE);
         let mut actions = Vec::new();
@@ -188,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_visibility_and_unsupported_budgets_are_checked_before_selection() {
+    fn only_specialists_the_user_may_choose_are_in_the_picker() {
         let mut chat = chat();
         let hidden = Specialist {
             name: "helper".into(),
@@ -207,33 +247,54 @@ mod tests {
         ]);
         assert_eq!(chat.specialist_setting().choices.len(), 1);
         assert_eq!(chat.specialist_setting().choices[0].value, "visible");
-        let spec = crate::agents::AgentConfig::default().find("codex").unwrap();
-        let mut unsupported = HostedChat::new(
-            clackatoo_protocol::TerminalId(2),
-            clackatoo_protocol::Size::new(40, 10).unwrap(),
-            "/".into(),
-            &spec,
-            clackatoo_protocol::AgentTools::Off,
-            false,
-            false,
-        );
+    }
+
+    /// A definition a build to come kept, with a field this one doesn't
+    /// know, is read all the same; one that can't be read at all is said
+    /// in the chat, and its access limits, kept apart, still hold.
+    #[test]
+    fn a_kept_definition_is_read_leniently_and_one_that_cant_be_is_said() {
+        let spec = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
         let definition = Specialist {
-            name: "bounded".into(),
+            name: "review".into(),
             extra: Extras {
-                budget: Budget {
-                    turns: Some(3),
-                    ..Budget::default()
-                },
+                skills: Some(vec!["check".into()]),
                 ..Extras::default()
             },
             ..Specialist::default()
         };
-        assert!(
-            unsupported
-                .choose_specialist(definition, Limits::None)
-                .unwrap_err()
-                .contains("cannot enforce")
-        );
-        assert_eq!(unsupported.specialist(), None);
+        // A chat started as it, as it's handed to the next build.
+        let handed_over = || {
+            let mut chat = chat();
+            connect(&mut chat, "old");
+            chat.choose_specialist(definition.clone(), Limits::ReadOnly)
+                .unwrap();
+            chat.hand_over()
+        };
+        let mut handed = handed_over();
+        let kept = (handed.chosen.iter_mut())
+            .find(|(id, _)| id == DEFINITION)
+            .unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&kept.1).unwrap();
+        json["later"] = serde_json::json!(true);
+        json["extra"]["later"] = serde_json::json!([1]);
+        json["extra"]["budget"]["later"] = serde_json::json!("x");
+        kept.1 = json.to_string();
+        let resumed = HostedChat::resume(handed, &spec);
+        assert_eq!(resumed.specialist_definition(), Some(&definition));
+        assert_eq!(resumed.node().notice, None);
+
+        let mut handed = handed_over();
+        let kept = (handed.chosen.iter_mut())
+            .find(|(id, _)| id == DEFINITION)
+            .unwrap();
+        kept.1 = r#"{"name": 7}"#.to_owned();
+        let resumed = HostedChat::resume(handed, &spec);
+        assert_eq!(resumed.specialist_definition(), None);
+        assert_eq!(resumed.limits(), Limits::ReadOnly);
+        let notice = resumed.node().notice.clone().unwrap();
+        assert!(notice.contains("couldn't be read back"), "{notice}");
     }
 }

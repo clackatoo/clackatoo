@@ -1226,11 +1226,11 @@ mod tests {
     #[test]
     fn saving_never_approves_a_different_definition_discovered_after_the_write() {
         let dir = tempfile::tempdir().unwrap();
-        let roots = Roots {
-            home: dir.path().join("home"),
-            cwd: dir.path().join("repo"),
-            config: Some(dir.path().join("config")),
-        };
+        let roots = Roots::in_project(
+            dir.path().join("repo"),
+            dir.path().join("home"),
+            Some(dir.path().join("config")),
+        );
         std::fs::create_dir_all(roots.cwd.join(".agents")).unwrap();
         std::fs::write(roots.cwd.join(".git"), "fixture").unwrap();
         let path = roots.cwd.join(".agents/mcp.json");

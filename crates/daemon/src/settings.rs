@@ -167,6 +167,15 @@ impl Settings {
         }
     }
 
+    /// The shared skills never offered, as `skills.disabled` names them.
+    fn disabled_skills(&self) -> Vec<String> {
+        (self.text("skills.disabled"))
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// A provider override, or the shared native MCP preference.
     fn native_mcp(&self, name: &str) -> bool {
         match self.text(name).as_str() {
@@ -218,6 +227,13 @@ impl Settings {
         }
         if let Err(said) = crate::permissions::read_rules(&self.text("permissions.rules")) {
             return wrong("permissions.rules", said);
+        }
+        if let Some(name) = (self.disabled_skills().iter()).find(|name| !skill_name(name)) {
+            let said = format!(
+                "daemon.skills.disabled lists skills by name, with spaces or commas between: \
+                 {name:?} isn't a skill's name"
+            );
+            return wrong("skills.disabled", said);
         }
         Ok(())
     }
@@ -318,6 +334,7 @@ impl Settings {
                 notice_turns: self.number("subagents.notice_turns"),
             },
             keep_agents: self.on("upgrade.keep_agents"),
+            disabled_skills: self.disabled_skills().into(),
             claude_plugins: self.on("plugins.claude"),
             codex_plugins: self.on("plugins.codex"),
             claude_mcp: self.native_mcp("mcp.claude"),
@@ -745,6 +762,15 @@ pub fn rerun(dirs: &Dirs) -> Result<Settings, String> {
 /// running the config with it.
 pub fn change(dirs: &Dirs, info: &Info, value: Option<Value>) -> Result<Settings, String> {
     change_model(dirs, |model| model.set(info, value))
+}
+
+/// Whether `name` could be a shared skill's: the characters a `SKILL.md`
+/// may name itself with.
+fn skill_name(name: &str) -> bool {
+    name.len() <= 64
+        && (name.bytes()).all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_:".contains(&byte)
+        })
 }
 
 /// Saves rules under the config lock, preserving a concurrent writer's work.

@@ -1,157 +1,399 @@
 //! One catalogue of Agent Skills for every hosted agent. Disk work belongs
 //! on the skills worker, not the daemon's event loop. Only descriptions
-//! are advertised; bodies are supplied on explicit or model invocation.
+//! are advertised; a skill's instructions are read from its file each time
+//! it's asked for, by the user or the agent.
+//!
+//! What's found comes from three kinds of folder, trusted differently:
+//!
+//! - the user's own (`~/.agents`, clackatoo's config directory), read as
+//!   they are, links and all;
+//! - other products' (`~/.claude/skills`, `~/.codex/skills`, a project's
+//!   `.claude/skills`), read only as those products document them, one
+//!   folder deep, so what they keep there for themselves isn't offered;
+//! - a project's (`.agents` from the chat's working directory up to its
+//!   project root, never above), which anyone may have filled: read only
+//!   once the user trusts the folder (see [`crate::trust`]), never
+//!   through a link, and never in place of what clackatoo builds in.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
-use std::io::Read as _;
+use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clackatoo_protocol::{AgentCommand, Skill};
-use serde_yaml_ng::Value;
 
-const MOST_FILE: u64 = 64 * 1024;
-const MOST_SKILLS: usize = 256;
-const MOST_ENTRIES: usize = 2048;
-const MOST_CATALOGUE: usize = 24 * 1024;
-
+mod discover;
+pub(crate) mod front_matter;
+mod reading;
 mod skillsets;
 pub(crate) mod specialist_edit;
 pub(crate) mod specialist_files;
 
-/// The roots that determine a chat's catalogue, in precedence order.
+use reading::MOST_FILE;
+pub(crate) use reading::Tree;
+
+/// The most skills a catalogue holds, broken ones included.
+const MOST_SKILLS: usize = 256;
+
+/// The most folders looked into for one catalogue.
+const MOST_ENTRIES: usize = 2048;
+
+/// The most bytes of catalogue a chat's first message carries: about a
+/// thousand tokens, which every chat and every chat it starts pays.
+const MOST_ANNOUNCED: usize = 4 * 1024;
+
+/// About how many characters of a skill's description are announced.
+const MOST_DESCRIBED: usize = 200;
+
+/// The most characters kept of a description, as Settings shows it.
+const MOST_DESCRIPTION: usize = 1536;
+
+/// What ends a catalogue too long to announce whole.
+const MORE: &str = "More skills are available through list_skills.\n";
+
+/// What decides a chat's catalogue: where it's read from, and what the
+/// user has said of it. Two chats with the same share one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Roots {
+    /// The chat's working directory, absolute, with links followed.
     pub(crate) cwd: PathBuf,
+    /// The chat's project: the repository `cwd` is in, or else `cwd`.
+    /// Project folders are looked for from `cwd` up to here, never above.
+    pub(crate) project: PathBuf,
+    /// The user's home directory, with links followed.
     pub(crate) home: PathBuf,
+    /// clackatoo's config directory, if it has one.
     pub(crate) config: Option<PathBuf>,
+    /// Whether the user trusts the project's folders (see
+    /// [`crate::trust`]): what they hold isn't loaded otherwise.
+    pub(crate) trusted: bool,
+    /// The skills never offered, by name, as `skills.disabled` lists them.
+    pub(crate) disabled: Arc<[String]>,
 }
 
+impl Roots {
+    /// The roots of a chat in `cwd`, a trusted project of its own, with no
+    /// skill switched off.
+    #[cfg(test)]
+    pub(crate) fn in_project(cwd: PathBuf, home: PathBuf, config: Option<PathBuf>) -> Self {
+        Self {
+            project: cwd.clone(),
+            cwd,
+            home,
+            config,
+            trusted: true,
+            disabled: Arc::default(),
+        }
+    }
+
+    /// The folder the project's definitions are read below: the project's
+    /// root, or the working directory if that's somehow not in it.
+    pub(crate) fn project_top(&self) -> &Path {
+        if self.cwd.starts_with(&self.project) {
+            &self.project
+        } else {
+            &self.cwd
+        }
+    }
+
+    /// The folders a project's definitions are looked for in, nearest
+    /// first: the working directory and each folder above it, up to the
+    /// project's root. Never the home directory, whose folders are the
+    /// user's own, nor any folder home is in.
+    pub(crate) fn project_folders(&self) -> impl Iterator<Item = &Path> {
+        let top = self.project_top();
+        (self.cwd.ancestors())
+            .take_while(move |folder| folder.starts_with(top) && !self.home.starts_with(folder))
+    }
+}
+
+/// Why a specialist or a skillset that was found isn't offered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Why {
+    /// It's a project's, and the user hasn't trusted the project's folder.
+    Untrusted,
+    /// It's a project's, with the name of a specialist clackatoo builds in.
+    BuiltIn,
+    /// It can't be read, or what it says can't be used.
+    Broken(String),
+}
+
+impl std::fmt::Display for Why {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Untrusted => f.write_str(
+                "not loaded: this folder isn't trusted (clackatoo trust, or :trust, trusts it)",
+            ),
+            Self::BuiltIn => f.write_str(
+                "not loaded: a project can't replace a built-in specialist; \
+                 give it another name, or keep it in your own folders",
+            ),
+            Self::Broken(problem) => write!(f, "broken: {problem}"),
+        }
+    }
+}
+
+/// A specialist or a skillset that was found but isn't offered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unloaded {
+    /// Its folder.
+    pub(crate) path: PathBuf,
+    /// Where it was found, as a skill's source says it.
+    pub(crate) source: String,
+    pub(crate) why: Why,
+}
+
+/// What a specialist needs that the catalogue doesn't have, so a chat
+/// can't start as it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Missing {
+    #[allow(missing_docs, reason = "said by their names")]
+    Skill { specialist: String, name: String },
+    #[allow(missing_docs, reason = "said by their names")]
+    Skillset { specialist: String, name: String },
+    #[allow(missing_docs, reason = "said by their names")]
+    Server { specialist: String, name: String },
+    /// A folder of skills of its own, which has gone since it was chosen.
+    Directory(PathBuf),
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Skill { specialist, name } => {
+                write!(f, "specialist {specialist} needs missing skill {name}")
+            }
+            Self::Skillset { specialist, name } => {
+                write!(f, "specialist {specialist} needs missing skillset {name}")
+            }
+            Self::Server { specialist, name } => {
+                write!(f, "specialist {specialist} needs missing MCP server {name}")
+            }
+            Self::Directory(path) => {
+                write!(f, "missing specialist skill directory {}", path.display())
+            }
+        }
+    }
+}
+
+/// Why a skill's instructions aren't given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Unloadable {
+    /// The catalogue has none by the name.
+    Unknown(String),
+    /// It's there, but can't be used.
+    Broken { name: String, problem: String },
+    /// Only the user invokes it, and an agent asked.
+    UserOnly(String),
+    /// Only agents choose it, and the user asked.
+    AgentOnly(String),
+    /// Its file has gone since it was found.
+    Gone(String),
+}
+
+impl std::fmt::Display for Unloadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(name) => write!(f, "No skill named {name}. Use list_skills."),
+            Self::Broken { name, problem } => write!(f, "Skill {name} cannot run: {problem}"),
+            Self::UserOnly(name) => write!(
+                f,
+                "Skill {name} is user-only: the user invokes it with /{name}."
+            ),
+            Self::AgentOnly(name) => write!(
+                f,
+                "Skill {name} is agent-only and cannot be invoked with a slash command."
+            ),
+            Self::Gone(name) => write!(
+                f,
+                "Skill {name} is no longer where it was found. Use list_skills."
+            ),
+        }
+    }
+}
+
+/// A skill that can be offered: what's shown of it, and where its
+/// instructions are read from when it's asked for.
 #[derive(Clone, Debug)]
 struct Entry {
     info: Skill,
-    body: String,
+    /// What its arguments are, for the slash menu.
     hint: Option<String>,
+    /// The tree its folder is in, and the folder, below it.
+    tree: Tree,
+    folder: PathBuf,
 }
 
-/// A snapshot, refreshed when a chat opens, Settings opens, or a skill is
-/// loaded through MCP. The same snapshot supplies commands and descriptions.
+/// The skills found in some folders: each name once, as the first folder
+/// to have it has it, whether that copy can be used or not.
+#[derive(Clone, Debug, Default)]
+struct Found {
+    entries: BTreeMap<String, Arc<Entry>>,
+    /// Those that can't be used, with why as their `problem`.
+    invalid: Vec<Skill>,
+}
+
+impl Found {
+    /// Whether a skill called `name` has been found, usable or not: a
+    /// later, less specific copy never takes its place.
+    fn has(&self, name: &str) -> bool {
+        self.entries.contains_key(name) || self.is_invalid(name)
+    }
+
+    fn is_invalid(&self, name: &str) -> bool {
+        self.invalid.iter().any(|invalid| invalid.name == name)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len() + self.invalid.len()
+    }
+
+    /// Takes `entry`, unless its name is taken.
+    fn offer(&mut self, entry: &Arc<Entry>) {
+        if !self.has(&entry.info.name) {
+            self.entries
+                .insert(entry.info.name.clone(), Arc::clone(entry));
+        }
+    }
+
+    /// Takes `info`, a skill that can't be used, unless its name is taken.
+    fn refuse(&mut self, info: Skill) {
+        if !self.has(&info.name) {
+            self.invalid.push(info);
+        }
+    }
+
+    /// Takes everything in `other` whose name isn't taken, said to come
+    /// from `source`.
+    fn include(&mut self, other: &Self, source: &str) {
+        for entry in other.entries.values() {
+            let mut entry = entry.as_ref().clone();
+            source.clone_into(&mut entry.info.source);
+            self.offer(&Arc::new(entry));
+        }
+        for info in &other.invalid {
+            let mut info = info.clone();
+            source.clone_into(&mut info.source);
+            self.refuse(info);
+        }
+    }
+
+    /// Stops offering the skills called `disabled`, which stay listed with
+    /// why.
+    fn switch_off(&mut self, disabled: &[String]) {
+        for name in disabled {
+            if let Some(entry) = self.entries.remove(name) {
+                let mut info = entry.info.clone();
+                info.problem = Some("switched off by the skills.disabled option".to_owned());
+                info.implicit = false;
+                info.user_invocable = false;
+                self.invalid.push(info);
+            }
+        }
+    }
+}
+
+/// A snapshot of what's on disk, read off the event loop. The same
+/// snapshot supplies commands, descriptions and specialists.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Catalogue {
-    entries: BTreeMap<String, Arc<Entry>>,
-    invalid: Vec<Skill>,
+    skills: Found,
+    /// A project's skills that aren't loaded as its folder isn't trusted:
+    /// shown in Settings, and no part of anything else.
+    untrusted: Vec<Skill>,
     pub(crate) specialists: BTreeMap<String, crate::specialists::Specialist>,
     pub(crate) specialist_sources: BTreeMap<String, PathBuf>,
     pub(crate) specialist_texts: BTreeMap<PathBuf, String>,
     pub(crate) specialist_includes: BTreeMap<String, Vec<String>>,
+    /// The specialists and skillsets found but not offered, by name.
+    pub(crate) unloaded: BTreeMap<String, Unloaded>,
     sets: BTreeMap<String, Option<Vec<PathBuf>>>,
-    directories: BTreeMap<PathBuf, Arc<Directory>>,
+    directories: BTreeMap<PathBuf, Arc<Found>>,
     /// All file IO happens during discovery; selecting a session is in-memory.
     pub(crate) managed_mcp: crate::managed_mcp::config::Registry,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Directory {
-    entries: BTreeMap<String, Arc<Entry>>,
-    invalid: Vec<Skill>,
+    /// A fingerprint of everything found in the user's own folders, which
+    /// every chat's catalogue shares: when it changes, the catalogues read
+    /// for other folders are out of date too.
+    personal: u64,
 }
 
 impl Catalogue {
+    /// The catalogue a chat started as `specialist` gets: the skills and
+    /// MCP servers the specialist chooses, or all of them if it chooses
+    /// none. In memory only.
     pub(crate) fn scoped(
         &self,
         specialist: &crate::specialists::Specialist,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Missing> {
         let mut scoped = Self {
-            specialists: self.specialists.clone(),
-            specialist_sources: self.specialist_sources.clone(),
-            specialist_texts: self.specialist_texts.clone(),
-            specialist_includes: self.specialist_includes.clone(),
-            sets: self.sets.clone(),
-            directories: self.directories.clone(),
-            managed_mcp: self.managed_mcp.clone(),
-            ..Self::default()
+            skills: Found::default(),
+            ..self.clone()
         };
-        let source = format!("Specialist {}", specialist.name);
+        let own = specialist.name.clone();
+        let source = format!("Specialist {own}");
         for directory in &specialist.extra.directories {
             scoped.include_directory(directory, &source)?;
         }
-        if let Some(sets) = &specialist.extra.skillsets {
-            for name in sets {
-                let directories = self.sets.get(name).ok_or_else(|| {
-                    format!(
-                        "specialist {} needs missing skillset {name}",
-                        specialist.name
-                    )
-                })?;
-                if let Some(directories) = directories {
-                    for directory in directories {
-                        scoped
-                            .include_directory(directory, &format!("{source} · skillset {name}"))?;
-                    }
-                }
+        for name in specialist.extra.skillsets.iter().flatten() {
+            let directories = self.sets.get(name).ok_or_else(|| Missing::Skillset {
+                specialist: own.clone(),
+                name: name.clone(),
+            })?;
+            for directory in directories.iter().flatten() {
+                scoped.include_directory(directory, &format!("{source} · skillset {name}"))?;
             }
         }
         if let Some(skills) = &specialist.extra.skills {
             for name in skills {
-                let entry = self.entries.get(name).ok_or_else(|| {
-                    format!("specialist {} needs missing skill {name}", specialist.name)
-                })?;
-                if !scoped.invalid.iter().any(|bad| bad.name == *name) {
-                    scoped
-                        .entries
-                        .entry(name.clone())
-                        .or_insert_with(|| entry.clone());
-                }
+                let entry = self
+                    .skills
+                    .entries
+                    .get(name)
+                    .ok_or_else(|| Missing::Skill {
+                        specialist: own.clone(),
+                        name: name.clone(),
+                    })?;
+                scoped.skills.offer(entry);
             }
         } else if specialist.extra.skillsets.is_none() {
-            for (name, entry) in &self.entries {
-                if !scoped.invalid.iter().any(|bad| bad.name == *name) {
-                    scoped
-                        .entries
-                        .entry(name.clone())
-                        .or_insert_with(|| entry.clone());
-                }
+            // It chooses nothing: it gets what any chat here gets.
+            for entry in self.skills.entries.values() {
+                scoped.skills.offer(entry);
             }
-            for info in &self.invalid {
-                if !scoped.entries.contains_key(&info.name)
-                    && !scoped.invalid.iter().any(|bad| bad.name == info.name)
-                {
-                    scoped.invalid.push(info.clone());
-                }
+            for info in &self.skills.invalid {
+                scoped.skills.refuse(info.clone());
             }
         }
-        for (name, entry) in &self.entries {
-            if !scoped.entries.contains_key(name)
-                && !scoped.invalid.iter().any(|bad| bad.name == *name)
-            {
-                let mut info = entry.info.clone();
-                info.problem = Some(format!("not enabled for specialist {}", specialist.name));
-                info.implicit = false;
-                info.user_invocable = false;
-                scoped.invalid.push(info);
-            }
+        // The rest stay known, so asking for one says why it's refused.
+        for entry in self.skills.entries.values() {
+            let mut info = entry.info.clone();
+            info.problem = Some(format!("not enabled for specialist {own}"));
+            info.implicit = false;
+            info.user_invocable = false;
+            scoped.skills.refuse(info);
         }
         scoped.scope_mcp(specialist)?;
         Ok(scoped)
     }
 
-    fn scope_mcp(&mut self, specialist: &crate::specialists::Specialist) -> Result<(), String> {
-        if let Some(names) = &specialist.extra.mcp_servers {
+    fn scope_mcp(&mut self, specialist: &crate::specialists::Specialist) -> Result<(), Missing> {
+        let extra = &specialist.extra;
+        if let Some(names) = &extra.mcp_servers {
             for name in names {
                 if !self.managed_mcp.servers.contains_key(name) {
-                    return Err(format!(
-                        "specialist {} needs missing MCP server {name}",
-                        specialist.name
-                    ));
+                    return Err(Missing::Server {
+                        specialist: specialist.name.clone(),
+                        name: name.clone(),
+                    });
                 }
             }
             self.managed_mcp
                 .servers
                 .retain(|name, _| names.contains(name));
-        } else if specialist.extra.skillsets.is_some() || !specialist.extra.directories.is_empty() {
-            let mut directories = specialist.extra.directories.clone();
-            for name in specialist.extra.skillsets.iter().flatten() {
+        } else if extra.skillsets.is_some() || !extra.directories.is_empty() {
+            let mut directories = extra.directories.clone();
+            for name in extra.skillsets.iter().flatten() {
                 directories.extend(self.sets.get(name).into_iter().flatten().flatten().cloned());
             }
             self.managed_mcp.servers.retain(|_, bound| {
@@ -161,11 +403,7 @@ impl Catalogue {
                             .is_some_and(|root| bound.path == root.join("mcp.json"))
                     })
             });
-        }
-        if specialist.extra.mcp_servers.is_none()
-            && specialist.extra.skillsets.is_none()
-            && specialist.extra.directories.is_empty()
-        {
+        } else {
             self.managed_mcp
                 .servers
                 .retain(|_, bound| bound.available_by_default);
@@ -176,266 +414,76 @@ impl Catalogue {
         Ok(())
     }
 
-    fn discover_mcp(&mut self, roots: &Roots, packages: &skillsets::Packages) {
-        let bundle_roots = packages
-            .sets
-            .values()
-            .flatten()
-            .flatten()
-            .chain(
-                packages
-                    .specialists
-                    .values()
-                    .flat_map(|s| &s.extra.directories),
-            )
-            .filter_map(|dir| dir.parent().map(Path::to_owned))
-            .collect();
-        self.managed_mcp = crate::managed_mcp::config::Registry::discover(roots, &bundle_roots);
-        let public_bundles: std::collections::BTreeSet<_> = packages
-            .directories
-            .values()
-            .flatten()
-            .filter_map(|(dir, _)| dir.parent().map(Path::to_owned))
-            .collect();
-        for bound in self.managed_mcp.servers.values_mut() {
-            if !bound.editable
-                && !bound
-                    .path
-                    .parent()
-                    .is_some_and(|root| public_bundles.contains(root))
-            {
-                bound.available_by_default = false;
-                bound.source = bound.source.replacen("Skillset", "Specialist", 1);
-            }
-        }
-    }
-
-    pub(crate) fn discover(roots: &Roots) -> Self {
-        let mut found = Self::default();
-        let mut folders = Vec::new();
-        // Closest project wins, stopping at the repository boundary.
-        for directory in roots.cwd.ancestors() {
-            if directory == roots.home {
-                break;
-            }
-            folders.push((directory.join(".agents/skills"), "Project", false));
-            folders.push((
-                directory.join(".claude/skills"),
-                "Project · Claude folder",
-                false,
-            ));
-            folders.push((directory.join(".agents/specialists"), "Project", true));
-            folders.push((directory.join(".agents/skillsets"), "Project", true));
-            if directory.join(".git").exists() || directory == roots.home {
-                break;
-            }
-        }
-        if let Some(config) = &roots.config {
-            folders.push((config.join("skills"), "Personal · clackatoo", false));
-            folders.push((config.join("specialists"), "Personal · clackatoo", true));
-            folders.push((config.join("skillsets"), "Personal · clackatoo", true));
-        }
-        folders.extend([
-            (roots.home.join(".agents/skills"), "Personal", false),
-            (roots.home.join(".agents/specialists"), "Personal", true),
-            (roots.home.join(".agents/skillsets"), "Personal", true),
-            (
-                roots.home.join(".claude/skills"),
-                "Personal · Claude folder",
-                false,
-            ),
-            (
-                roots.home.join(".codex/skills"),
-                "Personal · Codex folder",
-                false,
-            ),
-        ]);
-        let mut seen = HashSet::new();
-        let packages = skillsets::discover(&folders);
-        found.specialists = packages.specialists.clone();
-        found.specialist_sources = packages.sources.clone();
-        found.specialist_texts = packages.texts.clone();
-        found.specialist_includes = packages.includes.clone();
-        found.sets = packages.sets.clone();
-        found.discover_mcp(roots, &packages);
-
-        let mut budget = MOST_ENTRIES;
-        for (folder, source, bundles) in folders {
-            if bundles {
-                for (directory, label) in packages.directories.get(&folder).into_iter().flatten() {
-                    found.walk(directory, label, 0, &mut seen, &mut budget);
-                }
-            } else {
-                found.walk(&folder, source, 0, &mut seen, &mut budget);
-            }
-        }
-        // Materialize all selectable package directories on this worker.
-        // Scoping a chat on the daemon loop only selects cached entries.
-        let paths: std::collections::BTreeSet<_> = packages
-            .sets
-            .values()
-            .flatten()
-            .flatten()
-            .chain(
-                packages
-                    .specialists
-                    .values()
-                    .flat_map(|s| &s.extra.directories),
-            )
-            .cloned()
-            .collect();
-        let mut remaining = MOST_ENTRIES;
-        for path in paths.into_iter().take(MOST_ENTRIES) {
-            let mut directory = Self::default();
-            directory.walk(&path, "Skillset", 0, &mut HashSet::new(), &mut remaining);
-            found.directories.insert(
-                path,
-                Arc::new(Directory {
-                    entries: directory.entries,
-                    invalid: directory.invalid,
-                }),
-            );
-        }
-        found
-    }
-
-    fn include_directory(&mut self, path: &Path, source: &str) -> Result<(), String> {
+    fn include_directory(&mut self, path: &Path, source: &str) -> Result<(), Missing> {
         let directory = self
             .directories
             .get(path)
-            .ok_or_else(|| format!("missing specialist skill directory {}", path.display()))?;
-        for (name, entry) in &directory.entries {
-            if !self.invalid.iter().any(|bad| bad.name == *name) {
-                let mut entry = entry.as_ref().clone();
-                entry.info.source = source.into();
-                self.entries
-                    .entry(name.clone())
-                    .or_insert_with(|| Arc::new(entry));
-            }
-        }
-        for info in &directory.invalid {
-            if !self.entries.contains_key(&info.name)
-                && !self.invalid.iter().any(|bad| bad.name == info.name)
-            {
-                let mut info = info.clone();
-                info.source = source.into();
-                self.invalid.push(info);
-            }
-        }
+            .ok_or_else(|| Missing::Directory(path.to_owned()))?;
+        self.skills.include(directory, source);
         Ok(())
     }
 
-    fn walk(
-        &mut self,
-        folder: &Path,
-        source: &str,
-        depth: usize,
-        seen: &mut HashSet<PathBuf>,
-        budget: &mut usize,
-    ) {
-        if depth > 4 || self.entries.len() + self.invalid.len() >= MOST_SKILLS {
-            return;
-        }
-        let Ok(real) = folder.canonicalize() else {
-            return;
-        };
-        if !seen.insert(real) {
-            return;
-        }
-        // Compatibility skill roots can also contain native plugin bundles.
-        // Their nested skills must not bypass the native-plugin opt-in.
-        if folder.join(".claude-plugin").is_dir() || folder.join(".codex-plugin").is_dir() {
-            return;
-        }
-        let path = folder.join("SKILL.md");
-        if path.symlink_metadata().is_ok() {
-            let path = path.canonicalize().unwrap_or(path);
-            match parse(&path, source) {
-                Ok(entry) => {
-                    if self
-                        .invalid
-                        .iter()
-                        .any(|invalid| invalid.name == entry.info.name)
-                    {
-                        return;
-                    }
-                    // A less specific copy never silently changes the chosen one.
-                    self.entries
-                        .entry(entry.info.name.clone())
-                        .or_insert_with(|| Arc::new(entry));
-                }
-                Err(problem) => {
-                    let name = folder
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    if self.entries.contains_key(&name)
-                        || self.invalid.iter().any(|invalid| invalid.name == name)
-                    {
-                        return;
-                    }
-                    self.invalid.push(Skill {
-                        name,
-                        description: String::new(),
-                        path: path.to_string_lossy().into(),
-                        source: source.into(),
-                        problem: Some(problem),
-                        implicit: false,
-                        user_invocable: false,
-                    });
-                }
-            }
-            return;
-        }
-        if *budget == 0 {
-            return;
-        }
-        let Ok(children) = folder.read_dir() else {
-            return;
-        };
-        let mut children: Vec<_> = children.take(*budget).filter_map(Result::ok).collect();
-        children.sort_by_key(std::fs::DirEntry::file_name);
-        for child in children {
-            if *budget == 0 {
-                break;
-            }
-            *budget -= 1;
-            // Dot folders other than .system are implementation details.
-            let name = child.file_name();
-            if name.to_string_lossy().starts_with('.') && name != ".system" {
-                continue;
-            }
-            self.walk(&child.path(), source, depth + 1, seen, budget);
-        }
-    }
-
+    /// Every skill found, for Settings and `list_skills`: those offered,
+    /// then those that can't be, with why, and the specialists and
+    /// skillsets that weren't loaded, which have nowhere else to be shown.
     pub(crate) fn infos(&self) -> Vec<Skill> {
-        self.entries
-            .values()
+        let unloaded = self.unloaded.iter().map(|(name, unloaded)| Skill {
+            name: name.clone(),
+            description: String::new(),
+            path: unloaded.path.to_string_lossy().into_owned(),
+            source: format!("{} · specialist or skillset", unloaded.source),
+            problem: Some(unloaded.why.to_string()),
+            implicit: false,
+            user_invocable: false,
+        });
+        (self.skills.entries.values())
             .map(|entry| entry.info.clone())
-            .chain(self.invalid.clone())
+            .chain(self.skills.invalid.iter().cloned())
+            .chain(self.untrusted.iter().cloned())
+            .chain(unloaded)
             .collect()
     }
 
+    /// Whether `other`, read later from the same places, offers what this
+    /// does: the same skills, specialists and MCP servers.
+    pub(crate) fn same_offer(&self, other: &Self) -> bool {
+        self.infos() == other.infos()
+            && self.specialists == other.specialists
+            && self.managed_mcp == other.managed_mcp
+    }
+
+    /// Whether the project has skills or specialists that aren't loaded,
+    /// as its folder isn't trusted.
+    pub(crate) fn holds_untrusted(&self) -> bool {
+        let unloaded = (self.unloaded.values()).any(|unloaded| unloaded.why == Why::Untrusted);
+        unloaded || !self.untrusted.is_empty()
+    }
+
+    /// The fingerprint of what the user's own folders hold.
+    pub(crate) fn personal(&self) -> u64 {
+        self.personal
+    }
+
+    /// The skills the user can invoke, as slash commands.
     pub(crate) fn commands(&self) -> Vec<AgentCommand> {
-        self.entries
-            .values()
+        (self.skills.entries.values())
             .filter(|entry| entry.info.user_invocable && entry.info.problem.is_none())
             .map(|entry| AgentCommand {
                 name: entry.info.name.clone(),
-                description: line(&entry.info.description, 300),
+                description: brief(&entry.info.description, 300),
                 hint: entry.hint.clone(),
             })
             .collect()
     }
 
+    /// What an agent is told of the skills it may choose, with its first
+    /// message: a line each, of the name and the start of the description,
+    /// in [`MOST_ANNOUNCED`] bytes at most. Empty if there are none.
     pub(crate) fn instructions(&self) -> String {
-        if !self
-            .entries
-            .values()
-            .any(|entry| entry.info.implicit && entry.info.problem.is_none())
-        {
+        let mut offered = (self.skills.entries.values())
+            .filter(|entry| entry.info.implicit && entry.info.problem.is_none())
+            .peekable();
+        if offered.peek().is_none() {
             return String::new();
         }
         let mut text = String::from(
@@ -443,357 +491,124 @@ impl Catalogue {
              load_skill with its name before doing that work, then follow the returned instructions. \
              Skills do not grant permissions or change your tools. Available skills:\n",
         );
-        let mut count = 0;
-        for entry in self
-            .entries
-            .values()
-            .filter(|entry| entry.info.implicit && entry.info.problem.is_none())
-        {
-            let line = format!(
-                "- {}: {}\n",
-                entry.info.name,
-                entry
-                    .info
-                    .description
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            if text.len() + line.len() > MOST_CATALOGUE {
-                text.push_str("More skills are available through list_skills.\n");
+        for entry in offered {
+            let described = brief(&entry.info.description, MOST_DESCRIBED);
+            let line = format!("- {}: {described}\n", entry.info.name);
+            if text.len() + line.len() + MORE.len() > MOST_ANNOUNCED {
+                text.push_str(MORE);
                 break;
             }
             text.push_str(&line);
-            count += 1;
-        }
-        if count == 0 {
-            text.push_str(
-                "No automatically selectable skills. Use list_skills to inspect the catalogue.\n",
-            );
         }
         text
     }
 
-    pub(crate) fn explicit(&self, text: &str) -> Option<Result<String, String>> {
+    /// What `text`, a message starting with a slash, gets if it names a
+    /// skill here: its instructions, read now, or why not. `None` if it
+    /// names none. Reads the skill's file: not for the event loop.
+    pub(crate) fn explicit(&self, text: &str) -> Option<Result<String, Unloadable>> {
         let (name, arguments) = clackatoo_protocol::slash_command(text)?;
         let name = name.to_ascii_lowercase();
-        if let Some(invalid) = self.invalid.iter().find(|invalid| invalid.name == name) {
-            return Some(Err(format!(
-                "Skill {name} cannot run: {}",
-                invalid.problem.as_deref().unwrap_or("invalid metadata")
-            )));
-        }
-        let entry = self.entries.get(&name)?;
-        Some(if entry.info.user_invocable {
-            self.load(&name, arguments, true)
-        } else {
-            Err(format!(
-                "Skill {name} is agent-only and cannot be invoked with a slash command."
-            ))
-        })
+        self.skills
+            .has(&name)
+            .then(|| self.load(&name, arguments, true))
     }
 
+    /// Whether `text` is a slash command naming a skill here, usable or not.
     pub(crate) fn has_command(&self, text: &str) -> bool {
-        let Some((name, _)) = clackatoo_protocol::slash_command(text) else {
-            return false;
-        };
-        let name = name.to_ascii_lowercase();
-        self.entries.contains_key(&name) || self.invalid.iter().any(|entry| entry.name == name)
+        clackatoo_protocol::slash_command(text)
+            .is_some_and(|(name, _)| self.skills.has(&name.to_ascii_lowercase()))
     }
 
+    /// The instructions of the skill called `name`, with `arguments`, as
+    /// its file has them now: asked for by the user, if `explicit`, or
+    /// else by an agent. Reads the file: not for the event loop.
     pub(crate) fn load(
         &self,
         name: &str,
         arguments: &str,
         explicit: bool,
-    ) -> Result<String, String> {
-        let entry = self
-            .entries
-            .get(name)
-            .ok_or_else(|| format!("No skill named {name}. Use list_skills."))?;
-        if let Some(problem) = &entry.info.problem {
-            return Err(format!("Skill {name} cannot run: {problem}"));
-        }
-        if !explicit && !entry.info.implicit {
-            return Err(format!(
-                "Skill {name} is user-only: the user invokes it with /{name}."
+    ) -> Result<String, Unloadable> {
+        let broken = |problem: &str| Unloadable::Broken {
+            name: name.to_owned(),
+            problem: problem.to_owned(),
+        };
+        if let Some(invalid) = self.skills.invalid.iter().find(|info| info.name == name) {
+            return Err(broken(
+                invalid.problem.as_deref().unwrap_or("invalid metadata"),
             ));
         }
-        let directory = Path::new(&entry.info.path)
-            .parent()
-            .unwrap_or(Path::new("/"));
-        let body = entry
+        let entry =
+            (self.skills.entries.get(name)).ok_or_else(|| Unloadable::Unknown(name.to_owned()))?;
+        // Read again, so an edit applies and a skill that's gone isn't
+        // run from memory.
+        let now = match discover::read(&entry.tree, &entry.folder, &entry.info.source) {
+            Ok(Some(now)) => now,
+            Ok(None) => return Err(Unloadable::Gone(name.to_owned())),
+            Err(problem) => return Err(broken(&problem)),
+        };
+        let info = &now.entry.info;
+        if let Some(problem) = &info.problem {
+            return Err(broken(problem));
+        }
+        if explicit && !info.user_invocable {
+            return Err(Unloadable::AgentOnly(name.to_owned()));
+        }
+        if !explicit && !info.implicit {
+            return Err(Unloadable::UserOnly(name.to_owned()));
+        }
+        let directory = Path::new(&info.path).parent().unwrap_or(Path::new("/"));
+        let body = now
             .body
-            .replace("${CLAUDE_SKILL_DIR}", &directory.to_string_lossy())
-            .replace("$ARGUMENTS", arguments);
+            .replace("${CLAUDE_SKILL_DIR}", &directory.to_string_lossy());
+        // Where the skill says its arguments go, or else after it.
+        let placed = body.contains("$ARGUMENTS");
+        let body = body.replace("$ARGUMENTS", arguments);
         let mut text = format!(
             "Use the {name} skill for this request.\nSource: {}\nSkill directory: {}\n\
              Resolve supporting files and scripts relative to this directory. \
              Existing tool permissions still apply.\n\n{body}",
-            entry.info.path,
+            info.path,
             directory.display(),
         );
-        if !arguments.is_empty() {
+        if !placed && !arguments.is_empty() {
             let _ = write!(text, "\n\nUser arguments: {arguments}");
         }
         Ok(text)
     }
 }
 
-fn parse(path: &Path, source: &str) -> Result<Entry, String> {
-    let file =
-        crate::regular::open(path, crate::regular::Links::Refuse).map_err(|err| err.to_string())?;
-    let mut text = String::new();
-    file.take(MOST_FILE + 1)
-        .read_to_string(&mut text)
-        .map_err(|err| err.to_string())?;
-    if text.len() as u64 > MOST_FILE {
-        return Err("SKILL.md is larger than 64 KiB".into());
-    }
-    let text = text.replace("\r\n", "\n");
-    let rest = text
-        .strip_prefix("---\n")
-        .ok_or("Missing YAML frontmatter")?;
-    let (metadata, body) = rest
-        .split_once("\n---\n")
-        .ok_or("Unclosed YAML frontmatter")?;
-    let metadata: Value =
-        serde_yaml_ng::from_str(metadata).map_err(|err| format!("Invalid YAML: {err}"))?;
-    let string = |key: &str| {
-        metadata[key]
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    };
-    let name = string("name").ok_or("Missing name")?;
-    if name.len() > 64
-        || !name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_:".contains(&byte)
-        })
-    {
-        return Err(
-            "Skill names use at most 64 lowercase letters, numbers, hyphens, underscores or colons"
-                .into(),
-        );
-    }
-    let description = string("description").ok_or("Missing description")?;
-    let mut problems = Vec::new();
-    if clackatoo_protocol::INTERFACE_COMMANDS.contains(&name)
-        || clackatoo_protocol::KNOWN_COMMANDS.contains(&name)
-    {
-        problems.push("the name is reserved by a built-in command".to_owned());
-    }
-    for key in [
-        "context",
-        "agent",
-        "model",
-        "effort",
-        "hooks",
-        "allowed-tools",
-        "disallowed-tools",
-        "background",
-        "shell",
-        "arguments",
-    ] {
-        if !metadata[key].is_null() {
-            problems.push(format!(
-                "{key} requires runtime-specific execution, which shared skills do not support"
-            ));
-        }
-    }
-    if body.contains("!`") {
-        problems.push("dynamic shell expansion is not supported".into());
-    }
-    if body.contains("$ARGUMENTS[") {
-        problems.push("positional argument expansion is not supported; use $ARGUMENTS".into());
-    }
-    let boolean = |key: &str, default| -> Result<bool, String> {
-        match &metadata[key] {
-            Value::Null => Ok(default),
-            Value::Bool(value) => Ok(*value),
-            _ => Err(format!("{key} must be true or false")),
-        }
-    };
-    let implicit_policy = implicit_policy(path)?;
-    Ok(Entry {
-        info: Skill {
-            name: name.into(),
-            description: line(description, 1536),
-            path: path.to_string_lossy().into(),
-            source: source.into(),
-            problem: (!problems.is_empty()).then(|| problems.join("; ")),
-            implicit: implicit_policy && !boolean("disable-model-invocation", false)?,
-            user_invocable: boolean("user-invocable", true)?,
-        },
-        body: body.trim().into(),
-        hint: string("argument-hint").map(|hint| line(hint, 100)),
-    })
+/// Mixes `item` into `stamp`, a fingerprint of what's been found.
+fn mix(stamp: &mut u64, item: impl std::hash::Hash) {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    stamp.hash(&mut hasher);
+    item.hash(&mut hasher);
+    *stamp = hasher.finish();
 }
 
-fn implicit_policy(path: &Path) -> Result<bool, String> {
-    let policy_path = path
-        .parent()
-        .unwrap_or(Path::new("/"))
-        .join("agents/openai.yaml");
-    if policy_path.exists() {
-        let policy = crate::regular::read_small(&policy_path, MOST_FILE)
-            .ok_or("Could not read agents/openai.yaml (limit 64 KiB)")?;
-        let policy: Value = serde_yaml_ng::from_str(&policy)
-            .map_err(|err| format!("Invalid agents/openai.yaml: {err}"))?;
-        Ok(match &policy["policy"]["allow_implicit_invocation"] {
-            Value::Null => true,
-            Value::Bool(allow) => *allow,
-            _ => return Err("policy.allow_implicit_invocation must be true or false".into()),
-        })
-    } else {
-        Ok(true)
-    }
-}
-
+/// `text` on one line, with nothing hidden in it, cut to `most`
+/// characters: for names and the like, shown whole or not at all.
 pub(crate) fn line(text: &str, most: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     crate::server::unhidden(&text).chars().take(most).collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    pub(super) fn skill(root: &Path, name: &str, extra: &str, body: &str) {
-        std::fs::create_dir_all(root).unwrap();
-        std::fs::write(root.join("SKILL.md"), format!("---\nname: {name}\ndescription: >\n  A useful procedure\n  for this project.\n{extra}---\n{body}")).unwrap();
+/// `text` on one line, with nothing hidden in it, in `most` characters at
+/// most: one that's longer is cut at the end of a word, where there's one
+/// in its last third, and ends in an ellipsis to say so.
+pub(crate) fn brief(text: &str, most: usize) -> String {
+    let whole = line(text, usize::MAX);
+    if whole.chars().count() <= most {
+        return whole;
     }
-
-    #[test]
-    fn compatibility_folders_do_not_import_native_plugin_bundles() {
-        let dir = tempfile::tempdir().unwrap();
-        let native = dir.path().join(".claude/skills/native-bundle");
-        std::fs::create_dir_all(native.join(".claude-plugin")).unwrap();
-        skill(&native.join("skills/hidden"), "hidden", "", "native skill");
-        skill(
-            &dir.path().join(".agents/skills/shared"),
-            "shared",
-            "",
-            "shared skill",
-        );
-        let catalogue = Catalogue::discover(&Roots {
-            cwd: dir.path().to_owned(),
-            home: dir.path().to_owned(),
-            config: None,
-        });
-        assert!(catalogue.load("hidden", "", false).is_err());
-        assert!(catalogue.load("shared", "", false).is_ok());
-    }
-
-    #[test]
-    fn closest_project_wins_and_catalogue_is_lazy() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        let repo = home.join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        skill(
-            &home.join(".agents/skills/build"),
-            "build",
-            "",
-            "PERSONAL BODY",
-        );
-        skill(
-            &repo.join(".agents/skills/build"),
-            "build",
-            "",
-            "PROJECT BODY $ARGUMENTS",
-        );
-        let roots = Roots {
-            cwd: repo,
-            home,
-            config: None,
-        };
-        let found = Catalogue::discover(&roots);
-        assert_eq!(found.infos().len(), 1);
-        assert!(!found.instructions().contains("PROJECT BODY"));
-        let loaded = found.load("build", "release", false).unwrap();
-        assert!(loaded.contains("PROJECT BODY release"));
-        assert!(!loaded.contains("PERSONAL BODY"));
-        assert!(
-            found
-                .explicit("/build release")
-                .unwrap()
-                .unwrap()
-                .contains("PROJECT BODY release")
-        );
-    }
-
-    #[test]
-    fn invocation_controls_and_unsupported_execution_are_respected() {
-        let dir = tempfile::tempdir().unwrap();
-        skill(
-            &dir.path().join(".agents/skills/manual"),
-            "manual",
-            "disable-model-invocation: true\n",
-            "manual body",
-        );
-        skill(
-            &dir.path().join(".agents/skills/forked"),
-            "forked",
-            "context: fork\n",
-            "forked body",
-        );
-        skill(
-            &dir.path().join(".agents/skills/automatic"),
-            "automatic",
-            "user-invocable: false\n",
-            "automatic body",
-        );
-        let roots = Roots {
-            cwd: dir.path().into(),
-            home: dir.path().into(),
-            config: None,
-        };
-        let found = Catalogue::discover(&roots);
-        assert!(!found.instructions().contains("manual:"));
-        assert!(found.load("manual", "", false).is_err());
-        assert!(found.explicit("/manual").unwrap().is_ok());
-        assert!(found.load("forked", "", true).is_err());
-        assert!(found.explicit("/automatic").unwrap().is_err());
-        assert!(found.load("automatic", "", false).is_ok());
-        assert_eq!(found.commands().len(), 1);
-    }
-
-    #[test]
-    fn codex_invocation_policy_is_preserved_and_broken_overrides_do_not_fall_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        let repo = home.join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let folder = repo.join(".agents/skills/manual");
-        skill(&folder, "manual", "", "manual body");
-        std::fs::create_dir_all(folder.join("agents")).unwrap();
-        std::fs::write(
-            folder.join("agents/openai.yaml"),
-            "policy:\n  allow_implicit_invocation: false\n",
-        )
-        .unwrap();
-        skill(
-            &home.join(".agents/skills/broken"),
-            "broken",
-            "",
-            "wrong fallback body",
-        );
-        let broken = repo.join(".agents/skills/broken");
-        std::fs::create_dir_all(&broken).unwrap();
-        std::fs::write(
-            broken.join("SKILL.md"),
-            "---\nname: broken\n---\nMissing description",
-        )
-        .unwrap();
-        let found = Catalogue::discover(&Roots {
-            cwd: repo,
-            home,
-            config: None,
-        });
-        assert!(found.load("manual", "", false).is_err());
-        assert!(found.explicit("/MANUAL").unwrap().is_ok());
-        assert!(found.explicit("/broken").unwrap().is_err());
-        assert!(!found.instructions().contains("wrong fallback"));
-    }
+    let kept: String = whole.chars().take(most.saturating_sub(1)).collect();
+    let cut = match kept.rfind(' ') {
+        Some(at) if at >= kept.len() - kept.len() / 3 => &kept[..at],
+        _ => &kept,
+    };
+    let cut = cut.trim_end_matches(|c: char| c.is_ascii_punctuation() || c == ' ');
+    format!("{cut}…")
 }
+
+#[cfg(test)]
+mod tests;
