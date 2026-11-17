@@ -8,8 +8,9 @@ related:
   - clackatoo/reference/mcp-servers
 ---
 
-Open `:Settings`, then **Permissions** under **Agents**. The first control
-chooses the permission engine for new chats:
+Open `:Settings`, then **Permissions** under **Agents**. The page says under
+its title which machine's chats it's for. Its first control, **Permission
+engine**, chooses the engine for new chats:
 
 - **Provider permissions** uses the agent's own permission mode.
 - **Clackatoo rules** reviews approval requests with your rules and asks you
@@ -57,14 +58,30 @@ sandbox permissions require it too.
 
 ## Add or edit a rule
 
-Choose **Add rule**, or **Edit** beside an existing rule. Choose its decision,
-match kind and target, then **Save** or <kbd>Ctrl</kbd>+<kbd>S</kbd>. Enter
-finishes a text field; Escape undoes that field edit. **Cancel** discards the
-draft. **Delete** asks for a second press to confirm.
+The page lists each rule as a sentence, such as "Allow the command `git
+status`". Choose **New rule**, or `a`, or **Edit** beside an existing rule:
+it opens as a form, titled `Permissions › New rule`. Choose what it does
+**When it matches**, what **It matches** (a tool, a command, reading files or
+changing files) and its target, then **Save** or
+<kbd>Ctrl</kbd>+<kbd>S</kbd>. Typing on a field starts it, <kbd>Enter</kbd>
+finishes it and goes to the next, <kbd>Tab</kbd> goes from field to field,
+and <kbd>Esc</kbd> puts back what the field held. A target that can't be
+right says why underneath. With changes in the form, <kbd>Esc</kbd> and
+**Cancel** ask before they're thrown away. **Delete this rule** asks for a
+second press to confirm.
+
+A rule that allows a whole tool which runs commands, such as `claude/Bash`,
+reads "Allow any command through `claude/Bash`", and its form says so as it's
+typed, since that is what it allows.
 
 The daemon validates and saves the complete rule list. A failed save keeps
-the draft. If another window changes the rules while a draft is open, reload
-and review that change before saving; an old draft cannot overwrite it.
+the form, and says why. A rule is saved into the list as the daemon has it
+then, so a change made meanwhile in another window is kept; a rule that was
+itself changed or deleted meanwhile is refused, for you to open again.
+
+A list this window can't read, as a newer daemon's may be, is never shown as
+empty: the page says why under its title, lists no rules, and adds none, so
+nothing is saved over it.
 
 Decisions have this precedence, regardless of list order:
 
@@ -84,8 +101,9 @@ to stop sending subsequent permission requests.
 | Read | `{project}` | Recognized file reads beneath this chat's project |
 | Edit | `~/src/example` | Recognized file edits beneath this directory |
 
-Tool rules can also require **Exact arguments**, a complete JSON argument
-value. Blank matches any arguments; `null` matches JSON null specifically.
+Tool rules can also say **Only with these arguments**, a complete JSON
+argument value. Left empty, it matches any arguments; `null` matches JSON null
+specifically.
 For managed tool calls, this is the tool’s argument value. Other MCP methods
 match their complete request parameters, including resource URIs and prompt
 names. Keep credentials out of rules.
@@ -111,9 +129,10 @@ A Deny still refuses them.
 
 ## Recent decisions
 
-The page keeps the latest 64 rule decisions in memory. Choose **Refresh** to
-read new ones. Each records the chat, tool identity, decision and matching
-rule number, or why approval was needed. It does not record action arguments,
+The daemon keeps the latest 64 rule decisions in memory, and the page lists
+them under **Recent decisions**, read again every two seconds while it's
+shown. Each says what was decided of which tool, in which chat and roughly
+how long ago, with the matching rule number, or why approval was needed. It does not record action arguments,
 command text or file contents. The history clears when the daemon restarts
 or upgrades.
 
@@ -126,7 +145,8 @@ become human questions before an upgrade; they are never replayed.
 
 The page saves `permissions.engine` and `permissions.rules` in the daemon's
 `daemon/settings.lua`. Your `daemon/init.lua` can set them instead; the page
-then shows that the corresponding setting is controlled by your config.
+then shows where, as `init.lua:12`, on the engine or on each rule, which a
+click opens, and offers no way to add or edit a rule.
 
 ```lua
 daemon.permissions.engine = "provider"

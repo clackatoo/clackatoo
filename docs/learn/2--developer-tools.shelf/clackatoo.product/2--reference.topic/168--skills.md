@@ -37,14 +37,18 @@ usual tools to follow the procedure.
 ## Browsing skills
 
 Open `:Settings`, then **Skills** under the **Agents** category in Easy mode.
-Each entry shows its description, source, invocation rules and file path.
+The page lists the skills for the project of the pane that was focused when
+Settings opened, and says which under its title. Each entry shows its
+description, where it's from, who starts it (you with its slash command,
+agents when it fits, or both) and its file's path.
 Skills from a skillset include the bundle's name in their source. Search for
 that name to see the bundle's skills.
-**Open file**, or <kbd>Enter</kbd> on a row, opens its `SKILL.md` in an editor
-on the workspace's machine. The Settings search also finds skills by name,
-description, source and path.
+**Open its file**, or <kbd>Enter</kbd> on a row, opens its `SKILL.md` in an
+editor on the workspace's machine. The Settings search also finds skills by
+name, description, source and path. With no skills, the page says where to
+put one.
 
-Reopen Settings to refresh the list. New chats, `list_skills` and
+The list is read each time the page is shown. New chats, `list_skills` and
 `load_skill` also discover skills again. A slash invocation reads the current
 file, so edits to an existing procedure apply on its next invocation; a
 removed or newly invalid skill is refused rather than run from a stale copy.
@@ -126,10 +130,11 @@ defaults and limits. Its instructions and private skills do not merge into
 the containing role.
 
 Unknown fields and future format numbers are refused, with the reason in
-the daemon log. MCP servers and hooks are reserved for later capability
-support. Bundles run no installation commands, fetch no dependencies and
-start no services. Install one by placing or symlinking its folder into a
-skillset directory, then reopen Settings to refresh.
+the daemon log. Hooks are reserved for later capability support; a bundle's
+MCP servers are described under [Bundled MCP servers](#bundled-mcp-servers).
+Bundles run no installation commands, fetch no dependencies and start no
+services. Install one by placing or symlinking its folder into a skillset
+directory; the Skills page lists it the next time it's shown.
 
 ## Writing a skill
 
