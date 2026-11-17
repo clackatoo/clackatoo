@@ -536,16 +536,11 @@ impl SettingsMenu {
     /// Goes to the page of `catalogue` and opens the thing at `at` in its
     /// list, as a search that found it does.
     fn open_found(&mut self, catalogue: Catalogued, at: usize) -> Outcome {
-        let server = match catalogue {
-            Catalogued::Servers => self.mcp.servers().get(at).map(|server| server.name.clone()),
-            Catalogued::Specialists | Catalogued::Rules => None,
-        };
         self.show_catalogue(catalogue);
-        let went = match (catalogue, server) {
-            (Catalogued::Servers, Some(name)) => self.mcp.open_named(&name),
-            (Catalogued::Specialists, _) => self.specialists.open_listed(at),
-            (Catalogued::Rules, _) => self.permissions.open_at(at),
-            (Catalogued::Servers, None) => None,
+        let went = match catalogue {
+            Catalogued::Servers => self.mcp.open_listed(at),
+            Catalogued::Specialists => self.specialists.open_listed(at),
+            Catalogued::Rules => self.permissions.open_at(at),
         };
         if let Some(row) = went {
             self.easy_went(row);
@@ -1567,18 +1562,22 @@ impl SettingsMenu {
         };
         let hints = self.hints(searching, form.as_ref(), lists, on);
         let buttons = match &form {
-            Some(form) => vec![
-                FootButton {
+            Some(form) => {
+                let back = FootButton {
                     label: if form.changed { "Cancel" } else { "Back" }.into(),
                     does: Foot::Cancel,
                     main: false,
-                },
-                FootButton {
+                };
+                let save = FootButton {
                     label: form.save.clone(),
                     does: Foot::Save,
                     main: true,
-                },
-            ],
+                };
+                // A form that only shows something has nothing to save.
+                (std::iter::once(back))
+                    .chain((!form.save.is_empty()).then_some(save))
+                    .collect()
+            }
             None => Vec::new(),
         };
         EasyView {
@@ -1848,7 +1847,13 @@ impl SettingsMenu {
         }
         if let Some(form) = form {
             let esc = if form.changed { "cancel" } else { "back" };
-            return vec![("Tab", "next field"), ("Ctrl+S", "save"), ("Esc", esc)];
+            // One that only shows something has nothing to save.
+            let save = (!form.save.is_empty()).then_some(("Ctrl+S", "save"));
+            return [("Tab", "next field")]
+                .into_iter()
+                .chain(save)
+                .chain([("Esc", esc)])
+                .collect();
         }
         let adds = match self.easy.page() {
             Page::Mcp if *self.mcp.listing() == Listing::Ready => Some(("a", "add a server")),
@@ -2131,7 +2136,12 @@ impl SettingsMenu {
         let open = ControlView::Button(ButtonView::plain("Open"));
         match catalogue {
             Catalogued::Servers => match self.mcp.servers().get(at) {
-                Some(server) => RowView::new(server.name.as_str(), "MCP Servers", open),
+                // Two of one name are told apart by where they're kept.
+                Some(server) => RowView::new(
+                    server.name.as_str(),
+                    format!("MCP Servers · {}", self.mcp.where_kept(at)),
+                    open,
+                ),
                 None => RowView::new("", "", ControlView::None),
             },
             Catalogued::Specialists => match self.specialists.files().get(at) {

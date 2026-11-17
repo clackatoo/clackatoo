@@ -81,6 +81,9 @@ pub(super) struct ServerForm {
     opened: Held,
     /// What's wrong with a field, said under it.
     errors: Marks<Field>,
+    /// It's a project's server nobody has reviewed, with the name of one
+    /// of the user's own: shown as it is, to be reviewed, not changed.
+    pub(super) shown_only: bool,
     /// Remove was pressed once: again removes it.
     pub(super) removing: bool,
     /// Forget was pressed once: again forgets its login.
@@ -180,6 +183,7 @@ impl ServerForm {
             opened: held.clone(),
             held,
             errors: Marks::default(),
+            shown_only: false,
             removing: false,
             forgetting: false,
         }
@@ -199,8 +203,13 @@ impl ServerForm {
     /// and its tools. Saved as something else meanwhile, somewhere else,
     /// a form with no changes shows it as it is now; one with changes
     /// keeps them, and what they were made to.
-    pub(super) fn follow(&mut self, server: &McpServerInfo) {
+    ///
+    /// `waits` says whether it's still a project's server waiting to take
+    /// the place of the user's own, which is only shown: once enabled, it's
+    /// one to change as any other.
+    pub(super) fn follow(&mut self, server: &McpServerInfo, waits: bool) {
         self.original = Some(server.clone());
+        self.shown_only = waits;
         if self.changed_elsewhere() && !self.changed() {
             self.held = Held::of(Some(server));
             self.opened = self.held.clone();
@@ -245,7 +254,7 @@ impl ServerForm {
     /// Whether `field` can be changed: a server keeps its name and where
     /// it's kept once it's saved.
     fn fixed(&self, field: Field) -> bool {
-        self.original.is_some() && matches!(field, Field::Name | Field::Scope)
+        self.shown_only || self.original.is_some() && matches!(field, Field::Name | Field::Scope)
     }
 
     /// `field`'s text, if it's a box of text that can be typed into.
@@ -463,6 +472,9 @@ impl ServerForm {
         typing: Option<&Typing>,
         home: &str,
     ) -> RowView {
+        if self.shown_only {
+            return self.shown(field, home);
+        }
         let held = &self.held;
         let boxed = |value: &str, hint: &'static str, wide: bool| {
             ControlView::Field(FieldView {
@@ -569,6 +581,54 @@ impl ServerForm {
             ),
         };
         self.errors.under(field, row)
+    }
+
+    /// `field`'s row for a server that's only shown: what it holds, as
+    /// words, with nothing to press or type into.
+    fn shown(&self, field: Field, home: &str) -> RowView {
+        let held = &self.held;
+        let said = |label: &str, value: &str| {
+            RowView::new(label, "", ControlView::None).with_status(value, Ink::Plain)
+        };
+        // What may be long goes under its label, where it has room.
+        let under = |label: &str, value: &str| {
+            let value = if value.trim().is_empty() {
+                "none"
+            } else {
+                value
+            };
+            RowView::new(label, "", ControlView::None).noted(value, Ink::Plain)
+        };
+        let yes_or_no = |on: bool| if on { "Yes" } else { "No" };
+        match field {
+            Field::Name => said("Name", &held.name),
+            Field::Scope => self.kept_in(home),
+            Field::Transport => said(
+                "Connects by",
+                match held.transport {
+                    Transport::Command => "A command",
+                    Transport::Http => "An address",
+                },
+            ),
+            Field::Command => under("Command", &held.command),
+            Field::Arguments => under("Arguments", &held.arguments),
+            Field::Environment => under("Environment", &held.environment),
+            Field::Url => under("Address", &held.url),
+            Field::Headers => under("Headers", &held.headers),
+            Field::SignInFirst => said("Sign in with a browser", yes_or_no(held.sign_in_first)),
+            Field::ClientId => under("Client ID", &held.client_id),
+            Field::Scopes => under("Scopes", &held.scopes),
+            Field::Enabled => said("Enabled", yes_or_no(held.enabled)),
+            Field::ReadOnly => said("Read-only server", yes_or_no(held.read_only)),
+            Field::Timeout => said(
+                "Give up connecting after",
+                &format!("{} seconds", held.timeout),
+            ),
+            Field::CallTimeout => said(
+                "Give up on a tool call after",
+                &format!("{} seconds", held.call_timeout),
+            ),
+        }
     }
 
     /// Where a saved server is kept, which a form doesn't change, its

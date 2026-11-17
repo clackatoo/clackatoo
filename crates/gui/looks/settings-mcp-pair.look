@@ -1,0 +1,22 @@
+# A project's server nobody has reviewed, with the name of one of the
+# user's own: both are listed, told apart by where they're kept, and the
+# project's opens only to be shown and reviewed.
+size 1280x900
+file .agents/mcp.json <<END
+{"servers":{"search":{"command":"project-search","args":["--stdio","--index","/srv/index"],"env":{"TOKEN":{"secret":"search-token"}}}}}
+END
+# One of the user's own, of the same name, in their home.
+shell mkdir -p ~/.agents && echo '{"servers":{"search":{"command":"my-search","args":["--stdio"]}}}' > ~/.agents/mcp.json
+sleep 500
+keys <C-;>:Settings<CR>
+wait-for Appearance
+keys }}}}}}}}
+wait-for Add a server
+shot pair-list
+keys j<CR>
+wait-for as this project has it
+shot pair-shown
+size 640x780
+shot pair-shown-640
+keys <Esc>
+shot pair-list-640

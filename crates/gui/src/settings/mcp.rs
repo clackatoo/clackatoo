@@ -67,11 +67,35 @@ impl Provider {
     }
 }
 
+/// Which server a row or a form is of: its name and the file it's kept
+/// in, as a project's server nobody has reviewed is listed beside the
+/// user's own of the same name, which it waits to take the place of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Kept {
+    name: String,
+    path: String,
+}
+
+impl Kept {
+    /// Which server `server` is.
+    fn of(server: &McpServerInfo) -> Self {
+        Self {
+            name: server.name.clone(),
+            path: server.path.clone(),
+        }
+    }
+
+    /// Whether `server` is the one.
+    fn is(&self, server: &McpServerInfo) -> bool {
+        self.name == server.name && self.path == server.path
+    }
+}
+
 /// A row of the page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Row {
-    /// A server in the list, by its name.
-    Server(String),
+    /// A server in the list.
+    Server(Kept),
     /// Adds a private credential.
     Credential,
     /// Copies servers over from an agent's own settings.
@@ -165,7 +189,7 @@ pub(super) struct Mcp {
     sign_ins: BTreeMap<String, Option<String>>,
     /// The button the keys are on in a server's row of the list, if not
     /// its last: the server's name, and the button's place.
-    button: Option<(String, usize)>,
+    button: Option<(Kept, usize)>,
     /// A credential's form says where it's kept: the daemon's machine, if
     /// it isn't this one.
     pub(super) machine: Option<String>,
@@ -263,9 +287,25 @@ impl Mcp {
         }
     }
 
-    /// The server called `name`, as listed.
+    /// The server called `name` that chats use, and that a test, a save
+    /// and a removal by that name act on: not a project's that waits to
+    /// take its place.
     fn server(&self, name: &str) -> Option<&McpServerInfo> {
-        self.servers.iter().find(|server| server.name == name)
+        (self.servers.iter()).find(|server| server.name == name && !self.waiting(server))
+    }
+
+    /// The server `kept` says, as listed.
+    fn kept(&self, kept: &Kept) -> Option<&McpServerInfo> {
+        self.servers.iter().find(|server| kept.is(server))
+    }
+
+    /// Whether `server` is a project's that nobody has reviewed, listed
+    /// beside the user's own of its name: chats use that one until this
+    /// is enabled, which puts it in its place.
+    fn waiting(&self, server: &McpServerInfo) -> bool {
+        !server.trusted
+            && (self.servers.iter())
+                .any(|other| other.name == server.name && other.path != server.path)
     }
 
     /// Whether something `is` says is what was asked is still waiting for
@@ -361,20 +401,24 @@ impl Mcp {
 
     /// Takes in the servers as the daemon lists them.
     fn listed(&mut self, mut servers: Vec<McpServerInfo>) {
-        servers.sort_by(|a, b| a.name.cmp(&b.name));
+        // By name, the one chats use before one waiting to replace it.
+        servers.sort_by(|a, b| (&a.name, !a.trusted, &a.path).cmp(&(&b.name, !b.trusted, &b.path)));
         self.servers = servers;
         self.listing = Listing::Ready;
         // A server's form follows how it's connected; one whose server
         // has gone goes back to the list.
-        if let View::Server(form) = &mut self.view
-            && let Some(original) = &form.original
-        {
-            match self
-                .servers
-                .iter()
-                .find(|server| server.name == original.name)
-            {
-                Some(server) => form.follow(server),
+        let shown = match &self.view {
+            View::Server(form) => form.original.as_ref().map(Kept::of),
+            _ => None,
+        };
+        let Some(shown) = shown else {
+            return;
+        };
+        let now = self.kept(&shown).cloned();
+        let waits = now.as_ref().is_some_and(|server| self.waiting(server));
+        if let View::Server(form) = &mut self.view {
+            match now {
+                Some(server) => form.follow(&server, waits),
                 None if !form.changed() => self.view = View::List,
                 None => {}
             }
@@ -484,7 +528,7 @@ impl Mcp {
     /// rest stay as listed.
     fn merged(&mut self, servers: Vec<McpServerInfo>) {
         let mut all = std::mem::take(&mut self.servers);
-        all.retain(|listed| !servers.iter().any(|server| server.name == listed.name));
+        all.retain(|listed| !servers.iter().any(|server| Kept::of(listed).is(server)));
         all.extend(servers);
         self.listed(all);
     }
@@ -510,7 +554,7 @@ impl Mcp {
                     return Vec::new();
                 }
                 let servers: Vec<Row> = (self.servers.iter())
-                    .map(|server| Row::Server(server.name.clone()))
+                    .map(|server| Row::Server(Kept::of(server)))
                     .collect();
                 let none = servers.is_empty().then(|| {
                     "No servers yet. Add one, or copy over the ones Claude Code or Codex \
@@ -560,6 +604,14 @@ impl Mcp {
         let Some(server) = &form.original else {
             return vec![("", None, fields)];
         };
+        // One waiting to take the place of the user's own is only shown,
+        // with the one thing to do about it.
+        if form.shown_only {
+            return vec![
+                ("Connection", None, vec![Row::Status, Row::Review]),
+                ("Server", None, fields),
+            ];
+        }
         let mut connection = vec![Row::Status];
         let http = server::over_http(server);
         if !server.trusted {
@@ -606,9 +658,16 @@ impl Mcp {
             .collect()
     }
 
-    /// Where server `name`'s row is in the list.
+    /// Where the row of the server called `name` that chats use is in the
+    /// list.
     fn place(&self, name: &str) -> Option<usize> {
-        (self.rows().iter()).position(|row| matches!(row, Row::Server(each) if each == name))
+        let kept = self.server(name).map(Kept::of)?;
+        self.place_of(&kept)
+    }
+
+    /// Where server `kept`'s row is in the list.
+    fn place_of(&self, kept: &Kept) -> Option<usize> {
+        (self.rows().iter()).position(|row| matches!(row, Row::Server(each) if each == kept))
     }
 
     /// What server `server`'s Sign in button says, and whether it acts:
@@ -658,21 +717,23 @@ impl Mcp {
         let last = buttons.len() - 1;
         match &self.button {
             // One that can't be pressed any more isn't where the keys stay.
-            Some((name, at))
-                if *name == server.name && buttons.get(*at).is_some_and(|b| b.enabled) =>
-            {
+            Some((kept, at)) if kept.is(server) && buttons.get(*at).is_some_and(|b| b.enabled) => {
                 *at
             }
             _ => last,
         }
     }
 
-    /// Opens server `name`'s form.
-    fn open(&mut self, name: &str) -> Did {
-        let Some(server) = self.server(name).cloned() else {
+    /// Opens server `kept`'s form: one waiting to take the place of the
+    /// user's own is only shown, to be reviewed.
+    fn open(&mut self, kept: &Kept) -> Did {
+        let Some(server) = self.kept(kept).cloned() else {
             return Did::Nothing;
         };
-        self.view = View::Server(Box::new(ServerForm::new(Some(server))));
+        let waits = self.waiting(&server);
+        let mut form = ServerForm::new(Some(server));
+        form.shown_only = waits;
+        self.view = View::Server(Box::new(form));
         self.typing = None;
         self.notice = None;
         // To the first thing there is to do: review it, or test it.
@@ -680,9 +741,23 @@ impl Mcp {
         Did::Went(first.unwrap_or(0))
     }
 
-    /// Opens server `name`'s form, as a search that found it does.
-    pub(super) fn open_named(&mut self, name: &str) -> Option<usize> {
-        match self.open(name) {
+    /// Where the server listed at `at` is kept, in a word or two, for a
+    /// search to tell two of one name apart.
+    pub(super) fn where_kept(&self, at: usize) -> String {
+        match self.servers.get(at) {
+            Some(server) if self.waiting(server) => {
+                format!("{}, waiting to be reviewed", server::source_said(server))
+            }
+            Some(server) => server::source_said(server),
+            None => String::new(),
+        }
+    }
+
+    /// Opens the form of the server listed at `at`, as a search that
+    /// found it does.
+    pub(super) fn open_listed(&mut self, at: usize) -> Option<usize> {
+        let kept = self.servers.get(at).map(Kept::of)?;
+        match self.open(&kept) {
             Did::Went(row) => Some(row),
             _ => None,
         }
@@ -691,8 +766,9 @@ impl Mcp {
     /// A row of the list, as it's drawn.
     fn list_row(&self, row: &Row) -> RowView {
         match row {
-            Row::Server(name) => {
-                let Some(server) = self.server(name) else {
+            Row::Server(kept) => {
+                let name = &kept.name;
+                let Some(server) = self.kept(kept) else {
                     return RowView::new(name.as_str(), "", ControlView::None);
                 };
                 let (state, ink) = server::state_said(server);
@@ -712,7 +788,15 @@ impl Mcp {
                     buttons,
                 };
                 let view = RowView::new(name.as_str(), help, control).with_status(state, ink);
-                if let Some(failed) = self.sign_in_failed(server) {
+                if self.waiting(server) {
+                    view.noted(
+                        format!(
+                            "Chats use your own {name} until you review and enable this one, \
+                             which then takes its place."
+                        ),
+                        Ink::Caution,
+                    )
+                } else if let Some(failed) = self.sign_in_failed(server) {
                     view.noted(failed, Ink::Warning)
                 } else if server.detail.is_empty()
                     || !server.trusted
@@ -1035,15 +1119,16 @@ impl Catalogue for Mcp {
             form.forgetting = false;
         }
         match row {
-            Row::Server(name) => {
-                let Some(server) = self.server(&name) else {
+            Row::Server(kept) => {
+                let Some(server) = self.kept(&kept) else {
                     return Did::Nothing;
                 };
+                let name = kept.name.clone();
                 let buttons = self.list_buttons(server);
                 let pressed = choice.unwrap_or_else(|| self.button_on(server));
                 // Its last button opens it; the one before signs in.
                 if pressed + 1 >= buttons.len() {
-                    return self.open(&name);
+                    return self.open(&kept);
                 }
                 if !buttons[pressed].enabled {
                     return Did::Nothing;
@@ -1092,8 +1177,8 @@ impl Catalogue for Mcp {
         };
         match row {
             // From one of a server's buttons to the next.
-            Row::Server(name) => {
-                let Some(server) = self.server(&name) else {
+            Row::Server(kept) => {
+                let Some(server) = self.kept(&kept) else {
                     return Did::Nothing;
                 };
                 let last = self.list_buttons(server).len() - 1;
@@ -1102,7 +1187,7 @@ impl Catalogue for Mcp {
                 if to == on {
                     return Did::Nothing;
                 }
-                self.button = Some((name, to));
+                self.button = Some((kept, to));
                 Did::Changed
             }
             Row::Field(field) => match &mut self.view {
@@ -1120,6 +1205,18 @@ impl Catalogue for Mcp {
             |save: &str, saving_said: &str| if saving { saving_said } else { save }.to_owned();
         Some(match &self.view {
             View::List => return None,
+            View::Server(form) if form.shown_only => FormView {
+                title: format!("{}, as this project has it", form.name()),
+                subtitle: format!(
+                    "Chats use your own server called {} until you review and enable this one, \
+                     which then takes its place. It's shown here as the project has it.",
+                    form.name()
+                ),
+                changed: false,
+                // Nothing of it is changed here, so there's nothing to save.
+                save: String::new(),
+                saving: false,
+            },
             View::Server(form) => FormView {
                 title: match &form.original {
                     Some(server) => server.name.clone(),
@@ -1213,6 +1310,7 @@ impl Catalogue for Mcp {
         };
         match &mut self.view {
             View::List => Did::Nothing,
+            View::Server(form) if form.shown_only => Did::Nothing,
             View::Server(form) => match form.action() {
                 Ok(action) => self.ask(action, "Saving it…"),
                 Err(field) => {
@@ -1281,7 +1379,7 @@ impl Catalogue for Mcp {
                     .unwrap_or(0)
             }
             View::Server(form) => (form.original.as_ref())
-                .and_then(|server| self.place(&server.name))
+                .and_then(|server| self.place_of(&Kept::of(server)))
                 .unwrap_or(0),
             View::Credential { .. } => (self.rows().iter())
                 .position(|row| *row == Row::Credential)
