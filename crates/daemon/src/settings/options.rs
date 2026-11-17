@@ -83,6 +83,10 @@ options! {
     /// Allow Codex to load its own plugins and skill catalogue.
     /// Applied when the daemon starts or upgrades.
     "plugins.codex" ("Allow Codex's native plugins") in Agents: Kind::Bool => Value::Bool(false);
+    /// The shared skills never offered to any agent, by name, with spaces
+    /// or commas between them: for skills another product keeps where
+    /// clackatoo finds them. They stay listed in Settings, switched off.
+    "skills.disabled" ("Shared skills never offered, by name") in Agents live: Kind::Text => Value::Text(String::new());
     /// Allow servers configured directly in providers. Managed servers are separate.
     "mcp.providers" ("Allow provider-managed MCP servers") in Agents: Kind::Bool => Value::Bool(false);
     /// Override provider-managed MCP for Claude Code.
@@ -241,6 +245,7 @@ mod tests {
                 "upgrade",
                 "permissions",
                 "plugins",
+                "skills",
                 "mcp",
                 "subagents",
                 "web",

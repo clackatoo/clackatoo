@@ -8145,7 +8145,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn native_plugin_skills_are_visible_only_after_opt_in_and_shared_commands_win() {
+    fn native_plugin_skills_are_visible_only_after_opt_in_and_stay_the_agents() {
         let mut chat = chat();
         connect(&mut chat, "c");
         let said = r#"{"sessionUpdate":"available_commands_update","availableCommands":[
@@ -8167,8 +8167,10 @@ pub(crate) mod tests {
             .iter()
             .filter(|command| command.name == "bundle:inspect")
             .collect();
+        // Typed, it's the agent's command that runs: so that's the one
+        // offered, not a shared skill of the same name.
         assert_eq!(matching.len(), 1);
-        assert_eq!(matching[0].description, "Shared skill");
+        assert_eq!(matching[0].description, "Native skill");
     }
 
     #[test]

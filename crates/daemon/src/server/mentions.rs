@@ -88,12 +88,9 @@ const MOST_READING: usize = 8;
 /// What's to be read for a message's mentions, gathered on the loop.
 #[derive(Debug)]
 pub(crate) struct Job {
-    /// A shared slash invocation, loaded fresh on this same cancellable worker.
-    pub(crate) skill: Option<(
-        crate::skills::Roots,
-        String,
-        Option<crate::specialists::Specialist>,
-    )>,
+    /// A shared skill the message invokes: the chat's catalogue, and the
+    /// message. The skill's file is read on this same cancellable worker.
+    pub(crate) skill: Option<(std::sync::Arc<crate::skills::Catalogue>, String)>,
     /// Each mention: its path as written, and its lines.
     pub(crate) mentions: Vec<(String, Option<(u32, u32)>)>,
     /// The chat's working directory and project, made absolute with links
@@ -384,7 +381,6 @@ impl Daemon {
         let project = chat.project().to_owned();
         let project = project.canonicalize().unwrap_or(project);
         let embed_saved = crate::agents::embeds_saved(chat.agent());
-        let specialist = chat.specialist_definition().cloned();
         let mentions: Vec<(String, Option<(u32, u32)>)> = (found.iter())
             .map(|found| (found.path.to_owned(), found.lines))
             .collect();
@@ -402,7 +398,9 @@ impl Daemon {
                 )
             })
             .collect();
-        let skill = skill.then(|| (self.skill_roots(cwd.clone()), text.to_owned(), specialist));
+        let skill = (self.shared_skill_catalogue(id))
+            .filter(|_| skill)
+            .map(|catalogue| (catalogue, text.to_owned()));
         Some(Job {
             skill,
             mentions,
@@ -532,9 +530,13 @@ fn places(path: &str, cwd: &Path, project: &Path, home: &Path) -> Vec<PathBuf> {
 /// Reads what `job` mentions, as the module's docs say.
 pub(crate) fn read(job: &Job) -> Read {
     let mut made = Read::default();
-    if let Some((roots, text, specialist)) = &job.skill {
-        let catalogue = crate::skills::Catalogue::discover(roots);
-        made.skill = Some(specialist.as_ref().map_or_else(|| Ok(catalogue.clone()), |s| catalogue.scoped(s)).and_then(|catalogue| catalogue.explicit(text).unwrap_or_else(|| Err("The requested skill is no longer available for slash invocation. Refresh the catalogue with list_skills or Settings.".into()))));
+    if let Some((catalogue, text)) = &job.skill {
+        let gone = "The requested skill is no longer available for slash invocation. \
+                    Refresh the catalogue with list_skills or Settings.";
+        made.skill = Some(match catalogue.explicit(text) {
+            Some(loaded) => loaded.map_err(|refused| refused.to_string()),
+            None => Err(gone.to_owned()),
+        });
     }
     let root = &job.project;
     let mut budget = MOST_EMBEDDED;

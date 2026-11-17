@@ -310,13 +310,7 @@ pub(crate) fn personal(roots: &Roots) -> PathBuf {
         .map_or_else(|| roots.home.join(".agents"), Clone::clone)
 }
 pub(crate) fn project(roots: &Roots) -> PathBuf {
-    roots
-        .cwd
-        .ancestors()
-        .take_while(|p| *p != roots.home)
-        .find(|p| p.join(".git").exists())
-        .unwrap_or(&roots.cwd)
-        .to_owned()
+    roots.project_top().to_owned()
 }
 pub(crate) fn private(roots: &Roots) -> PathBuf {
     personal(roots).join("mcp-private")
@@ -325,10 +319,9 @@ pub(crate) fn private(roots: &Roots) -> PathBuf {
 impl Registry {
     pub(crate) fn discover(roots: &Roots, bundles: &BTreeSet<PathBuf>) -> Self {
         let mut registry = Self::default();
-        for dir in roots.cwd.ancestors() {
-            if dir == roots.home {
-                break;
-            }
+        // From the working directory up to the project's root, and never
+        // above it: a folder above is nobody's project, and may be anyone's.
+        for dir in roots.project_folders() {
             registry.read(
                 roots,
                 &dir.join(".agents/mcp.json"),
@@ -336,9 +329,6 @@ impl Registry {
                 McpScope::Project,
                 true,
             );
-            if dir.join(".git").exists() {
-                break;
-            }
         }
         registry.read(
             roots,

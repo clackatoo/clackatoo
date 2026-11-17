@@ -12,11 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 
 fn roots(dir: &std::path::Path) -> Roots {
-    let roots = Roots {
-        home: dir.join("home"),
-        cwd: dir.join("repo"),
-        config: Some(dir.join("config")),
-    };
+    let roots = Roots::in_project(dir.join("repo"), dir.join("home"), Some(dir.join("config")));
     for path in [&roots.home, &roots.cwd, roots.config.as_ref().unwrap()] {
         std::fs::create_dir_all(path).unwrap();
     }

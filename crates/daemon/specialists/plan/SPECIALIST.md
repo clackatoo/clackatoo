@@ -5,6 +5,7 @@ model:
   claude: opus
 effort:
   codex: high
+skills: []
 limits: read-only
 ---
 

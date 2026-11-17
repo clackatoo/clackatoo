@@ -227,6 +227,11 @@ Trust ~/src/cloned-thing? Its language servers may run its code (y/n)
   of many crates, marking one crate's folder does nothing, as rust-analyzer
   starts for the workspace's folder. `:trusted` lists what's marked, and the
   question names the folder that counts.
+- **Trust covers what a project gives agents, too.** A project's
+  [skills, skillsets](~clackatoo/reference/skills#project-trust) and
+  specialists load in chats only from a trusted folder. A chat isn't asked:
+  a new one in a project not trusted says its skills aren't loaded, and
+  `:trust FOLDER` loads them.
 - **A folder not trusted keeps its colors**, which clackatoo's own parser
   gives, and every editor key that doesn't need a server; it gets no mistakes,
   `K`, `gd`, completion, renames, or formatting.
