@@ -22,8 +22,9 @@ where it is, and how it's connected: **Needs review**, **Not in use**,
 **Off**. <kbd>Enter</kbd> or **Open** opens a server; **Add a server**, or
 `a`, starts a new one. The list is read when the page is shown, after
 anything done on it, when a lost connection comes back, and every two seconds
-while the page is shown, so there is nothing to refresh by hand. Network,
-login and process work runs outside the daemon's event loop.
+while the page is shown, so there is nothing to refresh by hand. A server that failed,
+or needs a sign-in, keeps saying why until it next connects. Network, login
+and process work runs outside the daemon's event loop.
 
 A server opens as a form, titled `MCP Servers › name`:
 
@@ -66,7 +67,8 @@ entry stays invalid rather than enabling a lower-priority server.
     "docs": {
       "url": "https://mcp.example.org/mcp",
       "headers": {"Authorization": {"secret": "docs-token"}},
-      "timeout_seconds": 30
+      "timeout_seconds": 30,
+      "call_timeout_seconds": 600
     },
     "local-search": {
       "command": "my-search-server",
@@ -79,6 +81,28 @@ entry stays invalid rather than enabling a lower-priority server.
 }
 ```
 
+A file that can't be read, as one caught half written, costs a chat only the
+servers defined in it. The chat says which file, the rest start as usual, and
+a connection already using one of that file's servers keeps the definition it
+has.
+
+### Timeouts
+
+| Setting | Default | Range | Applies to |
+|---|---|---|---|
+| `timeout_seconds` | 30 | 1 to 600 | Connecting, `initialize`, and every request that isn't a call, such as listing tools. |
+| `call_timeout_seconds` | 600 | 1 to 86400 | Each tool call, and any other request that needs approval, such as reading a resource. |
+
+A call's time starts when it's sent to the server, after any approval, and
+starts again each time the server reports progress on it. A call that runs
+out is cancelled at the server and fails with an error naming the setting; it
+may still have taken effect. `initialize` is never cancelled: a server that
+doesn't answer it in time is connected to again instead.
+
+The Settings editor shows `timeout_seconds` as **Request timeout**. Set
+`call_timeout_seconds` in the file: saving a server from the editor keeps
+the value the file has.
+
 Project and bundled commands need an explicit review of their exact
 definition before they start. **Review and enable** approves that revision on
 this machine; changing it requires another review. Saving a project definition
@@ -87,24 +111,51 @@ customized by copying it into personal configuration; its package stays intact.
 Duplicate names in different bundles require unique names or a personal
 override. Removing an override may reveal a lower-priority definition.
 
-New sessions receive the current enabled selection. Saving or disabling a
-definition through Settings refreshes open chats' grants and withdraws old
-proxies' access; reopen the chat for a new definition. Direct file edits are
+New sessions receive the current enabled selection. Direct file edits are
 picked up on the next catalogue refresh: show the MCP Servers page for that
 project, open a new chat, or call `list_skills`. They are not watched
 continuously in this version.
-**Reconnect** restarts an existing proxy's upstream connection without replaying
-tool calls. Interrupted or timed-out calls may already have had effects; check
-their outcome before retrying. If the provider already disconnected its proxy,
-reopen that chat. Active proxy processes survive live daemon upgrades; pending
-approvals are withdrawn, and a Settings action interrupted by one says so, for
-you to check the list before trying it again.
+
+## Connections
+
+Each chat reaches each of its servers through a proxy process of its own,
+which the agent starts as an ordinary MCP server. The proxy stays up for the
+life of the agent's session, whatever happens on either side of it:
+
+| What happens | What the agent sees |
+|---|---|
+| The server crashes, or its connection drops | Calls in flight fail with an error saying their outcome is unknown. The proxy connects again, waiting half a second at first and up to 30 seconds between tries, sends the server the agent's `initialize` again, and tells the agent its tool list changed. |
+| The server needs a sign-in | The proxy answers `initialize` itself and lists no tools. Calls fail with an error asking for a sign-in. Once you sign in it connects and tells the agent its tool list changed. |
+| The server can't be started or reached | As for a sign-in, with the reason; the proxy keeps trying. |
+| You save a change to the definition, choose **Reconnect**, or change a credential it uses | Calls waiting or in flight fail with an error, and the same proxy connects again with the new definition. |
+| The daemon restarts or upgrades | Calls are refused with an error saying to try again, since they can't be checked. Everything else carries on, and the server's connection is untouched. The proxy gives up only after two minutes without the daemon. |
+| An answer is over 4 MiB | That call fails with an error giving the size. |
+
+Only three things end a proxy: the agent closing it, the daemon staying away
+for two minutes, and the chat losing the server. A chat loses a server when
+you remove or disable it, change a project or bundled definition without
+reviewing it, turn the chat's **Tools** off, or pick a specialist that doesn't
+have it. If the agent starts a second proxy for the same server, it takes over
+at once and the first stops.
+
+**Reconnect** starts the server's connections again without testing it first,
+so a server that holds a lock or a port is never started twice. No call is
+sent a second time. Interrupted or timed-out calls may already have had
+effects; check their outcome before retrying. Pending approvals don't cross a
+daemon upgrade: those calls fail with an error saying to try again. A Settings
+action an upgrade or a lost connection interrupts says so, for you to check
+the list before trying it again.
+
+The daemon's log records each proxy opening and closing, every refusal,
+reconnection and change of state, and each approval asked and answered, with
+the chat, the server and the reason.
 
 ## Credentials and browser login
 
 Use **Private credential**, under the list, to save a value under a local
 name, then reference
 it with `{"secret":"name"}` in an environment variable or HTTP header.
+Changing a credential reconnects the servers that reference it, and no others.
 For an Authorization header, store the complete value, including `Bearer `
 when needed. `{"env":"VARIABLE"}` reads a variable from the daemon's
 environment. Plain strings are for nonsecret configuration. Do not put secrets
@@ -135,9 +186,10 @@ row says **Signing in…** while the browser is open, then **Signed in**, or
 why it failed, with **Sign in** to try again. When a chat's agent can't use a
 managed server because it needs a login, whichever agent it is, the chat
 shows an **MCP sign in** shelf above its box with the same button and the
-same states, in every window showing the chat. Signing in reconnects the
-server's live connections; an agent that already gave up on the server uses
-it from its next session. Only the user signs in: an agent with access to
+same states, in every window showing the chat. Signing in connects the
+server for every chat waiting on it, with no need to reopen them. Only an
+HTTP server can ask for a sign-in; a command that fails for want of
+credentials shows as an error, with what it wrote. Only the user signs in: an agent with access to
 the window, a phone and the web are refused, as they are for the rest of MCP
 Servers.
 
@@ -150,11 +202,33 @@ legacy HTTP+SSE endpoints are not supported.
 ## Tools and permissions
 
 Every server keeps its own identity as `managed_<name>`; clackatoo's built-in
-tools remain separate. With **Tools: Ask**, external calls ask for **Allow
-once** or **Reject** before forwarding. Allowing one does not enable other
-servers or change the built-in tools' permission. Providers may also apply
-their own approval controls. **Tools: Off** and side questions receive no
-managed servers.
+tools remain separate. **Tools: Off** and side questions receive no managed
+servers. With **Tools: Allow**, calls go straight to the server. With
+**Tools: Ask**, each call asks first:
+
+| Answer | Effect |
+|---|---|
+| **Allow** | This call goes ahead. |
+| **Always allow this server** | This call goes ahead, and the chat stops asking about this server. Other servers, and the built-in tools, still ask. |
+| **Reject** | The call fails, and the agent is told you refused it. |
+
+Setting the chat's **Tools** again, to any value, takes back every server
+allowed this way. Under **Clackatoo permission rules** the rules decide
+instead, with a tool written `managed_<name>/<tool>`: a call no rule covers
+asks with **Allow** and **Reject** only.
+
+The question waits for as long as you take, as the built-in tools' questions
+do. It's taken back, and the call fails with the reason, when the agent
+cancels the call, you stop the turn, the server is reconnected, or the chat
+loses the server. The agent is told you refused only when you chose
+**Reject**. Parameters over 64 KiB can't be shown, so a call that large fails
+rather than ask; allow the server for the chat to send it. Calls over 256 KiB
+are always refused.
+
+You're asked once per call. Claude Code and Codex may ask about the same call
+themselves in their manual modes; where the agent's adapter says the call is
+for a server clackatoo's proxy is serving, that question is answered for you
+and only clackatoo's is shown. Other agents' own questions still appear.
 
 A specialist with read-only or no-command limits receives only servers you
 explicitly mark **Read-only server**. This is your classification of the whole

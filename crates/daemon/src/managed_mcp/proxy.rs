@@ -1,221 +1,67 @@
-//! A per-server MCP proxy. Payloads retain their upstream identities;
-//! authorization is checked through a separate local daemon connection.
+//! One managed server's proxy: the process an agent starts as an MCP
+//! server, which passes what the agent says to the real server and back,
+//! once the daemon has granted it the server's definition, and asks the
+//! daemon's leave for each call.
+//!
+//! The proxy outlives what it stands between. A server that crashes,
+//! drops its connection or wants a sign-in is connected to again, and
+//! the agent told why its calls fail meanwhile; a daemon that restarts
+//! or upgrades is waited for. Only the agent closing its end, or the
+//! daemon saying the chat may no longer use the server, ends it.
+//!
+//! - `session` holds the state and every rule, with no I/O.
+//! - `control` speaks to the daemon.
+//! - `stdio` speaks to the agent.
+//! - `transport`, beside this module, speaks to the server.
+//!
+//! The loop here only moves what happens between them.
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{
-    ClientMessage, McpProxyAction, McpState, PROTOCOL_VERSION, Request, Response, ServerMessage,
-    TerminalId,
-    frame::{self, FrameDecoder},
-};
-use rmcp::transport::Transport as _;
+use clackatoo_protocol::{McpState, McpToolInfo, TerminalId};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use serde_json::Value;
 
 use super::{
     config::Bound,
     credentials,
-    transport::{self, Upstream},
+    transport::{self, Lost, Unsent, Upstream},
 };
+use control::{Daemon, News, Pace};
+use session::{Effect, Ending, Session, Verdict};
 
-const MAX_MESSAGE: usize = 4 << 20;
-const MAX_CALLS: usize = 16;
+pub(crate) mod control;
+pub(crate) mod session;
+mod stdio;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) use session::metadata;
+
+/// What the daemon grants a proxy: a server's definition, bound to where
+/// it was read, and how many times the user has had its connections
+/// start again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Grant {
     pub(crate) bound: Bound,
     pub(crate) generation: u64,
 }
+
 impl Grant {
+    /// What tells one grant from the next: it changes with the
+    /// definition, and each time connections are to start again.
     pub(crate) fn revision(&self) -> String {
         format!("{}:{}", self.bound.grant(), self.generation)
     }
 }
 
-#[derive(Clone)]
-struct Control {
-    socket: PathBuf,
-    chat: TerminalId,
-    server: String,
-    token: String,
-}
-impl Control {
-    async fn request(&self, action: McpProxyAction) -> Result<Response, String> {
-        let mut stream = tokio::net::UnixStream::connect(&self.socket)
-            .await
-            .map_err(|_| "The daemon is unavailable")?;
-        if stream
-            .peer_cred()
-            .map_err(|_| "Cannot verify the daemon's identity")?
-            .uid()
-            != rustix::process::getuid().as_raw()
-        {
-            return Err("The daemon socket belongs to another user".into());
-        }
-        stream
-            .write_all(
-                &frame::encode(
-                    PROTOCOL_VERSION,
-                    &ClientMessage::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                    },
-                )
-                .map_err(|_| "Cannot encode daemon handshake")?,
-            )
-            .await
-            .map_err(|_| "Cannot greet the daemon")?;
-        let mut decoder = FrameDecoder::new();
-        let hello = receive(&mut stream, &mut decoder, PROTOCOL_VERSION).await?;
-        let ServerMessage::Hello {
-            protocol_version: wire,
-            ..
-        } = hello
-        else {
-            return Err("The daemon refused this MCP proxy".into());
-        };
-        let wire = wire.min(PROTOCOL_VERSION);
-        if wire < clackatoo_protocol::wire::MANAGED_MCP {
-            return Err("This daemon needs upgrading to manage MCP servers".into());
-        }
-        let request = ClientMessage::Request(Request::McpProxy {
-            chat: self.chat,
-            server: self.server.clone(),
-            token: self.token.clone(),
-            action,
-        });
-        stream
-            .write_all(
-                &frame::encode(wire, &request).map_err(|_| "Cannot encode MCP authorization")?,
-            )
-            .await
-            .map_err(|_| "Cannot ask the daemon about MCP access")?;
-        loop {
-            match receive(&mut stream, &mut decoder, wire).await? {
-                ServerMessage::Response(Response::Error(error)) => return Err(error.to_string()),
-                ServerMessage::Response(response) => return Ok(response),
-                ServerMessage::Event(_) => {}
-                _ => return Err("Unexpected daemon response".into()),
-            }
-        }
-    }
-    async fn check(&self, revision: &str, value: &Value) -> Result<Response, String> {
-        let method = value
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let request = if method == "tools/call" || (!method.is_empty() && !metadata(method)) {
-            let text = value
-                .get("params")
-                .map_or_else(String::new, Value::to_string);
-            if text.len() > 64 * 1024 {
-                return Err("MCP request exceeds the 64 KiB approval display limit".into());
-            }
-            text
-        } else {
-            String::new()
-        };
-        self.request(McpProxyAction::Check {
-            revision: revision.into(),
-            method: method.into(),
-            request,
-        })
-        .await
-    }
-    async fn heartbeat(&self, revision: &str, initialized: bool) -> Result<Response, String> {
-        loop {
-            match self
-                .request(McpProxyAction::Heartbeat {
-                    revision: revision.into(),
-                    state: if initialized {
-                        McpState::Connected
-                    } else {
-                        McpState::Starting
-                    },
-                })
-                .await
-            {
-                Err(why) if why.contains("MCP catalogue is loading") => return Ok(Response::Done),
-                Err(why)
-                    if matches!(
-                        why.as_str(),
-                        "The daemon is unavailable"
-                            | "The daemon connection closed"
-                            | "Cannot greet the daemon"
-                            | "Cannot ask the daemon about MCP access"
-                    ) =>
-                {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                result => return result,
-            }
-        }
-    }
-    async fn report(
-        &self,
-        revision: &str,
-        state: McpState,
-        detail: String,
-        tools: Vec<clackatoo_protocol::McpToolInfo>,
-    ) {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(3),
-            self.request(McpProxyAction::Report {
-                revision: revision.into(),
-                state,
-                detail,
-                tools,
-            }),
-        )
-        .await;
-    }
-}
-
-pub(crate) fn metadata(method: &str) -> bool {
-    method.is_empty()
-        || method == "initialize"
-        || method == "ping"
-        || method.starts_with("notifications/")
-        || [
-            "tools/list",
-            "resources/list",
-            "resources/templates/list",
-            "prompts/list",
-            "logging/setLevel",
-        ]
-        .contains(&method)
-}
-
-async fn receive(
-    stream: &mut tokio::net::UnixStream,
-    decoder: &mut FrameDecoder,
-    wire: u32,
-) -> Result<ServerMessage, String> {
-    let mut bytes = vec![0; 16384];
-    loop {
-        if let Some(message) = decoder
-            .decode(wire)
-            .map_err(|_| "Cannot decode daemon response")?
-        {
-            return Ok(message);
-        }
-        let n = stream
-            .read(&mut bytes)
-            .await
-            .map_err(|_| "The daemon connection closed")?;
-        if n == 0 {
-            return Err("The daemon connection closed".into());
-        }
-        decoder.push(&bytes[..n]);
-    }
-}
-
-/// Run an authenticated managed server proxy over the agent's stdio.
+/// Runs the proxy for the server `server` of the chat `chat`, showing
+/// the daemon at `socket` the secret `token`, over the agent's standard
+/// input and output.
 ///
 /// # Errors
-/// If authorization is refused, the upstream fails, or the agent disconnects.
+/// If the daemon refuses the proxy, or stays unreachable.
 pub fn relay(
     socket: &Path,
     chat: TerminalId,
@@ -224,7 +70,7 @@ pub fn relay(
     input: std::fs::File,
     output: std::fs::File,
 ) -> Result<(), std::io::Error> {
-    let control = Control {
+    let daemon = Daemon {
         socket: socket.into(),
         chat,
         server: server.into(),
@@ -232,280 +78,366 @@ pub fn relay(
     };
     let runtime = transport::runtime().map_err(std::io::Error::other)?;
     runtime
-        .block_on(run(control, input, output))
+        .block_on(run(daemon, Pace::default(), input, output))
         .map_err(std::io::Error::other)
 }
 
-fn input_thread(mut input: std::fs::File) -> tokio::sync::mpsc::Receiver<Result<Value, String>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(8);
-    std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let mut chunk = [0; 16384];
-        'read: loop {
-            let n = match input.read(&mut chunk) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            if n == 0 {
-                break;
-            }
-            for &byte in &chunk[..n] {
-                if byte == b'\n' {
-                    if !buffer.is_empty() {
-                        let value = serde_json::from_slice(&buffer)
-                            .map_err(|_| "Invalid MCP JSON message".into());
-                        if tx.blocking_send(value).is_err() {
-                            break 'read;
-                        }
-                        buffer.clear();
-                    }
-                } else {
-                    buffer.push(byte);
-                    if buffer.len() > MAX_MESSAGE {
-                        let _ = tx.blocking_send(Err("MCP message exceeds 4 MiB".into()));
-                        break 'read;
-                    }
-                }
-            }
-        }
-        if !buffer.is_empty() && buffer.len() <= MAX_MESSAGE {
-            let _ = tx.blocking_send(
-                serde_json::from_slice(&buffer).map_err(|_| "Invalid final MCP message".into()),
-            );
-        }
-    });
-    rx
+/// What the task holding a connection to the server tells the loop.
+enum FromServer {
+    /// Connecting went so.
+    Connected(Result<(), Lost>),
+    /// The server wrote this.
+    Said(Value),
+    /// The server didn't take the request with this ID, for this reason.
+    Unsent(Value, String),
+    /// The connection went, for this reason. Nothing follows it.
+    Closed(Lost),
 }
 
-fn output_thread(mut output: std::fs::File) -> tokio::sync::mpsc::Sender<Value> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(8);
-    std::thread::spawn(move || {
-        while let Some(value) = rx.blocking_recv() {
-            let Ok(mut bytes) = serde_json::to_vec(&value) else {
-                break;
-            };
-            if bytes.len() > MAX_MESSAGE {
-                break;
-            }
-            bytes.push(b'\n');
-            if output
-                .write_all(&bytes)
-                .and_then(|()| output.flush())
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    tx
+/// The connection to the server there is now, if any: a task of its
+/// own, told what to send.
+struct Server {
+    send: tokio::sync::mpsc::UnboundedSender<Value>,
 }
 
-async fn answer(output: &tokio::sync::mpsc::Sender<Value>, id: &Value, message: &str) {
-    let _ = output
-        .send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}}))
-        .await;
+/// Everything a running proxy holds besides its session.
+struct Proxy {
+    daemon: Daemon,
+    output: stdio::Output,
+    session: Session,
+    /// Which connection to the server is the current one: what an
+    /// earlier one still says is passed over.
+    epoch: u64,
+    server: Option<Server>,
+    from_server: tokio::sync::mpsc::Sender<(u64, FromServer)>,
+    /// The calls the daemon is being asked about.
+    asks: tokio::task::JoinSet<(String, Verdict)>,
+    asking: BTreeMap<String, tokio::task::AbortHandle>,
+    reports: tokio::sync::mpsc::UnboundedSender<Report>,
+    /// Whether the server has answered `initialize`, for the watch to
+    /// say in its heartbeats.
+    connected: Arc<AtomicBool>,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one select arm per proxy event, sharing session state"
-)]
-async fn run(control: Control, input: std::fs::File, output: std::fs::File) -> Result<(), String> {
-    let response = tokio::time::timeout(
-        Duration::from_secs(10),
-        control.request(McpProxyAction::Open),
-    )
-    .await
-    .map_err(|_| "MCP authorization timed out")??;
-    let Response::McpConnection(configuration) = response else {
-        return Err("The daemon did not grant this MCP connection".into());
+/// How the connection stands, for the daemon to show.
+struct Report {
+    revision: String,
+    state: McpState,
+    detail: String,
+    tools: Vec<McpToolInfo>,
+}
+
+/// Runs a proxy until the agent closes its end or the daemon ends it.
+pub(crate) async fn run(
+    daemon: Daemon,
+    pace: Pace,
+    input: std::fs::File,
+    output: std::fs::File,
+) -> Result<(), String> {
+    let connected = Arc::new(AtomicBool::new(false));
+    let (news, mut told) = tokio::sync::mpsc::channel(8);
+    let watch = tokio::spawn(daemon.clone().watch(pace, Arc::clone(&connected), news));
+    // Nothing is read from the agent until the daemon has granted the
+    // server: its `initialize` waits in the pipe.
+    let grant = match told.recv().await {
+        Some(News::Granted(grant)) => *grant,
+        Some(News::Ended(why)) => return Err(why),
+        Some(News::Away) | None => return Err("the daemon went before granting anything".into()),
     };
-    let mut grant: Grant =
-        serde_json::from_str(&configuration).map_err(|_| "Invalid MCP connection grant")?;
-    let mut upstream = match Upstream::connect(&grant.bound).await {
-        Ok(upstream) => upstream,
-        Err(why) => {
-            control
-                .report(
-                    &grant.revision(),
-                    failure_state(&why),
-                    credentials::redacted(&grant.bound, &why),
-                    Vec::new(),
-                )
-                .await;
-            return Err(why);
-        }
+    let mut agent = stdio::read(input);
+    let (from_server, mut server_said) = tokio::sync::mpsc::channel(64);
+    let (reports, to_report) = tokio::sync::mpsc::unbounded_channel();
+    let reporting = tokio::spawn(report(daemon.clone(), to_report));
+    let mut proxy = Proxy {
+        daemon,
+        output: stdio::Output::new(output),
+        session: Session::new(grant),
+        epoch: 0,
+        server: None,
+        from_server,
+        asks: tokio::task::JoinSet::new(),
+        asking: BTreeMap::new(),
+        reports,
+        connected,
     };
-    let mut input = input_thread(input);
-    let output = output_thread(output);
-    let mut checks = tokio::task::JoinSet::new();
-    let mut sends = tokio::task::JoinSet::new();
-    let mut pending = BTreeMap::<String, (Value, tokio::time::Instant)>::new();
-    let mut checking = BTreeMap::<String, (Value, tokio::task::AbortHandle)>::new();
-    let mut initialization = None;
-    let mut initialized = false;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let result = loop {
+    proxy.carry_out();
+    while proxy.session.ending().is_none() {
+        let due = proxy.session.next_due();
         tokio::select! {
-            line=input.recv()=>{
-                let Some(line)=line else{break Ok(());};let value=match line{Ok(value)=>value,Err(e)=>break Err(e)};
-                if value.get("method").and_then(Value::as_str)==Some("initialize") {initialization=Some(value.clone());}
-                if value.get("method").and_then(Value::as_str)==Some("notifications/cancelled")
-                    && let Some(id)=value.pointer("/params/requestId") {
-                    if let Some((_, task))=checking.remove(&id.to_string()) {task.abort();}
-                    pending.remove(&id.to_string());
-                }
-                let method=value.get("method").and_then(Value::as_str).unwrap_or_default();
-                if metadata(method) {
-                    if !method.is_empty() && value.get("id").is_some() && pending.len()>=MAX_CALLS {
-                        answer(&output,&value["id"],"Too many MCP requests are pending").await;continue;
-                    }
-                    // Handshake, notifications and replies must retain input
-                    // order; they never wait behind an interactive approval.
-                    match tokio::time::timeout(Duration::from_secs(5),control.check(&grant.revision(), &value)).await {
-                        Ok(Ok(Response::Done))=>{},
-                        Ok(Err(why))=>break Err(why),
-                        _=>{if let Some(id)=value.get("id"){answer(&output,id,"The MCP connection changed; retry after reconnecting.").await;}continue;}
-                    }
-                    let message=serde_json::from_value(value.clone()).map_err(|_|"Invalid MCP message")?;
-                    if let Some(id)=value.get("id") && !method.is_empty() {
-                        pending.insert(id.to_string(),(id.clone(),tokio::time::Instant::now()+Duration::from_secs(30)));
-                    }
-                    tokio::time::timeout(Duration::from_secs(5),upstream.send(message)).await.map_err(|_|"MCP transport stalled")?.map_err(|e|e.to_string())?;
-                    continue;
-                }
-                if let Some(id)=value.get("id") && (checking.contains_key(&id.to_string()) || pending.contains_key(&id.to_string())) {
-                    answer(&output,id,"An MCP request with this ID is already pending").await;continue;
-                }
-                if checks.len()>=MAX_CALLS || pending.len()>=MAX_CALLS {
-                    if let Some(id)=value.get("id"){answer(&output,id,"Too many MCP requests are pending").await;}continue;
-                }
-                let own=control.clone();let revision=grant.revision();let timeout=Duration::from_mins(5);
-                let id=value.get("method").and_then(|_|value.get("id")).map(Value::to_string);
-                let original_id = value.get("id").cloned();
-                let task=checks.spawn(async move {
-                    let result=tokio::time::timeout(timeout,own.check(&revision,&value)).await.map_err(|_|"MCP permission request timed out".into()).and_then(|r|r);
-                    (value,result)
+            line = agent.recv() => proxy.agent_wrote(line),
+            Some((epoch, event)) = server_said.recv() => proxy.server_did(epoch, event),
+            Some(news) = told.recv() => proxy.daemon_told(news),
+            Some(answer) = proxy.asks.join_next(), if !proxy.asks.is_empty() => {
+                proxy.daemon_answered(answer);
+            }
+            () = sleep_until(due) => proxy.session.tick(Instant::now()),
+        }
+        proxy.carry_out();
+    }
+    watch.abort();
+    proxy.finish(reporting).await
+}
+
+/// Waits until `due`, or for ever if there's nothing to wait for.
+async fn sleep_until(due: Option<Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await,
+        None => std::future::pending().await,
+    }
+}
+
+impl Proxy {
+    /// The agent wrote `line`, or closed its end.
+    fn agent_wrote(&mut self, line: Option<stdio::Line>) {
+        match line {
+            Some(stdio::Line::Message(message)) => {
+                self.session.agent_said(message, Instant::now());
+            }
+            // There's no ID to answer: the agent is told all the same.
+            Some(stdio::Line::Unreadable(why)) => {
+                let refused = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {"code": -32700, "message": why},
                 });
-                if let Some(id)=id{checking.insert(id,(original_id.expect("request ID"),task));}
-            },
-            checked=checks.join_next(),if !checks.is_empty()=>{
-                let Some(Ok((value,allowed)))=checked else{continue;};
-                if let Some(id)=value.get("id"){checking.remove(&id.to_string());}
-                match allowed {
-                    Ok(Response::Done)=>{},
-                    Ok(Response::McpConnection(_))=>{
-                        if let Some(id)=value.get("id"){answer(&output,id,"The server is reconnecting; this request was not sent. Retry after it reconnects.").await;}continue;
-                    },
-                    Ok(_)=>{if let Some(id)=value.get("id"){answer(&output,id,"Unexpected MCP authorization response").await;}continue;},
-                    Err(why)=>{if let Some(id)=value.get("id"){answer(&output,id,&why).await;}continue;},
+                self.write(&refused);
+            }
+            None => self.session.agent_closed(),
+        }
+    }
+
+    /// The connection to the server numbered `epoch` did `event`.
+    fn server_did(&mut self, epoch: u64, event: FromServer) {
+        if epoch != self.epoch {
+            return;
+        }
+        let now = Instant::now();
+        match event {
+            FromServer::Connected(outcome) => self.session.connected(outcome, now),
+            FromServer::Said(message) => self.session.server_said(message, now),
+            FromServer::Unsent(id, why) => self.session.unsent(&id, &why, now),
+            FromServer::Closed(lost) => {
+                self.server = None;
+                self.session.lost(lost, now);
+            }
+        }
+    }
+
+    /// The watch on the daemon said `news`.
+    fn daemon_told(&mut self, news: News) {
+        match news {
+            News::Granted(grant) => self.session.granted(*grant),
+            News::Away => self.session.daemon_went(),
+            News::Ended(why) => self.session.refused(why),
+        }
+    }
+
+    /// The daemon answered about a call, or the task asking it stopped.
+    fn daemon_answered(&mut self, answer: Result<(String, Verdict), tokio::task::JoinError>) {
+        // One stopped was no longer wanted: nothing waits for it.
+        let Ok((key, verdict)) = answer else {
+            return;
+        };
+        self.asking.remove(&key);
+        self.session.answered(&key, verdict, Instant::now());
+    }
+
+    /// Writes the agent `message`; an agent that can't be written to has
+    /// gone.
+    fn write(&mut self, message: &Value) {
+        if self.output.write(message).is_err() {
+            self.session.agent_closed();
+        }
+    }
+
+    /// Does what the session says to, until it has no more to say.
+    fn carry_out(&mut self) {
+        loop {
+            let effects = self.session.effects();
+            if effects.is_empty() {
+                break;
+            }
+            for effect in effects {
+                self.carry_out_one(effect);
+            }
+        }
+        (self.connected).store(self.session.initialized(), Ordering::Relaxed);
+    }
+
+    fn carry_out_one(&mut self, effect: Effect) {
+        match effect {
+            Effect::Agent(message) => self.write(&message),
+            Effect::Server(message) => {
+                // A connection that just went says so itself, and the
+                // session then answers for what it never got.
+                if let Some(server) = &self.server {
+                    let _ = server.send.send(message);
                 }
-                let Ok(message)=serde_json::from_value(value.clone()) else {if let Some(id)=value.get("id"){answer(&output,id,"Invalid MCP request").await;}continue;};
-                if let Some(id)=value.get("id") && value.get("method").is_some(){
-                    pending.insert(id.to_string(),(id.clone(),tokio::time::Instant::now()+Duration::from_secs(u64::from(grant.bound.definition.as_ref().expect("granted transport").timeout_seconds))));
+            }
+            Effect::Ask {
+                key,
+                method,
+                params,
+            } => {
+                let daemon = self.daemon.clone();
+                let revision = self.session.grant().revision();
+                let asked = key.clone();
+                let task = self.asks.spawn(async move {
+                    let verdict = daemon.check(revision, method, params).await;
+                    (asked, verdict)
+                });
+                self.asking.insert(key, task);
+            }
+            Effect::Unask(key) => {
+                // Dropping the connection it asks on tells the daemon
+                // to take the question back.
+                if let Some(task) = self.asking.remove(&key) {
+                    task.abort();
                 }
-                sends.spawn(upstream.send(message));
-            },
-            sent=sends.join_next(),if !sends.is_empty()=>{if let Some(Ok(Err(e)))=sent{break Err(e.to_string());}},
-            reply=upstream.receive()=>{
-                let Some(reply)=reply else{
-                    let detail=upstream.diagnostic.lock().map(|d|d.clone()).unwrap_or_default();
-                    break Err(if detail.is_empty(){"The MCP server disconnected".into()}else{format!("The MCP server disconnected: {detail}")});
+            }
+            Effect::Connect { after } => {
+                self.epoch += 1;
+                let (send, outbox) = tokio::sync::mpsc::unbounded_channel();
+                // Dropping the last one's sender closes it.
+                self.server = Some(Server { send });
+                tokio::spawn(serve(
+                    self.session.grant().bound.clone(),
+                    after,
+                    outbox,
+                    self.from_server.clone(),
+                    self.epoch,
+                ));
+            }
+            Effect::Disconnect => {
+                self.epoch += 1;
+                self.server = None;
+            }
+            Effect::Report {
+                state,
+                detail,
+                tools,
+            } => {
+                let bound = &self.session.grant().bound;
+                let _ = self.reports.send(Report {
+                    revision: self.session.grant().revision(),
+                    state,
+                    detail: credentials::redacted(bound, &detail),
+                    tools,
+                });
+            }
+        }
+    }
+
+    /// Ends the proxy: the daemon is told the agent closed it, if it
+    /// did, and what's queued for the agent is given a moment to be
+    /// written.
+    async fn finish(self, reporting: tokio::task::JoinHandle<()>) -> Result<(), String> {
+        // A daemon that ended the proxy knows why, and one that can't be
+        // reached can't be told.
+        let result = if let Some(Ending::Refused(why)) = self.session.ending() {
+            Err(why.clone())
+        } else {
+            let _ = self.reports.send(Report {
+                revision: self.session.grant().revision(),
+                state: McpState::Disconnected,
+                detail: String::new(),
+                tools: Vec::new(),
+            });
+            Ok(())
+        };
+        drop(self.reports);
+        let _ = tokio::time::timeout(Duration::from_secs(3), reporting).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !self.output.drained() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        result
+    }
+}
+
+/// Tells the daemon each report, in order.
+async fn report(daemon: Daemon, mut reports: tokio::sync::mpsc::UnboundedReceiver<Report>) {
+    while let Some(report) = reports.recv().await {
+        daemon
+            .report(report.revision, report.state, report.detail, report.tools)
+            .await;
+    }
+}
+
+/// Holds one connection to `bound`'s server, made after `after`: sends
+/// what `sent` says to, in order, and tells `events` what the server
+/// says, as the connection numbered `epoch`, until the connection goes
+/// or `sent` is dropped.
+async fn serve(
+    bound: Bound,
+    after: Duration,
+    mut sent: tokio::sync::mpsc::UnboundedReceiver<Value>,
+    events: tokio::sync::mpsc::Sender<(u64, FromServer)>,
+    epoch: u64,
+) {
+    let tell = |event| {
+        let events = events.clone();
+        async move { events.send((epoch, event)).await.is_ok() }
+    };
+    tokio::time::sleep(after).await;
+    let limit = (bound.definition.as_ref()).map_or(30, |definition| definition.timeout_seconds);
+    let connecting = tokio::time::timeout(
+        Duration::from_secs(u64::from(limit)),
+        Upstream::connect(&bound),
+    );
+    let mut upstream = match connecting.await {
+        Ok(Ok(upstream)) => upstream,
+        Ok(Err(lost)) => {
+            tell(FromServer::Connected(Err(lost))).await;
+            return;
+        }
+        Err(_) => {
+            let why = format!(
+                "MCP server ‘{}’ didn't connect within {limit} seconds (its timeout_seconds)",
+                bound.name
+            );
+            tell(FromServer::Connected(Err(Lost::Failed(why)))).await;
+            return;
+        }
+    };
+    if !tell(FromServer::Connected(Ok(()))).await {
+        return;
+    }
+    // How each message sent went, with the ID of the request it was.
+    let mut sending = tokio::task::JoinSet::new();
+    let lost = loop {
+        tokio::select! {
+            message = sent.recv() => {
+                // The proxy is done with this connection.
+                let Some(message) = message else {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), upstream.close()).await;
+                    return;
                 };
-                let value=serde_json::to_value(reply).map_err(|_|"Cannot encode MCP response")?;
-                if value.get("method").is_none() && let Some(id)=value.get("id") && pending.remove(&id.to_string()).is_none(){continue;}
-                if value.pointer("/result/protocolVersion").is_some(){initialized=true;control.report(&grant.revision(),McpState::Connected,String::new(),Vec::new()).await;}
-                let tools=transport::tool_infos(&value, &grant.bound);
-                if !tools.is_empty(){control.report(&grant.revision(),McpState::Connected,String::new(),tools).await;}
-                if !matches!(tokio::time::timeout(Duration::from_secs(10),output.send(value)).await,Ok(Ok(()))){break Ok(());}
-            },
-            _=heartbeat.tick()=>{
-                let checked=tokio::time::timeout(Duration::from_secs(5),control.heartbeat(&grant.revision(),initialized)).await;
-                match checked {
-                    Ok(Ok(Response::Done))=>{},
-                    Ok(Ok(Response::McpConnection(configuration)))=>{
-                        // An explicit reconnect restores only MCP initialization.
-                        // Tool requests are failed, never replayed.
-                        checks.abort_all();
-                        for (_, (id,_)) in std::mem::take(&mut checking){answer(&output,&id,"The user reconnected this MCP server before this request was sent. Retry after reconnecting.").await;}
-                        sends.abort_all();
-                        for (_, (id,_)) in std::mem::take(&mut pending){answer(&output,&id,"The user reconnected this MCP server; the previous request was interrupted. Check its outcome before retrying.").await;}
-                        let next:Grant=serde_json::from_str(&configuration).map_err(|_|"Invalid refreshed MCP grant")?;
-                        let _=tokio::time::timeout(Duration::from_secs(2),upstream.close()).await;
-                        grant=next;upstream=Upstream::connect(&grant.bound).await?;
-                        if let Some(init)=initialization.clone(){
-                            let expected=init.get("id").cloned();
-                            upstream.send(serde_json::from_value(init).map_err(|_|"Invalid saved MCP initialization")?).await.map_err(|e|e.to_string())?;
-                            let timeout=Duration::from_secs(u64::from(grant.bound.definition.as_ref().expect("definition").timeout_seconds));
-                            tokio::time::timeout(timeout,async {
-                                loop {
-                                    let reply=upstream.receive().await.ok_or("Server closed during reconnect")?;
-                                    let value=serde_json::to_value(reply).map_err(|_|"Invalid reconnect response")?;
-                                    if value.get("id")==expected.as_ref(){if value.get("error").is_some(){return Err("Server refused reconnect initialization");}break;}
-                                    if let Some(id)=value.get("id") && value.get("method").is_some(){
-                                        let response=if value["method"]=="ping"{json!({"jsonrpc":"2.0","id":id,"result":{}})}else{json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Interactive callbacks are unavailable during reconnect initialization"}})};
-                                        upstream.send(serde_json::from_value(response).expect("callback response")).await.map_err(|_|"Cannot answer reconnect callback")?;
-                                    }
-                                }
-                                if initialized {upstream.send(serde_json::from_value(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).expect("notification")).await.map_err(|_|"Cannot finish MCP reconnect")?;}
-                                Ok::<_,&str>(())
-                            }).await.map_err(|_|"MCP reconnect timed out")?.map_err(str::to_owned)?;
-                            let _=output.send(json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"})).await;
-                        }
-                    },
-                    Ok(Err(why)) if why.contains("MCP catalogue is loading")=>{},
-                    Ok(Err(why))=>break Err(why),
-                    _=>break Err("The daemon no longer authorizes this MCP connection".into()),
+                let id = message.get("id").filter(|_| message.get("method").is_some()).cloned();
+                let going = upstream.send(&message);
+                sending.spawn(async move { (id, going.await) });
+            }
+            Some(went) = sending.join_next(), if !sending.is_empty() => match went {
+                Ok((Some(id), Err(Unsent::Refused(why)))) => {
+                    if !tell(FromServer::Unsent(id, why)).await {
+                        return;
+                    }
                 }
-                let expired:Vec<_>=pending.iter().filter(|(_,(_,due))|*due<=tokio::time::Instant::now()).map(|(k,_)|k.clone()).collect();
-                for key in expired {if let Some((id,_))=pending.remove(&key){
-                    sends.spawn(upstream.send(serde_json::from_value(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":id,"reason":"Request timed out"}})).expect("cancellation")));
-                    answer(&output,&id,"MCP request timed out; its outcome may be unknown. Check before retrying.").await;
-                }}
+                Ok((_, Err(Unsent::Lost(lost)))) => break lost,
+                // It went, or it was a notification or an answer the
+                // server didn't take, which is no one's to hear of.
+                Ok((_, Ok(()) | Err(Unsent::Refused(_)))) | Err(_) => {}
+            },
+            said = upstream.receive() => match said {
+                Some(message) => {
+                    if !tell(FromServer::Said(message)).await {
+                        return;
+                    }
+                }
+                None => break upstream.ended(&bound).await,
             },
         }
     };
-    checks.abort_all();
-    sends.abort_all();
     let _ = tokio::time::timeout(Duration::from_secs(2), upstream.close()).await;
-    let detail = result
-        .as_ref()
-        .err()
-        .map(|e| credentials::redacted(&grant.bound, e))
-        .unwrap_or_default();
-    control
-        .report(
-            &grant.revision(),
-            if result.is_ok() {
-                McpState::Disconnected
-            } else {
-                failure_state(&detail)
-            },
-            detail,
-            Vec::new(),
-        )
-        .await;
-    result
-}
-
-pub(crate) fn failure_state(why: &str) -> McpState {
-    let lower = why.to_ascii_lowercase();
-    if [
-        "authentication",
-        // An HTTP server's 401, as the MCP client says it.
-        "auth required",
-        "unauthorized",
-        "401",
-        "oauth",
-        "token expired",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    {
-        McpState::NeedsLogin
-    } else {
-        McpState::Error
-    }
+    tell(FromServer::Closed(lost)).await;
 }

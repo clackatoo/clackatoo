@@ -70,19 +70,25 @@ impl HostedChat {
         self.combine_commands();
     }
 
+    /// Whether `text` is a slash command the agent itself offers.
+    pub(crate) fn agent_offers(&self, text: &str) -> bool {
+        clackatoo_protocol::slash_command(text).is_some_and(|(name, _)| {
+            (self.agent_commands.iter()).any(|command| command.name.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// The commands the chat offers: its shared skills, then the agent's
+    /// own. A skill with the name of one of the agent's isn't offered as
+    /// a command, as typing it runs the agent's.
     fn combine_commands(&mut self) {
-        let mut commands = self.skill_commands.clone();
-        commands.extend(
-            self.agent_commands
-                .iter()
-                .filter(|command| {
-                    !self
-                        .skill_commands
-                        .iter()
-                        .any(|skill| skill.name == command.name)
-                })
-                .cloned(),
-        );
+        let agents = &self.agent_commands;
+        let mut commands: Vec<AgentCommand> = (self.skill_commands.iter())
+            .filter(|skill| {
+                !(agents.iter()).any(|command| command.name.eq_ignore_ascii_case(&skill.name))
+            })
+            .cloned()
+            .collect();
+        commands.extend(agents.iter().cloned());
         self.set_commands(commands);
     }
 

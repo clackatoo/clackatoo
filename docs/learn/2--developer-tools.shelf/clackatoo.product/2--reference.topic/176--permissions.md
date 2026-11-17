@@ -1,7 +1,7 @@
 ---
 title: Permissions
 type: reference
-description: Choose provider permissions or Clackatoo rules, edit literal Allow, Ask and Deny rules, and inspect recent decisions and the boundaries they cover.
+description: Choose provider permissions or Clackatoo rules, edit literal Allow, Ask and Deny rules, and inspect recent decisions, what the rules cover and what they cannot stop.
 related:
   - clackatoo/reference/agent-settings
   - clackatoo/reference/agent-tools
@@ -39,8 +39,13 @@ Rules apply to requests that reach Clackatoo:
 | Request | Coverage |
 | --- | --- |
 | Provider tool approvals | Requests the provider sends over ACP, the Agent Client Protocol |
-| Clackatoo's built-in tools | Calls through the chat's authenticated tool connection |
+| Clackatoo's built-in tools | The calls that ask you: running a command, typing into a terminal, showing a file outside the project, and the browser's first page |
 | Managed MCP servers | External tool calls and other operations; connection metadata does not ask |
+
+Clackatoo's other tools, such as `list_panes`, `read_chat` and
+`board_read`, never ask and are not checked against the rules. A rule naming
+one of them has no effect. A chat working in the background is therefore
+never left waiting on a question nobody sees.
 
 Providers can still run operations without requesting approval. Claude's
 read tools and existing provider allow rules are examples. Codex can run
@@ -50,11 +55,20 @@ permission behavior.
 
 Tools Off, Browser Off, specialist limits, native window grants and managed
 server trust remain in force. Rules cannot turn those capabilities on.
-While Clackatoo rules is selected, its rules review tool calls regardless of
+While Clackatoo rules is selected, its rules review commands regardless of
 whether Tools was set to Ask or Allow; Tools Off still refuses them.
-Typing into a terminal and granting the browser's initial consent still
-require your direct approval. Provider plan approvals and changes to
-sandbox permissions require it too.
+
+Some requests always need your direct approval, whichever rule would allow
+them. A Deny still refuses them.
+
+- Typing into a terminal.
+- Showing a file outside the chat's project.
+- The browser's first page in a chat. Its question keeps the **Allow for
+  this chat** answer, which lets the agent open further pages.
+- Provider plan approvals, the provider's own questions, and changes to
+  sandbox or network permissions.
+- A command whose request carries anything beyond the command itself, such
+  as Claude Code's `dangerouslyDisableSandbox`.
 
 ## Add or edit a rule
 
@@ -94,12 +108,25 @@ to stop sending subsequent permission requests.
 
 | Match | Example target | Meaning |
 | --- | --- | --- |
-| Tool | `clackatoo/list_panes` | Exact server and tool identity |
+| Tool | `clackatoo/run_in_terminal` | One of Clackatoo's tools that asks you |
 | Tool | `managed_docs/search` | The managed server named `docs`, tool `search` |
-| Tool | `claude/Bash` | A provider-reported tool identity |
-| Command | `git status` | This complete simple command |
+| Tool | `managed_docs/resources/read` | Another MCP method of that server |
+| Tool | `claude/Bash` | The provider's own tool, as the provider names it |
+| Command | `git status` | A simple command, compared word by word |
 | Read | `{project}` | Recognized file reads beneath this chat's project |
 | Edit | `~/src/example` | Recognized file edits beneath this directory |
+
+Clackatoo works out which tool a request uses from what it knows of the
+call, never from the request's own input. A request that names no tool
+matches no Tool rule. Codex sends its ordinary commands without a tool name,
+so only Command rules match them. Its approvals of MCP tool calls always ask
+you. A managed tool whose name contains `/` could be mistaken for an MCP
+method, so it matches no rule either.
+
+Claude Code asks before it calls a managed server's tool, under its own
+name for it, such as `claude/mcp__managed_docs__search`. Clackatoo then
+checks the call itself as `managed_docs/search`. To run such a tool without
+a question, allow both.
 
 Tool rules can also say **Only with these arguments**, a complete JSON
 argument value. Left empty, it matches any arguments; `null` matches JSON null
@@ -108,24 +135,75 @@ For managed tool calls, this is the tool’s argument value. Other MCP methods
 match their complete request parameters, including resource URIs and prompt
 names. Keep credentials out of rules.
 
-Command matches are literal. There are no prefixes, wildcards or inferred
-command families. Shell operators, quotes, substitutions, redirects and
-shell wrappers require approval, even when a broad tool Allow matches.
-Commands explicitly naming a working directory outside the chat's project
-also require approval.
+### Command rules
+
+A command is compared word by word, however its words are spaced. There are
+no wildcards.
+
+- **Allow** matches when every word is the same. `git status` allows
+  `git  status`, but not `git status --short` or `/usr/bin/git status`.
+- **Ask** and **Deny** match every command that starts with the rule's
+  words, wherever its program is run from. `git push` matches
+  `git push origin main` and `/usr/bin/git push`.
+
+Only simple commands can be allowed. Shell operators, quotes, substitutions,
+redirects and a variable set before the program require approval, even when
+a broad tool Allow matches. So does a command that names a working directory
+outside the chat's project.
+
+An Ask or Deny on a command is a guard rail, not a sandbox. It matches the
+words as written: a Deny on `git push` does not match `git -C . push`, a
+script that pushes, or an alias. Use it to catch mistakes, not to contain an
+agent you do not trust.
+
+### Allowing a whole command tool
+
+A Tool rule that allows `claude/Bash`, `clackatoo/run_in_terminal`,
+`clackatoo/run_in_background` or `clackatoo/start_activity` without exact
+arguments allows **any simple command**. That includes `sh script.sh`,
+`make` and `python3 x.py`, which run code the rule never sees.
+
+An agent allowed to run any command can do what you can. It can read your
+files, reach the daemon's socket, and change these rules by writing the
+daemon's config. Clackatoo does not try to list the commands that would do
+so. Choose such a rule only for an agent you would let work unattended, and
+prefer the provider's sandbox for limits that must hold.
+
+### File rules
 
 Read and Edit targets are directories written as absolute paths, `~/…`,
-`{project}`, or `{project}/…`. Links are resolved before matching, including
-the existing parents of new files. Unresolvable paths ask you. These matches
-require recognizable file inputs: Claude's Read, Write, Edit and NotebookEdit
-tools, and Clackatoo's file-opening tools. An opaque or multi-file provider
-approval asks you instead. Codex approvals carrying additional consent
-content also ask directly, including network-access consent.
+`{project}`, or `{project}/…`. `~` and `{project}` have that meaning in a
+rule's target only. A path in a request must be absolute; one that is not,
+including one starting with `~`, asks you. Links are resolved before
+matching, including the existing parents of new files. Unresolvable paths
+ask you.
 
-Direct edits to Clackatoo's config and state, or to `.clackatoo`, `.claude`,
-`.codex`, `.agents` and `.git` paths, require your approval even if an Allow
-matches, including when those protected folder names are symbolic links.
-A Deny still refuses them.
+`{project}` is the chat's git repository, or its working directory outside
+one. It matches nothing when that is your home directory, so a project rule
+never comes to cover everything you own.
+
+These matches require recognizable file inputs: Claude's Read, Write, Edit
+and NotebookEdit tools. An opaque or multi-file provider approval asks you
+instead. Codex approvals carrying additional consent content also ask
+directly, including network-access consent. Clackatoo's own file-opening
+tools ask only for a file outside the project, and that question is always
+yours to answer; a Deny on a Read rule still refuses it.
+
+Some files ask you even if an Allow matches. A Deny still refuses them.
+Their names are compared in any letter case, and a protected name that is a
+symbolic link is still protected.
+
+| Request | Always asks for |
+| --- | --- |
+| Edit | Clackatoo's config and state |
+| Edit | Anything in a `.clackatoo`, `.claude`, `.codex`, `.agents`, `.git` or `.vscode` folder, including skills, specialists and git hooks |
+| Edit | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.mcp.json`, `.envrc`, `.cargo/config.toml` and `.cargo/config` |
+| Read or Edit | `~/.ssh`, `~/.aws`, `~/.gnupg` and `~/.config/gh` |
+| Read or Edit | `.env` and `.env.*` files, and Clackatoo's `mcp-private` folder |
+
+The Edit rows are files that instruct agents or run code when a project is
+opened. This list is a guard against accidents. It does not cover every file
+that can run code, such as a build script.
 
 ## Recent decisions
 
@@ -136,10 +214,21 @@ how long ago, with the matching rule number, or why approval was needed. It does
 command text or file contents. The history clears when the daemon restarts
 or upgrades.
 
-Checks that fail or time out ask you. Changing the rules cancels pending
-checks and permission questions so an old approval cannot bypass a new Deny.
-A stopped or superseded turn cannot execute a delayed automatic approval. Pending checks
-become human questions before an upgrade; they are never replayed.
+Checks that fail or take longer than three seconds ask you.
+
+Changing the rules cancels nothing. A check still in progress is evaluated
+again against the new rules. A question you have already been asked stays
+open, unless the new rules now allow or deny what it asks about; then they
+answer it, so an open question cannot bypass a new Deny.
+
+A check is **Cancelled** when its turn ended or was stopped before the
+check finished, or when the chat moved to another session. Nothing runs, and
+the agent is told the check was cancelled, not that you refused. Stopping a
+turn affects that turn only: a turn the agent starts later, such as when a
+background task ends, is checked as usual.
+
+Pending checks become human questions before an upgrade; they are never
+replayed.
 
 ## Configuration and enforcement
 
@@ -163,8 +252,15 @@ The list is limited to 128 rules and 64 KiB of JSON; each target is at most
 4,096 bytes. Unknown fields and invalid values are refused. Invalid config
 keeps the last configuration that ran successfully.
 
+Rules belong to the daemon a chat runs on. A chat on another machine follows
+that machine's rules and default engine, whichever window shows it, and this
+page edits the rules of the daemon the window is connected to. Rules are not
+copied between machines.
+
 These are approval rules, not an operating-system sandbox. An approved
 program can run other code and make changes the rule does not inspect.
 Provider-approved operations can bypass this approval boundary, and an
 unsandboxed shell running as you can reach your config and daemon sockets.
+The daemon applies changes to its config as they are saved, so a program
+that can write `daemon/settings.lua` can change these rules.
 Use the provider's sandbox to enforce filesystem and network boundaries.

@@ -41,7 +41,29 @@ pub(crate) struct Definition {
     pub(crate) url: Option<String>,
     pub(crate) headers: BTreeMap<String, Setting>,
     pub(crate) oauth: Option<OAuth>,
+    /// How long connecting, and each request that isn't a tool call, may
+    /// take.
     pub(crate) timeout_seconds: u32,
+    /// How long a tool call may take since it was sent, or since the
+    /// server last reported progress on it. Left out of a saved definition
+    /// when it's the default, so a definition that never set it reads the
+    /// same to a build from before it.
+    #[serde(skip_serializing_if = "is_default_call_timeout")]
+    pub(crate) call_timeout_seconds: u32,
+}
+
+/// How long a tool call may take unless its definition says otherwise.
+pub(crate) const DEFAULT_CALL_TIMEOUT: u32 = 600;
+
+/// The longest a definition may let a tool call take: a day.
+const LONGEST_CALL_TIMEOUT: u32 = 24 * 60 * 60;
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the signature serde's skip_serializing_if calls"
+)]
+fn is_default_call_timeout(seconds: &u32) -> bool {
+    *seconds == DEFAULT_CALL_TIMEOUT
 }
 
 impl Default for Definition {
@@ -56,6 +78,7 @@ impl Default for Definition {
             headers: BTreeMap::new(),
             oauth: None,
             timeout_seconds: 30,
+            call_timeout_seconds: DEFAULT_CALL_TIMEOUT,
         }
     }
 }
@@ -66,7 +89,7 @@ impl Definition {
             return Err("Server configuration exceeds 64 KiB".into());
         }
         let value: Self = serde_json::from_str(text)
-            .map_err(|_| "Invalid server configuration: expected command/args/env or url/headers, and optional enabled, oauth and timeout_seconds".to_owned())?;
+            .map_err(|_| "Invalid server configuration: expected command/args/env or url/headers, and optional enabled, read_only, oauth, timeout_seconds and call_timeout_seconds".to_owned())?;
         match (&value.command, &value.url) {
             (Some(command), None)
                 if !command.trim().is_empty()
@@ -79,6 +102,9 @@ impl Definition {
         }
         if value.timeout_seconds == 0 || value.timeout_seconds > 600 {
             return Err("timeout_seconds must be between 1 and 600".into());
+        }
+        if value.call_timeout_seconds == 0 || value.call_timeout_seconds > LONGEST_CALL_TIMEOUT {
+            return Err("call_timeout_seconds must be between 1 and 86400".into());
         }
         if value.args.len() > 128
             || value
@@ -264,10 +290,17 @@ impl Bound {
     }
 }
 
+/// The servers a project's chats may be given, by name, and what went
+/// wrong reading them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Registry {
     pub(crate) servers: BTreeMap<String, Bound>,
+    /// What to tell the user of each file or entry that couldn't be read.
     pub(crate) problems: Vec<String>,
+    /// The files that couldn't be read at all. Only their servers are
+    /// missing: a connection already using one of them keeps the
+    /// definition it was given, as the file may be half written.
+    pub(crate) unreadable: BTreeSet<PathBuf>,
 }
 
 pub(crate) fn personal(roots: &Roots) -> PathBuf {
@@ -277,13 +310,7 @@ pub(crate) fn personal(roots: &Roots) -> PathBuf {
         .map_or_else(|| roots.home.join(".agents"), Clone::clone)
 }
 pub(crate) fn project(roots: &Roots) -> PathBuf {
-    roots
-        .cwd
-        .ancestors()
-        .take_while(|p| *p != roots.home)
-        .find(|p| p.join(".git").exists())
-        .unwrap_or(&roots.cwd)
-        .to_owned()
+    roots.project_top().to_owned()
 }
 pub(crate) fn private(roots: &Roots) -> PathBuf {
     personal(roots).join("mcp-private")
@@ -292,10 +319,9 @@ pub(crate) fn private(roots: &Roots) -> PathBuf {
 impl Registry {
     pub(crate) fn discover(roots: &Roots, bundles: &BTreeSet<PathBuf>) -> Self {
         let mut registry = Self::default();
-        for dir in roots.cwd.ancestors() {
-            if dir == roots.home {
-                break;
-            }
+        // From the working directory up to the project's root, and never
+        // above it: a folder above is nobody's project, and may be anyone's.
+        for dir in roots.project_folders() {
             registry.read(
                 roots,
                 &dir.join(".agents/mcp.json"),
@@ -303,9 +329,6 @@ impl Registry {
                 McpScope::Project,
                 true,
             );
-            if dir.join(".git").exists() {
-                break;
-            }
         }
         registry.read(
             roots,
@@ -343,6 +366,7 @@ impl Registry {
             Ok(None) => return,
             Err(why) => {
                 self.problems.push(format!("{}: {why}", path.display()));
+                self.unreadable.insert(path.to_owned());
                 return;
             }
         };

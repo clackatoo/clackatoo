@@ -10,10 +10,23 @@ related:
 
 A skill is a procedure in a `SKILL.md` file, with optional supporting files
 and scripts beside it. clackatoo supplies the same catalogue to every agent
-in a working directory, scoped by its selected specialist. Only the names and descriptions go to the agent
-initially; the full instructions are loaded when needed.
-After a completed compaction, the catalogue accompanies the next ordinary
-request again.
+in a working directory, scoped by its selected specialist. Only the names and
+the start of each description go to the agent initially; the full
+instructions are loaded when needed.
+
+The catalogue goes with a session's first ordinary request, and again with the
+next one after a completed compaction. It's kept short, as every chat pays for
+it, and every chat an agent starts:
+
+- **Each skill is one line**: its name and about the first 200 characters of
+  its description, cut at a word and ending in `…`.
+- **The whole is at most 4 KiB.** With more skills than fit, it ends by saying
+  that `list_skills` has the rest.
+- **It isn't sent again when it changes.** An agent that needs the current
+  list calls `list_skills`.
+- **The built-in `explore`, `research` and `plan` specialists get none**, as
+  they choose no skills.
+- **A daemon upgrade sends it once more** to each chat.
 
 ## Using a skill
 
@@ -30,7 +43,7 @@ accompany the request.
 
 With the chat's **Tools** on, an agent can also select a skill whose
 description matches the task. `load_skill` returns its instructions and
-directory; `list_skills` refreshes the catalogue. Neither tool executes a
+directory; `list_skills` reads the catalogue again and lists it. Neither tool executes a
 script, changes the agent's model, or grants permissions. The agent uses its
 usual tools to follow the procedure.
 
@@ -48,30 +61,91 @@ editor on the workspace's machine. The Settings search also finds skills by
 name, description, source and path. With no skills, the page says where to
 put one.
 
-The list is read each time the page is shown. New chats, `list_skills` and
-`load_skill` also discover skills again. A slash invocation reads the current
-file, so edits to an existing procedure apply on its next invocation; a
-removed or newly invalid skill is refused rather than run from a stale copy.
+A skill that can't be used is listed with the reason: its file is broken, it
+asks for something shared skills don't do, its project isn't trusted, or it's
+switched off. Specialists and skillsets that couldn't be loaded are listed
+here too, by name, with what's wrong with them.
+
+The list is read each time the page is shown. A new chat and `list_skills`
+also read the folders again; a catalogue read in the last two seconds is used
+as it is, so the chats an agent starts together share one read. What you
+change in your own folders reaches the chats in every project the next time
+any of them reads.
+
+`load_skill` and a slash invocation read only the skill's own file, each time.
+So edits to an existing procedure apply on its next use, and a removed or
+newly invalid skill is refused rather than run from a stale copy.
 
 ## Where skills live
 
 Put a project's skills in `.agents/skills/NAME/SKILL.md`. Put personal skills
 in `~/.agents/skills/NAME/SKILL.md`, or `skills/NAME/SKILL.md` in clackatoo's
-config directory. Discovery also reads `.claude/skills` in the project,
-`~/.claude/skills`, and `~/.codex/skills` as compatibility folders.
+config directory. A skill's folder is its name: `name` in its `SKILL.md` must
+say the same.
+
+Three kinds of folder are read, each trusted differently:
+
+| Folders | How they're read |
+|---|---|
+| Your own: `~/.agents/skills`, and `skills` in clackatoo's config directory | Skills may be grouped in folders, up to four deep. Symlinked folders and files are followed, without walking cycles. |
+| A project's: `.agents/skills` | As your own, but only once you [trust the project](#project-trust), and never through a symlink. |
+| Other products': `~/.claude/skills`, `~/.codex/skills`, and a project's `.claude/skills` | One folder deep only, `NAME/SKILL.md`, as those products document them. A project's needs trust too. |
+
+Folders whose names start with a dot are skipped everywhere. So what another
+product keeps in its folder for itself isn't offered: the skills the Claude
+desktop app syncs into `~/.claude/skills/synced`, and those Codex bundles in
+`~/.codex/skills/.system`.
 
 Project folders are searched from the chat's working directory up to its
-repository root. The closest project copy wins; within a directory,
-`.agents/skills` wins over `.claude/skills`. Personal clackatoo skills come
-next, then personal `.agents`, Claude and Codex folders in that order. A
-broken higher-priority definition does not enable a lower-priority copy.
-Only the chosen copy is offered as a command. Skill folders may be nested
-up to four levels, and symlinked folders are followed without walking cycles.
+project root: the repository it's in, or else the working directory itself.
+Nothing above the project is read, and neither is a project folder that
+belongs to another user, such as a shared scratch directory. Your home
+directory is never read as a project.
+
+The closest project copy wins; within a directory, `.agents/skills` wins over
+`.claude/skills`. Personal clackatoo skills come next, then personal
+`.agents`, Claude and Codex folders in that order. Only the chosen copy is
+offered as a command. A broken higher-priority copy does not enable a
+lower-priority one: its folder's name is taken either way.
 
 Native plugin packages and their installation registries are not imported.
 To share an instruction-only skill from one, place or symlink its skill
-folder in a shared skill directory. This supplies its files; it does not
-install the plugin's tools or other dependencies.
+folder in one of your own skill directories. This supplies its files; it does
+not install the plugin's tools or other dependencies.
+
+### Project trust
+
+A cloned repository can hold anything, so a project's skills, skillsets and
+[specialists](~clackatoo/reference/specialists) load only from a folder you've
+trusted. It's the same trust that lets a project's
+[language servers](~clackatoo/reference/languages#trusted-folders) run:
+`clackatoo trust` in the folder, or `:trust FOLDER`, and `:trusted` lists
+what's marked.
+
+- **Until then nothing in the project's folders is read.** What they hold is
+  listed in Settings by folder name, as not loaded, and a new chat there says
+  so once.
+- **Your own skill of the same name is still offered.** A project that isn't
+  trusted changes nothing.
+- **Trusting or untrusting a folder reads its chats' catalogues again**, so
+  open chats gain or lose the project's skills at once.
+- **Trust never lets a project replace a built-in specialist** or loosen one
+  of your own: see [Specialists](~clackatoo/reference/specialists#defining-a-specialist).
+
+### Switching skills off
+
+`skills.disabled` is a daemon option listing the skills never offered to any
+agent, by name, with spaces or commas between them:
+
+```lua
+daemon.skills.disabled = "docx pptx imagegen"
+```
+
+A skill switched off stays listed in Settings, with that as its reason. It has
+no slash command and no line in the catalogue, and `load_skill` refuses it.
+Skillsets' skills are switched off the same way. The option takes effect as
+the config is saved. There's no switch for one agent alone: every agent
+sharing the same skills is what they're for.
 
 ## Skillsets
 
@@ -129,12 +203,14 @@ specialist registers a callable role with its own skills, instructions,
 defaults and limits. Its instructions and private skills do not merge into
 the containing role.
 
-Unknown fields and future format numbers are refused, with the reason in
-the daemon log. Hooks are reserved for later capability support; a bundle's
-MCP servers are described under [Bundled MCP servers](#bundled-mcp-servers).
-Bundles run no installation commands, fetch no dependencies and start no
-services. Install one by placing or symlinking its folder into a skillset
-directory; the Skills page lists it the next time it's shown.
+Unknown fields and future format numbers are refused. A bundle that's refused
+is listed under **Settings → Agents → Skills** with the reason, and the reason
+is in the daemon log too. Hooks are reserved for later capability support; a
+bundle's MCP servers are described under
+[Bundled MCP servers](#bundled-mcp-servers). Bundles run no installation
+commands, fetch no dependencies and start no services. Install one by placing
+or symlinking its folder into a skillset directory; the Skills page lists it
+the next time it's shown.
 
 ## Writing a skill
 
@@ -153,12 +229,15 @@ Check the release named in $ARGUMENTS:
 ```
 
 The YAML frontmatter needs a name and description. Names contain at most 64
-lowercase letters, digits, hyphens, underscores or colons. Names reserved by
+lowercase letters, digits, hyphens, underscores or colons, and match the
+skill's folder. The file may start with a byte-order mark, use Windows line
+ends, and end at its closing `---`. Names reserved by
 built-in commands, such as `compact`, `init` and `review`, cannot be used.
 Descriptions should say when to use the skill. Supporting paths are relative
 to the skill's directory, which is supplied with the instructions.
-`$ARGUMENTS` is replaced by the words after the command. `${CLAUDE_SKILL_DIR}`
-is also accepted as a reference to the skill's directory.
+`$ARGUMENTS` is replaced by the words after the command. A skill that doesn't
+use it gets them after its instructions instead, as `User arguments:`.
+`${CLAUDE_SKILL_DIR}` is also accepted as a reference to the skill's directory.
 
 `disable-model-invocation: true` makes a skill user-only: it stays in the
 slash menu, but is omitted from the automatic catalogue and refused by the
@@ -170,8 +249,9 @@ be set to leave neither kind of invocation available.
 Runtime-specific execution settings, including `context`, `agent`, `model`,
 `effort`, `hooks`, `allowed-tools`, `disallowed-tools`, `background`, `shell`
 and named `arguments`, are not executed by shared skills. Such a skill is
-shown as unavailable with its reason. Dynamic shell expansion and positional
-`$ARGUMENTS[N]` expansion are also unsupported. Files larger than 64 KiB or
+shown as unavailable with its reason. Dynamic shell expansion, a line that
+starts with `` !` `` outside a code block, and positional `$ARGUMENTS[N]`
+expansion are also unsupported. Files larger than 64 KiB or
 with invalid metadata are shown with their problem.
 
 ## Hosted runtimes
@@ -192,7 +272,9 @@ edited. Native skill command entries identified by the adapters are filtered
 from the slash menu in favour of shared skills. Built-in commands remain.
 
 Opting in lets the runtime apply its own plugin and skill configuration
-alongside shared skills. Shared skills win command-name collisions. This
+alongside shared skills. A command the agent offers itself stays the agent's:
+a shared skill of the same name isn't offered as a slash command, though an
+agent can still load it. This
 also restores the native skill mechanism so a plugin's skills can work with
 its other components. The option permits native plugins; it does not install
 or enable any particular plugin.

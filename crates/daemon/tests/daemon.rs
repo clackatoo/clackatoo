@@ -14590,33 +14590,51 @@ fn refusing_tells_the_agent_and_always_allowing_stops_the_asking() {
     );
 }
 
-#[test]
-fn clackatoo_permission_rules_override_tools_allow_and_keep_unmatched_requests_interactive() {
+/// A daemon with tools, whose new chats have clackatoo's rules `rules`
+/// answer their approval requests.
+fn with_permission_rules(rules: &str) -> TestDaemon {
     use clackatoo_daemon::permissions::{Config, Engine, read_rules};
-    let daemon = TestDaemon::start_with(|_, config| {
+    let rules = read_rules(rules).unwrap();
+    TestDaemon::start_with(move |dir, config| {
         config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
         config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.browser = Some(clackatoo_daemon::BrowserConfig {
+            program: Some(dir.join("no-browser")),
+            profile: Some(dir.join("profile")),
+            data: None,
+            home: dir.to_owned(),
+            idle: Duration::from_mins(1),
+        });
         config.permissions = Config {
             engine: Engine::Clackatoo,
-            rules: read_rules(
-                r#"[
-                {"decision":"allow","kind":"tool","target":"clackatoo/list_panes"},
-                {"decision":"deny","kind":"tool","target":"clackatoo/run_in_terminal"}
-            ]"#,
-            )
-            .unwrap(),
+            rules,
         };
-    });
+    })
+}
+
+#[test]
+fn clackatoo_permission_rules_override_tools_allow_and_keep_unmatched_requests_interactive() {
+    let daemon = with_permission_rules(
+        r#"[
+        {"decision":"allow","kind":"command","target":"true"},
+        {"decision":"deny","kind":"command","target":"touch"}
+    ]"#,
+    );
     let mut client = daemon.client();
     let chat = start_tooled_chat(&mut client, AgentTools::Allow);
-    let node = ask(&mut client, chat, "mcp list_panes {}");
+    let node = ask(
+        &mut client,
+        chat,
+        "mcp run_in_terminal {\"command\":\"true\"}",
+    );
     assert!(
         node.settings
             .iter()
             .any(|s| s.is_permission_engine() && s.value == "clackatoo")
     );
     assert!(node.question.is_none());
-    assert!(!last_words(&node).contains("failed:"));
+    assert!(!last_words(&node).contains("failed:"), "{node:#?}");
+    assert_eq!(tab_contents(&mut client).len(), 2, "the rule allowed it");
     let command = format!(
         "touch {}",
         daemon.dir.path().join("must-not-exist").display()
@@ -14629,19 +14647,66 @@ fn clackatoo_permission_rules_override_tools_allow_and_keep_unmatched_requests_i
         last_words(&node)
     );
     assert!(!daemon.dir.path().join("must-not-exist").exists());
-    assert_eq!(tab_contents(&mut client).len(), 1);
+    assert_eq!(tab_contents(&mut client).len(), 2);
+    // Tools is set to Allow, but no rule is about this command: under
+    // rules that asks, and never offers to stop asking.
+    let unmatched = "mcp run_in_terminal {\"command\":\"false\"}";
     client
-        .chat(chat, ChatAction::Send("mcp get_diagnostics {}".into()))
+        .chat(chat, ChatAction::Send(unmatched.into()))
         .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
-    assert!(
-        node.question
-            .as_ref()
-            .unwrap()
-            .choices
-            .iter()
-            .all(|c| c.kind != clackatoo_protocol::ChoiceKind::AllowAlways)
+    let ids: Vec<&str> = (node.question.iter())
+        .flat_map(|question| &question.choices)
+        .map(|choice| choice.id.as_str())
+        .collect();
+    assert_eq!(ids, ["allow", "reject"]);
+    answer(&mut client, chat, Some("reject".into()));
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+}
+
+#[test]
+fn rules_leave_tools_that_never_ask_alone() {
+    // Not even a Deny is looked at for a call nobody would be asked
+    // about: an agent working in the background is never left waiting on
+    // a question nobody sees.
+    let daemon = with_permission_rules(
+        r#"[{"decision":"deny","kind":"tool","target":"clackatoo/list_panes"}]"#,
     );
+    std::fs::write(daemon.dir.path().join("a.txt"), "one\n").unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp list_panes {}\n\
+                  mcp get_diagnostics {}\n\
+                  mcp open_file {\"path\":\"a.txt\"}\n\
+                  mcp send_to_terminal {\"pane\":99,\"text\":\"x\"}";
+    let node = ask(&mut client, chat, prompt);
+    assert!(node.question.is_none(), "{node:#?}");
+    let words = last_words(&node);
+    assert!(!words.contains("list_panes: failed"), "{words}");
+    assert!(!words.contains("get_diagnostics: failed"), "{words}");
+    assert!(!words.contains("open_file: failed"), "{words}");
+    // What would fail anyway fails without a question, as it always did.
+    assert!(words.contains("send_to_terminal: failed"), "{words}");
+    assert!(!words.contains("Clackatoo permissions"), "{words}");
+}
+
+#[test]
+fn the_browsers_first_page_keeps_its_own_answer_under_rules() {
+    let daemon = with_permission_rules(
+        r#"[{"decision":"allow","kind":"tool","target":"clackatoo/browser_navigate"}]"#,
+    );
+    let mut client = daemon.client();
+    let chat = start_browsing_chat(&mut client);
+    let open = "mcp browser_navigate {\"url\":\"https://example.com/\"}";
+    client.chat(chat, ChatAction::Send(open.into())).unwrap();
+    // No rule gives this consent: the user is asked, and offered the
+    // answer that lets the agent browse on, which nothing else does.
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let ids: Vec<&str> = (node.question.iter())
+        .flat_map(|question| &question.choices)
+        .map(|choice| choice.id.as_str())
+        .collect();
+    assert_eq!(ids, ["browse", "reject"]);
     answer(&mut client, chat, Some("reject".into()));
     wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
 }
@@ -16931,10 +16996,13 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
         );
     });
+    // A project of its own: the daemon's home is never indexed.
+    let project = daemon.dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
     let disk = "fn authenticate(user) { user; }\n";
-    std::fs::write(daemon.dir.path().join("auth.curly"), disk).unwrap();
+    std::fs::write(project.join("auth.curly"), disk).unwrap();
     let mut client = daemon.client();
-    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let chat = start_tooled_chat_in(&mut client, AgentTools::Allow, &project);
     let outline = board_calls(
         &mut client,
         chat,
@@ -16960,7 +17028,7 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
         "{map}"
     );
     let mut editor = daemon.client();
-    let buffer = open_attached(&mut editor, daemon.dir.path(), "auth.curly");
+    let buffer = open_attached(&mut editor, &project, "auth.curly");
     let snapshot = attach_buffer(&mut editor, buffer);
     send_change(
         &mut editor,
@@ -16983,7 +17051,7 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
         "{live}"
     );
     assert_eq!(
-        std::fs::read_to_string(daemon.dir.path().join("auth.curly")).unwrap(),
+        std::fs::read_to_string(project.join("auth.curly")).unwrap(),
         disk
     );
     let refused = board_calls(
@@ -16998,10 +17066,25 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
     let work = editor
         .request(&Request::Work(clackatoo_protocol::WorkAction::List))
         .unwrap();
+    // The index being built is the user's to watch and cancel; the
+    // agent's questions of it are not, and leave nothing in the list.
+    let Response::Work(items) = work else {
+        panic!("{work:?}");
+    };
     assert!(
-        matches!(work, Response::Work(ref items) if items.iter().any(|item| item.title.contains("outline"))),
-        "{work:?}"
+        items.iter().any(|item| item.title == "Indexing outline"),
+        "{items:?}"
     );
+    assert!(
+        !items
+            .iter()
+            .any(|item| item.title.is_empty() || item.title.contains("code outline")),
+        "{items:?}"
+    );
+    // A chat in the home directory is refused an index of it, and says why.
+    let home = start_tooled_chat(&mut client, AgentTools::Allow);
+    let refused = board_calls(&mut client, home, &[r#"search_symbols {"query":"a"}"#]);
+    assert!(refused.contains("home directory"), "{refused}");
 }
 
 #[test]
@@ -17251,10 +17334,14 @@ fn a_specialist_time_budget_cancels_even_without_mcp_tools() {
 #[test]
 fn specialist_selection_scopes_skills_and_enforces_invocation_and_budget_controls() {
     let daemon = TestDaemon::start_with(|dir, config| {
+        // Started with a command of the user's, it says it's Claude
+        // Code's adapter, which is what holds a session to a budget of
+        // turns and cost: its name alone wouldn't do.
         config.agents.custom = vec![custom_agent(
             "claude",
             vec![
                 fake_agent().into(),
+                "--steering".into(),
                 "--log".into(),
                 dir.join("agent.log").into(),
             ],
@@ -27887,7 +27974,9 @@ fn native_code_outline_and_project_search_share_unsaved_source_without_a_languag
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
         );
     });
-    let dir = daemon.dir.path();
+    // A project of its own: the daemon's home is never indexed.
+    let dir = &daemon.dir.path().join("project");
+    std::fs::create_dir(dir).unwrap();
     let disk = "fn outer() {\n fn inner() {}\n}\n";
     std::fs::write(dir.join("main.curly"), disk).unwrap();
     std::fs::write(dir.join("other.curly"), "fn project_only() {}\n").unwrap();
@@ -27990,7 +28079,9 @@ fn native_code_outline_refresh_preserves_cancellation_and_explicit_search_retrie
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
         );
     });
-    let dir = daemon.dir.path();
+    // A project of its own: the daemon's home is never indexed.
+    let dir = &daemon.dir.path().join("project");
+    std::fs::create_dir(dir).unwrap();
     std::fs::write(dir.join("main.curly"), "fn entry() {}\n").unwrap();
     for file in 0..1000 {
         std::fs::write(

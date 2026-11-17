@@ -268,7 +268,7 @@ impl ChatView {
                             grant: String::new(),
                             id: String::new(),
                             source: selection.source.clone(),
-                            label: format!("{:?}", selection.source),
+                            label: selection.source.label(),
                             location: String::new(),
                             mode: selection.mode,
                             text: String::new(),
@@ -583,6 +583,23 @@ mod tests {
             matches!(&picker.requests.last().unwrap().1,ContextAction::Preview(ContextSelection{source:ContextRef::Owned{machine,source},..}) if *machine==owner&&matches!(source.as_ref(),ContextRef::File{lines:Some((2,4)),..}))
         );
     }
+    #[test]
+    fn a_draft_selection_restored_before_its_preview_is_named_as_a_person_reads_it() {
+        let mut view = ChatView::new("chat".into(), super::super::fixtures::talk(&[]));
+        view.restore_context_draft(&[ContextSelection {
+            source: ContextRef::Owned {
+                machine: MachineId([5; 16]),
+                source: Box::new(ContextRef::File {
+                    path: "src/auth.rs".into(),
+                    lines: Some((3, 9)),
+                }),
+            },
+            mode: ContextMode::Contents,
+            expected: None,
+        }]);
+        assert_eq!(view.context.attached[0].preview.label, "src/auth.rs#L3-L9");
+    }
+
     #[test]
     fn obsolete_previews_cannot_replace_the_current_choice_and_all_attachments_are_inspectable() {
         let mut view = ChatView::new("chat".into(), super::super::fixtures::talk(&[]));

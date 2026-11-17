@@ -128,6 +128,9 @@ impl Daemon {
             folder.display(),
             if trusted { "trusted" } else { "not trusted" }
         );
+        // What chats there are offered of its skills and specialists goes
+        // by it too.
+        self.skills_changed();
         if trusted {
             // The files of it open, and shown, have their servers now.
             let waiting: Vec<BufferId> = (self.buffers.iter())
@@ -138,7 +141,8 @@ impl Daemon {
                 self.open_in_server(id);
             }
             return Ok(Response::Text(format!(
-                "trusted {shown}: its language servers may run its code"
+                "trusted {shown}: its language servers may run its code, and chats there \
+                 load its skills and specialists"
             )));
         }
         let stopped = self.stop_untrusted_servers();
@@ -148,7 +152,8 @@ impl Daemon {
             n => format!(", and its {n} language servers stopped"),
         };
         Ok(Response::Text(format!(
-            "{shown} isn't trusted: its language servers won't run{stopped}"
+            "{shown} isn't trusted: its language servers won't run{stopped}, and chats there \
+             don't load its skills and specialists"
         )))
     }
 
@@ -267,6 +272,10 @@ impl Daemon {
                 self.trust.folders.mark(root, true);
                 self.trust.carried += 1;
             }
+        }
+        // The chats' catalogues were asked for before these were trusted.
+        if self.trust.carried > 0 {
+            self.skills_changed();
         }
     }
 

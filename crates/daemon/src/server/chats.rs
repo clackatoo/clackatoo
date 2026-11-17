@@ -188,7 +188,7 @@ impl Agents {
     }
 
     /// The agent called `name`, if it's running.
-    fn named(&self, name: &str) -> Option<AgentId> {
+    pub(super) fn named(&self, name: &str) -> Option<AgentId> {
         (self.running.iter())
             .find(|(_, slot)| slot.spec.name == name)
             .map(|(&id, _)| id)
@@ -516,6 +516,8 @@ impl Daemon {
                 fit: None,
             },
         );
+        // Its turns may be of messages that went with context.
+        self.context_history_changed(id);
     }
 
     /// The chat in terminal `id`.
@@ -601,10 +603,10 @@ impl Daemon {
             return;
         }
         if let Some(chat) = self.chat_ref(id)
-            && let Err(why) = chat.specialist_budget().check(&name)
+            && let Err(why) = self.check_budget(chat.specialist_budget(), &name)
         {
             if let Some(chat) = self.chat(id) {
-                chat.failed_to_connect(&why);
+                chat.failed_to_connect(&why.to_string());
             }
             self.collect_damage(id);
             return;
@@ -1073,6 +1075,7 @@ impl Daemon {
                     slot.agent.answer(&request, Ok(result));
                 }
                 (Action::Permit { call, allow }, _, _) => self.permitted(call, allow),
+                (Action::PermitMcp { call, answer }, _, _) => self.answered_mcp(call, answer),
                 (Action::Browser(on), _, _) => self.browser_turned(id, on),
                 (Action::Abandon, slot, _) => {
                     if let Some(slot) = slot {
@@ -1342,6 +1345,7 @@ impl Daemon {
         // telling isn't slow to open: it's waited for as long again.
         if chat.loading() {
             chat.replay(update);
+            self.context_history_changed(id);
             let wait = self.config.session_wait;
             if let Some(asked) = self.agents.opening.get_mut(&id) {
                 let wait = if asked.fetching {
@@ -3092,6 +3096,42 @@ mod tests {
         assert_eq!(items[1], before[1]);
         assert!(matches!(&items[0], Item::Tool(tool) if tool.id == "task"));
         assert!(items[2].tool().is_some_and(|tool| tool.id == "read"));
+        resumed.stop_agents(&[]);
+    }
+
+    /// A chat waiting for its catalogue to connect, as the daemon
+    /// upgrades, isn't left waiting: the read ends with the old daemon's
+    /// workers, and the new daemon reads the catalogue again as the chat
+    /// connects to go on with its message.
+    #[test]
+    fn a_chat_waiting_on_its_skills_through_an_upgrade_connects_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = daemon_with_chat(dir.path());
+        let skill = dir.path().join(".agents/skills/check");
+        std::fs::create_dir_all(&skill).unwrap();
+        let text = "---\nname: check\ndescription: A procedure.\n---\nCheck it.\n";
+        std::fs::write(skill.join("SKILL.md"), text).unwrap();
+        daemon.config.agents.custom = vec![crate::agents::CustomAgent {
+            name: "claude".into(),
+            title: None,
+            starting_mode: None,
+            tasks: None,
+            command: vec![example("fake_agent").into_os_string()],
+        }];
+        assert!(daemon.reading_skills(id), "it waits for its catalogue");
+        assert!(daemon.next_skills_due().is_some());
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(Instant::now()).unwrap();
+        assert!(daemon.next_skills_due().is_none(), "nothing left waiting");
+        drop(daemon);
+        let mut resumed = Daemon::resume(handover, config).unwrap();
+        run_until(&mut resumed, |daemon| {
+            !daemon.chat(id).is_some_and(|chat| chat.answering())
+        });
+        let chat = resumed.chat(id).unwrap();
+        assert_eq!(chat.session(), Some("s1"));
+        assert_eq!(chat.node().turns.len(), 1);
+        assert!(resumed.is_shared_skill(id, "/check"));
         resumed.stop_agents(&[]);
     }
 

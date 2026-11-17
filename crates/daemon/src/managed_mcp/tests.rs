@@ -1,4 +1,6 @@
 mod http;
+mod proxy;
+mod session;
 
 use super::{
     config::{self, Definition, Registry, Setting},
@@ -10,11 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 
 fn roots(dir: &std::path::Path) -> Roots {
-    let roots = Roots {
-        home: dir.join("home"),
-        cwd: dir.join("repo"),
-        config: Some(dir.join("config")),
-    };
+    let roots = Roots::in_project(dir.join("repo"), dir.join("home"), Some(dir.join("config")));
     for path in [&roots.home, &roots.cwd, roots.config.as_ref().unwrap()] {
         std::fs::create_dir_all(path).unwrap();
     }
@@ -479,24 +477,4 @@ for line in sys.stdin:
         ["first", "second"]
     );
     assert!(tools.iter().all(|t| t.description == "[redacted]"));
-}
-
-#[test]
-fn a_server_wanting_a_login_needs_a_sign_in_however_it_says_so() {
-    use clackatoo_protocol::McpState;
-    for why in [
-        "Auth required",
-        "HTTP 401 Unauthorized",
-        "Authentication required. Sign in from MCP Servers in Settings.",
-    ] {
-        assert_eq!(
-            super::proxy::failure_state(why),
-            McpState::NeedsLogin,
-            "{why}"
-        );
-    }
-    assert_eq!(
-        super::proxy::failure_state("Server refused MCP initialization"),
-        McpState::Error
-    );
 }

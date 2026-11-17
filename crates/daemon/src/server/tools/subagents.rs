@@ -394,7 +394,8 @@ impl Daemon {
                 .as_deref()
                 .or(specialist.agent.as_deref())
                 .unwrap_or(parent.agent());
-            specialist.extra.budget.check(provider)?;
+            self.check_budget(specialist.extra.budget, provider)
+                .map_err(|unenforced| unenforced.to_string())?;
             planned.push((new, specialist, dir));
         }
         let mut text = String::new();

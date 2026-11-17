@@ -51,7 +51,11 @@ impl Daemon {
         }
         match action {
             WorkAction::List => {}
-            WorkAction::Cancel(id) => self.work.scheduler.cancel(id).map_err(Error::Other)?,
+            WorkAction::Cancel(id) => self
+                .work
+                .scheduler
+                .cancel_listed(id)
+                .map_err(Error::Other)?,
             WorkAction::Dismiss(id) => self.work.scheduler.dismiss(id).map_err(Error::Other)?,
         }
         Ok(Response::Work(self.work.scheduler.snapshot().1))

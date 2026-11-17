@@ -1,44 +1,119 @@
-//! Daemon-owned context discovery and capture. Disk work stays on bounded workers.
-use super::{Daemon, Source};
-use crate::work::{Priority, Step};
+//! Workspace context: finding what can be attached to a message, capturing
+//! it, and keeping what was captured.
+//!
+//! The loop gathers only what's already in memory: terminals, chats,
+//! boards, reviews and open buffers (`source.rs`). Whatever reads a disk
+//! (files, the outline index, the snapshot store) goes to a worker as a
+//! hidden question (see [`crate::work::Asked`]), and the client's request
+//! is answered when the worker's answer is back.
+
 mod capture;
 mod history;
 mod search;
 mod source;
-use capture::capture;
-use search::SearchJob;
 mod store;
-use clackatoo_protocol::{
-    ContextAction, ContextCandidate, ContextKind, ContextMode, ContextRef, ContextReply,
-    ContextSelection, ContextSnapshot, Error, Response, TerminalId,
-};
-use mio::Token;
-use std::collections::BTreeMap;
+
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-type Replies = Arc<Mutex<Vec<(u64, Result<Output>)>>>;
+use clackatoo_protocol::{
+    ContextAction, ContextKind, ContextMode, ContextRef, ContextReply, ContextSelection,
+    ContextSnapshot, Error, Response, TerminalId,
+};
+use mio::Token;
+
+use super::{Daemon, Held, Source};
+use crate::work::{Asked, Outcome, Question};
+use capture::{Capture, Keep};
+use search::SearchJob;
+
+/// What went wrong, in words for whoever asked.
 type Result<T> = std::result::Result<T, String>;
+
+/// The most context questions that may wait on workers at once.
+const MOST_ASKED: usize = 16;
+
+/// How long a search is waited for. Its own parts (the symbol index, the
+/// walk for files) stop sooner and say so, so this is for a worker that
+/// never got to it.
+const SEARCH_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a preview, or the read of a snapshot kept, is waited for.
+const PREVIEW_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a message's context is waited for before the message is
+/// refused. Longer than a preview's: the user has pressed send, and up to
+/// 32 sources are read and kept.
+const SUBMIT_WAIT: Duration = Duration::from_secs(10);
+
+/// What a snapshot's note says when the store couldn't keep it. The
+/// message went all the same; the snapshot lives only in its conversation.
+const NOT_KEPT: &str = "clackatoo kept no copy of this snapshot outside this conversation.";
+
+/// The context questions waiting on workers, and what goes with them.
 #[derive(Debug, Default)]
 pub(super) struct Contexts {
     history: history::History,
-    next: u64,
-    pending: BTreeMap<u64, Pending>,
-    ready: Replies,
+    asked: Asked<Ask, Result<Output>>,
 }
-#[derive(Debug)]
-struct Pending {
-    tool: Option<serde_json::Value>,
-    secret: Option<String>,
+
+/// A client's request waiting for a worker: who holds a place for its
+/// answer, and for which chat.
+#[derive(Clone, Copy, Debug)]
+struct Place {
     token: Token,
     ticket: u64,
     chat: TerminalId,
-    work: u64,
-    due: Instant,
-    submit: Option<Submission>,
-    search: bool,
 }
+
+/// What the loop keeps while a worker answers.
+#[derive(Debug)]
+enum Ask {
+    /// An agent's `read_context` call, for a snapshot whose text is in the
+    /// store.
+    Tool {
+        token: Token,
+        /// The tool connection's secret, so an answer never goes to
+        /// another connection that took its place.
+        secret: Option<String>,
+        chat: TerminalId,
+        call: serde_json::Value,
+    },
+    /// A search of what can be attached.
+    Search(Place),
+    /// A preview of one selection, or a snapshot read from the store.
+    Preview(Place),
+    /// A message waiting for its context to be captured.
+    Submit(Place, Submission),
+}
+
+impl Ask {
+    /// The chat it was asked for.
+    fn chat(&self) -> TerminalId {
+        match self {
+            Self::Tool { chat, .. } => *chat,
+            Self::Search(place) | Self::Preview(place) | Self::Submit(place, _) => place.chat,
+        }
+    }
+
+    /// What whoever asked is told when no answer came in time.
+    fn too_slow(&self) -> &'static str {
+        match self {
+            Self::Tool { .. } => "Reading the captured context took too long. Try again.",
+            Self::Search(_) => "The search took too long and was stopped. Narrow it and try again.",
+            Self::Preview(_) => {
+                "Capturing the preview took too long. Try again, or choose a smaller range."
+            }
+            Self::Submit(..) => {
+                "Capturing this message's context took too long, so it was not sent. \
+                 Your draft is kept."
+            }
+        }
+    }
+}
+
+/// A message held until its context is captured.
 #[derive(Debug)]
 pub(super) struct Submission {
     pub resolved_context: bool,
@@ -47,30 +122,87 @@ pub(super) struct Submission {
     pub target: Option<clackatoo_protocol::ChatTarget>,
     pub steer: bool,
 }
+
+/// A worker's answer.
 #[derive(Debug)]
 enum Output {
-    Reply(Box<ContextReply>),
-    Captured(Vec<ContextSnapshot>),
+    /// What a search found.
+    Found(Box<ContextReply>),
+    /// What was captured, in the order asked for.
+    Captured {
+        snapshots: Vec<ContextSnapshot>,
+        /// Why the store couldn't keep them, if it was asked to and
+        /// couldn't.
+        unkept: Option<String>,
+    },
 }
+
+/// Text gathered for one selection, with how it's labelled.
+struct Excerpt {
+    /// What it is, for a person.
+    label: String,
+    /// Where it's from: a path or a `clackatoo:` address.
+    location: String,
+    text: String,
+    /// What the reader should know: unsaved, still running, cut short.
+    note: String,
+    /// Whether `text` is only part of the source.
+    partial: bool,
+}
+
+/// One selection, as far as the loop can take it: the worker does the rest.
 enum Prepared {
+    /// A snapshot whose text is read from the store.
     Stored(ContextSnapshot, PathBuf),
+    /// A source the message mentions with `@`: left out if it can't be
+    /// captured, where a chosen attachment would hold the message.
     Optional(Box<Prepared>),
-    Captured(ContextSelection, String, String, String, String),
+    /// Text the loop already had in memory.
+    Captured(ContextSelection, Excerpt),
+    /// A file, or a definition in one, to read.
     File(ContextSelection, Box<super::mentions::Job>),
+    /// A folder under the project root, to list.
     Project(ContextSelection, PathBuf, PathBuf),
 }
 
+/// The hash snapshots, revisions and messages are known by.
 fn hash(bytes: &[u8]) -> String {
     crate::outline::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
-fn snapshot(
-    selection: &ContextSelection,
-    label: String,
-    location: String,
-    mut text: String,
-    note: String,
-) -> Result<ContextSnapshot> {
+/// The identifier a snapshot must have: the hash of all it captured.
+fn identity(snapshot: &ContextSnapshot) -> Option<String> {
+    let identity = serde_json::to_vec(&(
+        &snapshot.source,
+        snapshot.mode,
+        &snapshot.revision,
+        &snapshot.label,
+        &snapshot.location,
+        &snapshot.text,
+        &snapshot.note,
+    ))
+    .ok()?;
+    Some(hash(&identity))
+}
+
+/// The identifier of the first snapshot `prompt` quotes (see
+/// [`ContextSnapshot::quoted`]), if it quotes one.
+fn quoted_snapshot(prompt: &str) -> Option<&str> {
+    let (_, after) = prompt.split_once("> Context ")?;
+    let id = after.split_whitespace().next()?;
+    (id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(id)
+}
+
+/// Makes the snapshot of `excerpt` for `selection`: refused if the source
+/// changed since the preview the user saw, or is too big to send whole.
+fn snapshot(selection: &ContextSelection, excerpt: Excerpt) -> Result<ContextSnapshot> {
+    let Excerpt {
+        label,
+        location,
+        mut text,
+        note,
+        partial,
+    } = excerpt;
     let revision = hash(text.as_bytes());
     if selection
         .expected
@@ -81,9 +213,7 @@ fn snapshot(
             "{label} changed since its preview. Refresh or remove the attachment."
         ));
     }
-    let oversized = text.len() > ContextSnapshot::MAX_TEXT;
-    let partial = note.contains("Partial excerpt") || note.contains("Directory listing");
-    if oversized && selection.mode == ContextMode::Contents {
+    if text.len() > ContextSnapshot::MAX_TEXT && selection.mode == ContextMode::Contents {
         return Err(format!(
             "{label} exceeds 64 KiB. Select a smaller range or use Reference only."
         ));
@@ -91,20 +221,10 @@ fn snapshot(
     if selection.mode == ContextMode::Reference {
         text.clear();
     }
-    let identity = serde_json::to_vec(&(
-        &selection.source,
-        selection.mode,
-        &revision,
-        &label,
-        &location,
-        &text,
-        &note,
-    ))
-    .map_err(|e| e.to_string())?;
-    Ok(ContextSnapshot {
+    let mut snapshot = ContextSnapshot {
         grant: String::new(),
         bytes: u32::try_from(text.len()).map_err(|_| "Context text exceeds its bounds.")?,
-        id: hash(&identity),
+        id: String::new(),
         source: selection.source.clone(),
         label,
         location,
@@ -114,10 +234,14 @@ fn snapshot(
         captured: crate::chat::now(),
         partial,
         note,
-    })
+    };
+    snapshot.id = identity(&snapshot).ok_or("The context can't be identified.")?;
+    Ok(snapshot)
 }
 
 impl Daemon {
+    /// A context request to another machine's daemon, with the terminals
+    /// and chats it names as that daemon knows them.
     pub(super) fn relay_context_action(
         &self,
         at: usize,
@@ -128,6 +252,12 @@ impl Daemon {
         }
         Ok(action)
     }
+
+    /// Renames the terminal or chat `selection` is of as the daemon at
+    /// `at`, which it's relayed to, knows it.
+    ///
+    /// # Errors
+    /// If it belongs to another machine than that one.
     pub(super) fn relay_context_selection(
         &self,
         at: usize,
@@ -142,7 +272,7 @@ impl Daemon {
             _ => None,
         };
         if let Some(id) = id {
-            let Some((source, remote)) = self
+            let Some((_, remote)) = self
                 .relayed_terminal(*id)
                 .filter(|(source, _)| *source == at)
             else {
@@ -150,11 +280,14 @@ impl Daemon {
                     "Context and its destination chat must belong to the same machine.".into(),
                 ));
             };
-            let _ = source;
             *id = remote;
         }
         Ok(())
     }
+
+    /// Answers an agent's `read_context` call for the snapshot `id` of its
+    /// own conversation: at once if its text is in memory, or else from
+    /// the store.
     pub(super) fn read_context_tool(
         &mut self,
         token: Token,
@@ -170,9 +303,9 @@ impl Daemon {
                     .turns
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| turn.is_none_or(|turn| *i == turn as usize))
-                    .flat_map(|(_, t)| &t.context)
-                    .find(|s| s.id == id)
+                    .filter(|(index, _)| turn.is_none_or(|turn| *index == turn as usize))
+                    .flat_map(|(_, turn)| &turn.context)
+                    .find(|snapshot| snapshot.id == id)
             })
             .cloned();
         let Some(snapshot) = snapshot else {
@@ -187,7 +320,7 @@ impl Daemon {
             self.answer_tool(token, call, Ok(snapshot.quoted()));
             return;
         }
-        if self.contexts.pending.len() >= 16 {
+        if self.contexts.asked.len() >= MOST_ASKED {
             self.answer_tool(
                 token,
                 call,
@@ -199,112 +332,146 @@ impl Daemon {
             Some(Source::Tools(connection)) => connection.token.clone(),
             _ => return,
         };
-        self.contexts.next += 1;
-        let number = self.contexts.next;
         let path = self.context_store_path();
-        let ready = Arc::clone(&self.contexts.ready);
-        let id = id.to_owned();
-        let work = self.work.scheduler.submit(
-            format!("context-tool:{number}"),
-            "Reading captured context",
-            None,
-            Priority::Interactive,
-            move |context| {
-                let result = if context.cancelled() {
-                    Err("Context read was cancelled.".into())
-                } else {
-                    store::read(&path, &id).map(|s| Output::Captured(vec![s]))
-                };
-                let failure = result.as_ref().err().cloned();
-                ready
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push((number, result));
-                failure.map_or(Ok(Step::Done), Err)
+        let asked = self.contexts.asked.ask(
+            &mut self.work.scheduler,
+            Question {
+                name: "context-tool",
+                scope: None,
+                wait: PREVIEW_WAIT,
+            },
+            Ask::Tool {
+                token,
+                secret,
+                chat,
+                call: call.clone(),
+            },
+            move |_| {
+                let snapshot = store::read(&path, &snapshot.id).map_err(|err| err.to_string())?;
+                Ok(Output::Captured {
+                    snapshots: vec![snapshot],
+                    unkept: None,
+                })
             },
         );
-        match work {
-            Ok(work) => {
-                self.contexts.pending.insert(
-                    number,
-                    Pending {
-                        token,
-                        ticket: 0,
-                        chat,
-                        work,
-                        due: Instant::now() + Duration::from_secs(3),
-                        submit: None,
-                        search: false,
-                        tool: Some(call.clone()),
-                        secret,
-                    },
-                );
-            }
-            Err(why) => self.answer_tool(token, call, Err(why)),
+        if let Err(why) = asked {
+            self.answer_tool(token, call, Err(why));
         }
     }
 
+    /// The user stopped the chat: a message of theirs still waiting for
+    /// its context isn't sent.
     pub(super) fn cancel_context_submissions(&mut self, chat: TerminalId) {
-        for pending in self
-            .contexts
-            .pending
-            .values_mut()
-            .filter(|p| p.chat == chat && p.submit.is_some())
-        {
-            let _ = self.work.scheduler.cancel(pending.work);
-            pending.due = Instant::now();
+        let stopped = self.contexts.asked.withdraw(
+            &self.work.scheduler,
+            |ask| matches!(ask, Ask::Submit(place, _) if place.chat == chat),
+        );
+        for ask in stopped {
+            self.refuse_context(
+                &ask,
+                "Stopped before its context was captured, so the message was not sent.",
+            );
         }
     }
 
+    /// The chat or terminal `id` closed: nothing more is captured for it
+    /// or remembered of it.
+    pub(super) fn context_closed(&mut self, id: TerminalId) {
+        let closed = self
+            .contexts
+            .asked
+            .withdraw(&self.work.scheduler, |ask| ask.chat() == id);
+        for ask in closed {
+            self.refuse_context(&ask, "The chat closed.");
+        }
+        self.forget_context_history(id);
+    }
+
+    /// The daemon is handing over to a newer one: whoever waits is told
+    /// now, as no answer can follow them there.
     pub(super) fn finish_contexts_for_upgrade(&mut self) {
-        let pending = std::mem::take(&mut self.contexts.pending);
-        for (_, pending) in pending {
-            let _ = self.work.scheduler.cancel(pending.work);
-            let why="The daemon upgraded before context capture completed. The message was not accepted.".to_owned();
-            if let Some(id) = pending.tool {
-                if !matches!(self.sources.get(pending.token.0), Some(Source::Tools(c)) if c.chat == pending.chat && c.token == pending.secret)
-                {
-                    continue;
+        let waiting = self.contexts.asked.withdraw(&self.work.scheduler, |_| true);
+        for ask in waiting {
+            let why = match ask {
+                Ask::Submit(..) => {
+                    "The daemon upgraded before this message's context was captured, so it \
+                     was not sent. Send it again."
                 }
-                self.answer_tool(pending.token, &id, Err(why));
-            } else {
+                _ => "The daemon upgraded before this was answered. Try again.",
+            };
+            self.refuse_context(&ask, why);
+        }
+    }
+
+    /// Tells whoever asked `ask` that it came to nothing, and `why`.
+    fn refuse_context(&mut self, ask: &Ask, why: &str) {
+        match ask {
+            Ask::Tool {
+                token,
+                secret,
+                chat,
+                call,
+            } => {
+                if self.is_context_tool(*token, *chat, secret.as_ref()) {
+                    self.answer_tool(*token, call, Err(why.into()));
+                }
+            }
+            Ask::Search(place) | Ask::Preview(place) | Ask::Submit(place, _) => {
                 self.hand_answer_with(
-                    pending.token,
-                    pending.ticket,
-                    Response::Error(Error::Other(why)),
+                    place.token,
+                    place.ticket,
+                    Response::Error(Error::Other(why.into())),
                 );
             }
         }
     }
-    pub(super) fn context_grant(&self, chat: TerminalId, id: &str) -> String {
-        let Some(chat) = self.chat_ref(chat) else {
-            return String::new();
-        };
-        let seed = self.signer.seed();
-        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &seed.0);
-        let data = [
-            b"clackatoo: retained context\0".as_slice(),
-            chat.project().as_os_str().as_encoded_bytes(),
-            b"\0",
-            id.as_bytes(),
-        ]
-        .concat();
-        crate::outline::hex(ring::hmac::sign(&key, &data).as_ref())
+
+    /// Whether the tool connection at `token` is still the one that asked
+    /// for `chat`, by its `secret`.
+    fn is_context_tool(&self, token: Token, chat: TerminalId, secret: Option<&String>) -> bool {
+        matches!(self.sources.get(token.0), Some(Source::Tools(connection))
+            if connection.chat == chat && connection.token.as_ref() == secret)
     }
+
+    /// Whether the client at `place` still waits there, and may still see
+    /// its chat.
+    fn still_waits(&self, place: Place) -> bool {
+        let waits = matches!(self.sources.get(place.token.0), Some(Source::Client(client))
+        if client.held.iter().any(|held| {
+            matches!(held, Held::Waiting(ticket) if *ticket == place.ticket)
+        }));
+        waits && self.may_see_terminal(place.token, place.chat)
+    }
+
+    /// The proof that the snapshot `id` was captured for `chat`'s project:
+    /// what lets it be attached again there, and nowhere else.
+    pub(super) fn context_grant(&self, chat: TerminalId, id: &str) -> String {
+        self.context_grant_key(chat, id)
+            .map(|(key, data)| crate::outline::hex(ring::hmac::sign(&key, &data).as_ref()))
+            .unwrap_or_default()
+    }
+
+    /// Whether `grant` is the proof [`context_grant`](Self::context_grant)
+    /// gives for the snapshot `id` in `chat`'s project.
     fn context_grant_valid(&self, chat: TerminalId, id: &str, grant: &str) -> bool {
         if grant.len() != 64 || id.len() != 64 || !grant.is_ascii() {
             return false;
         }
-        let Ok(signature) = (0..64)
+        let signature: Option<Vec<u8>> = (0..64)
             .step_by(2)
-            .map(|i| u8::from_str_radix(&grant[i..i + 2], 16))
-            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(|at| u8::from_str_radix(&grant[at..at + 2], 16).ok())
+            .collect();
+        let (Some(signature), Some((key, data))) = (signature, self.context_grant_key(chat, id))
         else {
             return false;
         };
-        let Some(chat) = self.chat_ref(chat) else {
-            return false;
-        };
+        ring::hmac::verify(&key, &data, &signature).is_ok()
+    }
+
+    /// The daemon's key, and what's signed with it, for a grant of the
+    /// snapshot `id` in `chat`'s project.
+    fn context_grant_key(&self, chat: TerminalId, id: &str) -> Option<(ring::hmac::Key, Vec<u8>)> {
+        let chat = self.chat_ref(chat)?;
         let seed = self.signer.seed();
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &seed.0);
         let data = [
@@ -314,8 +481,11 @@ impl Daemon {
             id.as_bytes(),
         ]
         .concat();
-        ring::hmac::verify(&key, &data, &signature).is_ok()
+        Some((key, data))
     }
+
+    /// Where this daemon's snapshots are kept: under its state folder, by
+    /// its socket, so two daemons of one user never share a store.
     pub(super) fn context_store_path(&self) -> PathBuf {
         let base = self
             .config
@@ -333,29 +503,146 @@ impl Daemon {
             .join(hash(socket.as_os_str().as_encoded_bytes()))
             .join("snapshots.sqlite")
     }
+
+    /// The snapshots the conversations in memory refer to, in their turns
+    /// and drafts: the store never lets go of these.
+    fn contexts_in_use(&self) -> BTreeSet<String> {
+        let mut in_use = BTreeSet::new();
+        for slot in self.terminals.values() {
+            let Some(chat) = slot.terminal.chat_ref() else {
+                continue;
+            };
+            let node = chat.node();
+            let attached = node.turns.iter().flat_map(|turn| &turn.context);
+            in_use.extend(attached.map(|snapshot| snapshot.id.clone()));
+            for selection in &node.draft_context {
+                if let ContextRef::Retained { id, .. } = &selection.source {
+                    in_use.insert(id.clone());
+                }
+            }
+        }
+        in_use
+    }
+
+    /// Takes a place for the client at `token`'s answer about `chat`, if
+    /// it may ask about it and another question can wait.
+    fn context_place(&mut self, token: Token, chat: TerminalId) -> Option<Place> {
+        let ticket = self.take_place(token)?;
+        let place = Place {
+            token,
+            ticket,
+            chat,
+        };
+        if !self.may_see_terminal(token, chat) || self.chat_ref(chat).is_none() {
+            self.refuse_place(place, "The destination chat is unavailable.");
+            return None;
+        }
+        Some(place)
+    }
+
+    /// Whether one more question can wait, telling the client at `place`
+    /// if not.
+    fn context_room(&mut self, place: Place) -> bool {
+        if self.contexts.asked.len() < MOST_ASKED {
+            return true;
+        }
+        self.refuse_place(place, "Too many context requests are pending.");
+        false
+    }
+
+    /// Answers the client at `place` that its request failed, and `why`.
+    fn refuse_place(&mut self, place: Place, why: impl Into<String>) {
+        self.hand_answer_with(
+            place.token,
+            place.ticket,
+            Response::Error(Error::Other(why.into())),
+        );
+    }
+
+    /// Does what a client asked of `chat`'s context: a search, a preview,
+    /// or the read of a snapshot one of its turns has.
     pub(super) fn request_context(
         &mut self,
         token: Token,
         chat: TerminalId,
         action: ContextAction,
     ) {
-        self.context_start(token, chat, Some(action), None, Vec::new(), false);
+        let Some(place) = self.context_place(token, chat) else {
+            return;
+        };
+        match action {
+            ContextAction::Search {
+                kind,
+                query,
+                offset,
+            } => self.search_context(place, kind, query, offset),
+            ContextAction::Preview(selection) => {
+                self.preview_context(place, selection, Keep::Nothing);
+            }
+            ContextAction::Read { turn, id } => self.read_context(place, turn, &id),
+        }
     }
+
+    /// Captures `selection` for `chat`'s draft and keeps it, so the draft
+    /// can name it by its identifier: an answer from a side question.
     pub(super) fn retain_context_draft(
         &mut self,
         token: Token,
         chat: TerminalId,
         selection: ContextSelection,
     ) {
-        self.context_start(
-            token,
-            chat,
-            Some(ContextAction::Preview(selection)),
-            None,
-            Vec::new(),
-            true,
-        );
+        let Some(place) = self.context_place(token, chat) else {
+            return;
+        };
+        let keep = Keep::Draft {
+            store: self.context_store_path(),
+            in_use: self.contexts_in_use(),
+        };
+        self.preview_context(place, selection, keep);
     }
+
+    /// Captures one selection and answers with its snapshot.
+    fn preview_context(&mut self, place: Place, selection: ContextSelection, keep: Keep) {
+        if !self.context_room(place) {
+            return;
+        }
+        match self.prepare_context(place.token, place.chat, selection) {
+            Ok(prepared) => self.ask_capture(Ask::Preview(place), vec![prepared], keep),
+            Err(why) => self.refuse_place(place, why),
+        }
+    }
+
+    /// Answers with the snapshot `id` of `chat`'s turn `turn`: at once if
+    /// its text is in memory, or else from the store.
+    fn read_context(&mut self, place: Place, turn: u32, id: &str) {
+        let found = self
+            .chat_ref(place.chat)
+            .and_then(|chat| chat.node().turns.get(turn as usize))
+            .and_then(|turn| turn.context.iter().find(|snapshot| snapshot.id == id))
+            .cloned();
+        let Some(mut snapshot) = found else {
+            self.refuse_place(place, "That captured context is unavailable.");
+            return;
+        };
+        if snapshot.text.len() == snapshot.bytes as usize {
+            snapshot.grant = self.context_grant(place.chat, &snapshot.id);
+            self.hand_answer_with(
+                place.token,
+                place.ticket,
+                Response::Context(ContextReply::Snapshot(snapshot)),
+            );
+            return;
+        }
+        if !self.context_room(place) {
+            return;
+        }
+        let prepared = Prepared::Stored(snapshot, self.context_store_path());
+        self.ask_capture(Ask::Preview(place), vec![prepared], Keep::Nothing);
+    }
+
+    /// Sends `submission` to `chat` with `selections` and whatever files
+    /// it mentions with `@`, once they're captured. A selection that can't
+    /// be captured holds the message; a mention that can't stays text.
     pub(super) fn submit_context(
         &mut self,
         token: Token,
@@ -363,422 +650,329 @@ impl Daemon {
         submission: Submission,
         selections: Vec<ContextSelection>,
     ) {
-        self.context_start(token, chat, None, Some(submission), selections, false);
-    }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "validate, prepare and dispatch one cancellable user capture before acceptance"
-    )]
-    fn context_start(
-        &mut self,
-        token: Token,
-        chat: TerminalId,
-        action: Option<ContextAction>,
-        submit: Option<Submission>,
-        mut selections: Vec<ContextSelection>,
-        retain_draft: bool,
-    ) {
-        let Some(ticket) = self.take_place(token) else {
+        let Some(place) = self.context_place(token, chat) else {
             return;
         };
-        let fail = |this: &mut Self, why: String| {
-            this.hand_answer_with(token, ticket, Response::Error(Error::Other(why)));
-        };
-        if !self.may_see_terminal(token, chat) || self.chat_ref(chat).is_none() {
-            fail(self, "The destination chat is unavailable.".into());
+        if submission.images.len() + selections.len() > ContextSnapshot::MAX_COUNT {
+            self.refuse_place(place, "Attach at most 32 objects in one message.");
             return;
         }
-        let is_search = matches!(action, Some(ContextAction::Search { .. }));
-        if is_search {
-            let previous = self
-                .contexts
-                .pending
-                .iter()
-                .filter(|(_, p)| p.token == token && p.search)
-                .map(|(&n, _)| n)
-                .collect::<Vec<_>>();
-            for n in previous {
-                if let Some(p) = self.contexts.pending.remove(&n) {
-                    let _ = self.work.scheduler.cancel(p.work);
-                    self.hand_answer_with(
-                        p.token,
-                        p.ticket,
-                        Response::Error(Error::Other("Search superseded.".into())),
-                    );
-                }
-            }
-        }
-        if self.contexts.pending.len() >= 16 {
-            fail(self, "Too many context requests are pending.".into());
+        if serde_json::to_vec(&selections).map_or(true, |bytes| bytes.len() > 32 * 1024) {
+            self.refuse_place(place, "Context selectors exceed 32 KiB.");
             return;
         }
-        let mut retained = None;
-        if let Some(ContextAction::Read { turn, id }) = &action {
-            let found = self
-                .chat_ref(chat)
-                .and_then(|c| c.node().turns.get(*turn as usize))
-                .and_then(|t| t.context.iter().find(|c| &c.id == id))
-                .cloned();
-            if let Some(snapshot) = found.as_ref().filter(|s| s.text.len() != s.bytes as usize) {
-                retained = Some(snapshot.clone());
-            } else {
-                self.hand_answer_with(
-                    token,
-                    ticket,
-                    found.map_or_else(
-                        || {
-                            Response::Error(Error::Other(
-                                "That captured context is unavailable.".into(),
-                            ))
-                        },
-                        |mut c| {
-                            c.grant = self.context_grant(chat, &c.id);
-                            Response::Context(ContextReply::Snapshot(c))
-                        },
-                    ),
-                );
-                return;
-            }
-        }
-        if let Some(ContextAction::Preview(selection)) = &action {
-            selections.push(selection.clone());
-        }
-        if selections.len() > ContextSnapshot::MAX_COUNT
-            || submit
-                .as_ref()
-                .is_some_and(|s| s.images.len() + selections.len() > ContextSnapshot::MAX_COUNT)
-        {
-            fail(self, "Attach at most 32 objects in one message.".into());
-            return;
-        }
-        if serde_json::to_vec(&selections).map_or(true, |b| b.len() > 32 * 1024) {
-            fail(self, "Context selectors exceed 32 KiB.".into());
-            return;
-        }
-        let root = self.chat_ref(chat).expect("checked").project().to_owned();
         let mut prepared = Vec::new();
-        let store_path = self.context_store_path();
-        if let Some(snapshot) = retained {
-            prepared.push(Prepared::Stored(snapshot, store_path.clone()));
-        }
         for selection in selections {
             match self.prepare_context(token, chat, selection) {
-                Ok(p) => prepared.push(p),
+                Ok(item) => prepared.push(item),
                 Err(why) => {
-                    fail(self, why);
+                    self.refuse_place(place, why);
                     return;
                 }
             }
         }
-        if let Some(submit) = &submit {
-            let commands = &self.chat_ref(chat).expect("checked").node().commands;
-            if !clackatoo_protocol::agent_command(&submit.text, commands) {
-                for mention in clackatoo_protocol::mentions(&submit.text) {
-                    if prepared.len() > ContextSnapshot::MAX_COUNT {
-                        fail(self, "Attach at most 32 objects in one message.".into());
-                        return;
-                    }
-                    let selection = ContextSelection {
-                        source: ContextRef::File {
-                            path: mention.path.into(),
-                            lines: mention.lines,
-                        },
-                        mode: ContextMode::Contents,
-                        expected: None,
-                    };
-                    if let Ok(item) = self.prepare_context(token, chat, selection) {
-                        prepared.push(Prepared::Optional(Box::new(item)));
-                    }
-                }
-            }
-        }
-        if prepared.is_empty() && action.is_none() {
-            if let Some(submission) = submit {
-                let sent = submission.text.clone();
-                let response = match self.submit_chat_context(chat, submission, Vec::new()) {
-                    Ok(()) => {
-                        if let Some(chat) = self.chat(chat) {
-                            chat.draft_sent(sent);
-                        }
-                        self.collect_damage(chat);
-                        Response::Done
-                    }
-                    Err(error) => Response::Error(error),
-                };
-                self.hand_answer_with(token, ticket, response);
-            }
+        prepared.extend(self.prepare_mentions(place, &submission.text, prepared.len()));
+        if prepared.is_empty() {
+            self.send_with_context(place, submission, Vec::new());
             return;
         }
-        let search = if let Some(ContextAction::Search {
-            kind,
-            query,
-            offset,
-        }) = action
-        {
-            if query.len() > 1024 || offset > 10_000 {
-                fail(self, "Context search exceeds its bounds.".into());
-                return;
-            }
-            let candidates = self.context_candidates(token, chat, kind, &query);
-            let (project, notice) = if matches!(kind, ContextKind::All | ContextKind::Symbol) {
-                match self.outline_project(&root) {
-                    Ok(project) => (Some(project), String::new()),
-                    Err(why) if kind == ContextKind::Symbol => {
-                        fail(self, why);
-                        return;
-                    }
-                    Err(why) => (
-                        None,
-                        format!("Symbols unavailable: {why}. Other sources are shown."),
-                    ),
-                }
-            } else {
-                (None, String::new())
-            };
-            let mut overlays = Vec::new();
-            let mut bytes = 0;
-            for slot in self.buffers.values().filter(|slot| slot.buffer.modified()) {
-                let buffer = &slot.buffer;
-                let Ok(path) = buffer.path().strip_prefix(&root) else {
-                    continue;
-                };
-                let Some(path) = path.to_str().filter(|p| crate::outline::relative(p)) else {
-                    continue;
-                };
-                bytes += buffer.text().len_bytes();
-                if overlays.len() >= 32 || bytes > 16 * 1024 * 1024 {
-                    fail(
-                        self,
-                        "Save some unsaved buffers before searching symbols.".into(),
-                    );
-                    return;
-                }
-                overlays.push(crate::outline::Overlay {
-                    path: path.into(),
-                    text: buffer.text().clone(),
-                    version: buffer.version(),
-                });
-            }
-            Some(SearchJob {
-                notice,
-                kind,
-                query,
-                offset: offset as usize,
-                items: candidates,
-                project,
-                overlays,
-            })
-        } else {
-            None
+        if !self.context_room(place) {
+            return;
+        }
+        let Some(root) = self.chat_ref(chat).map(|chat| chat.project().to_owned()) else {
+            return;
         };
-        self.contexts.next += 1;
-        let number = self.contexts.next;
-        let ready = Arc::clone(&self.contexts.ready);
-        let owner = self.machine.id;
-        let languages = self.config.languages.clone();
-        let retain = submit.as_ref().map(|s| s.text.clone());
-        let retained_root = root.clone();
-        let mut prepared = Some(prepared);
-        let mut search = Some(search);
-        let work = self.work.scheduler.submit(
-            format!("context:{number}"),
-            "Capturing context",
-            None,
-            Priority::Interactive,
-            move |context| {
-                let result = (|| {
-                    if context.cancelled() {
-                        return Err("Context capture was cancelled.".into());
-                    }
-                    if let Some(search) = search.take().flatten() {
-                        return search::run(search, &root, owner, context)
-                            .map(Box::new)
-                            .map(Output::Reply);
-                    }
-                    let mut snapshots = Vec::new();
-                    let mut total = 0;
-                    for item in prepared.take().unwrap_or_default() {
-                        if context.cancelled() {
-                            return Err("Context capture was cancelled.".into());
-                        }
-                        let made = match item {
-                            Prepared::Optional(item) => {
-                                let Ok(made) = capture(*item, languages.as_deref(), context) else {
-                                    continue;
-                                };
-                                made
-                            }
-                            item => capture(item, languages.as_deref(), context)?,
-                        };
-                        if snapshots.iter().any(|s: &ContextSnapshot| s.id == made.id) {
-                            continue;
-                        }
-                        total += made.text.len();
-                        if total > ContextSnapshot::MAX_TOTAL {
-                            return Err(
-                                "Context exceeds 256 KiB. Narrow or remove an attachment.".into()
-                            );
-                        }
-                        snapshots.push(made);
-                    }
-                    if let Some(text) = &retain {
-                        store::remember(&store_path, &retained_root, text, &snapshots)?;
-                    } else if retain_draft {
-                        store::retain(&store_path, &snapshots)?;
-                    }
-                    Ok(Output::Captured(snapshots))
-                })();
-                let failure = result.as_ref().err().cloned();
-                ready
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push((number, result));
-                failure.map_or(Ok(Step::Done), Err)
-            },
-        );
-        match work {
-            Ok(work) => {
-                self.contexts.pending.insert(
-                    number,
-                    Pending {
-                        tool: None,
-                        secret: None,
-                        token,
-                        ticket,
-                        chat,
-                        work,
-                        due: Instant::now() + Duration::from_secs(3),
-                        search: is_search,
-                        submit,
-                    },
-                );
+        let keep = Keep::Message {
+            store: self.context_store_path(),
+            root,
+            text: submission.text.clone(),
+            in_use: self.contexts_in_use(),
+        };
+        self.ask_capture(Ask::Submit(place, submission), prepared, keep);
+    }
+
+    /// The files `text` mentions with `@`, to capture if they can be,
+    /// with `already` attachments chosen: as many as a message may still
+    /// take. None if `text` is a command for the agent.
+    fn prepare_mentions(&mut self, place: Place, text: &str, already: usize) -> Vec<Prepared> {
+        let commands = self
+            .chat_ref(place.chat)
+            .map(|chat| chat.node().commands.clone())
+            .unwrap_or_default();
+        if clackatoo_protocol::agent_command(text, &commands) {
+            return Vec::new();
+        }
+        let mut prepared = Vec::new();
+        for mention in clackatoo_protocol::mentions(text) {
+            if already + prepared.len() >= ContextSnapshot::MAX_COUNT {
+                break;
             }
-            Err(why) => fail(self, why),
+            let selection = ContextSelection {
+                source: ContextRef::File {
+                    path: mention.path.into(),
+                    lines: mention.lines,
+                },
+                mode: ContextMode::Contents,
+                expected: None,
+            };
+            if let Ok(item) = self.prepare_context(place.token, place.chat, selection) {
+                prepared.push(Prepared::Optional(Box::new(item)));
+            }
+        }
+        prepared
+    }
+
+    /// Puts `prepared` to a worker to capture, keeping `ask` for its
+    /// answer.
+    fn ask_capture(&mut self, ask: Ask, prepared: Vec<Prepared>, keep: Keep) {
+        let (name, wait) = match &ask {
+            Ask::Submit(..) => ("context-submit", SUBMIT_WAIT),
+            _ => ("context-preview", PREVIEW_WAIT),
+        };
+        let place = match &ask {
+            Ask::Search(place) | Ask::Preview(place) | Ask::Submit(place, _) => Some(*place),
+            Ask::Tool { .. } => None,
+        };
+        let job = Capture {
+            prepared,
+            languages: self.config.languages.clone(),
+            keep,
+        };
+        let asked = self.contexts.asked.ask(
+            &mut self.work.scheduler,
+            Question {
+                name,
+                scope: None,
+                wait,
+            },
+            ask,
+            move |context| capture::run(job, &|| context.cancelled()),
+        );
+        if let (Err(why), Some(place)) = (asked, place) {
+            self.refuse_place(place, why);
         }
     }
 
+    /// Searches what can be attached to `place`'s chat. The loop lists
+    /// what's in memory; a worker searches files and symbols, and ranks.
+    fn search_context(&mut self, place: Place, kind: ContextKind, query: String, offset: u32) {
+        if query.len() > 1024 || offset > 10_000 {
+            self.refuse_place(place, "Context search exceeds its bounds.");
+            return;
+        }
+        // A newer search from the same client replaces its last.
+        let replaced = self.contexts.asked.withdraw(
+            &self.work.scheduler,
+            |ask| matches!(ask, Ask::Search(other) if other.token == place.token),
+        );
+        for ask in replaced {
+            self.refuse_context(&ask, "Search superseded.");
+        }
+        if !self.context_room(place) {
+            return;
+        }
+        let Some(root) = self
+            .chat_ref(place.chat)
+            .map(|chat| chat.project().to_owned())
+        else {
+            return;
+        };
+        let listed = self.context_candidates(place.token, place.chat, kind, &query);
+        let project = match self.search_index(kind, &root) {
+            Ok(project) => project,
+            Err(why) => {
+                self.refuse_place(place, why);
+                return;
+            }
+        };
+        let overlays = match &project {
+            Some(_) => self.outline_overlays(&root, None),
+            None => super::outline::Overlays::default(),
+        };
+        let job = SearchJob {
+            kind,
+            query,
+            offset: offset as usize,
+            listed,
+            project,
+            overlays,
+            root,
+            owner: self.machine.id,
+        };
+        let asked = self.contexts.asked.ask(
+            &mut self.work.scheduler,
+            Question {
+                name: "context-search",
+                scope: None,
+                wait: SEARCH_WAIT,
+            },
+            Ask::Search(place),
+            move |context| {
+                let found = search::run(job, &|| context.cancelled())?;
+                Ok(Output::Found(Box::new(found)))
+            },
+        );
+        if let Err(why) = asked {
+            self.refuse_place(place, why);
+        }
+    }
+
+    /// The outline index a search of `kind` in the project at `root`
+    /// reads. Only a search for symbols starts one: opening the picker,
+    /// which searches everything, reads an index that's already loaded,
+    /// or none, so attaching a file never sets off a walk of the project.
+    ///
+    /// # Errors
+    /// If symbols were asked for and the project can't be indexed.
+    fn search_index(
+        &mut self,
+        kind: ContextKind,
+        root: &Path,
+    ) -> Result<Option<std::sync::Arc<crate::outline::Project>>> {
+        match kind {
+            ContextKind::Symbol => self.outline_project(root).map(Some),
+            ContextKind::All => Ok(self.outline_loaded(root)),
+            _ => Ok(None),
+        }
+    }
+
+    /// When the loop must next look at what waits here.
     pub(super) fn next_context_due(&self) -> Option<Instant> {
         self.contexts
-            .pending
-            .values()
-            .map(|p| p.due)
-            .chain(self.contexts.history.next_due())
+            .asked
+            .next_due()
+            .into_iter()
+            .chain(self.next_context_history_due())
             .min()
     }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "validate and complete each pending window or tool response once"
-    )]
+
+    /// Takes the workers' answers and gives each to whoever asked.
     pub(super) fn take_contexts(&mut self) {
         self.take_context_history();
-        let mut ready = std::mem::take(
-            &mut *self
-                .contexts
-                .ready
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        let expired = self
+        let settled = self
             .contexts
-            .pending
-            .iter()
-            .filter(|(_, p)| {
-                p.due <= Instant::now()
-                    || self.work.scheduler.state(p.work).is_some_and(|s| {
-                        matches!(
-                            s,
-                            clackatoo_protocol::WorkState::Cancelled
-                                | clackatoo_protocol::WorkState::Failed
-                        )
-                    })
-            })
-            .map(|(&n, _)| n)
-            .collect::<Vec<_>>();
-        for n in expired {
-            if !ready.iter().any(|(id, _)| *id == n) {
-                ready.push((n,Err("Context capture was cancelled or timed out. Your message was not accepted.".into())));
-            }
-        }
-        for (number, result) in ready {
-            let Some(pending) = self.contexts.pending.remove(&number) else {
-                continue;
-            };
-            let valid = if pending.tool.is_some() {
-                matches!(self.sources.get(pending.token.0),Some(Source::Tools(connection)) if connection.chat==pending.chat && connection.token==pending.secret)
-            } else {
-                matches!(self.sources.get(pending.token.0), Some(Source::Client(c)) if c.held.iter().any(|h| matches!(h,super::Held::Waiting(ticket) if *ticket==pending.ticket)))
-                    && self.may_see_terminal(pending.token, pending.chat)
-            };
-            if !valid {
-                let _ = self.work.scheduler.cancel(pending.work);
-                continue;
-            }
-            let result = result.and_then(|out| {
-                if Instant::now() > pending.due
-                    || self.work.scheduler.state(pending.work).is_some_and(|s| {
-                        matches!(
-                            s,
-                            clackatoo_protocol::WorkState::Cancelled
-                                | clackatoo_protocol::WorkState::Cancelling
-                        )
-                    })
-                {
-                    return Err(
-                        "Context capture was cancelled or timed out. The message was not accepted."
-                            .into(),
-                    );
+            .asked
+            .take(&self.work.scheduler, Instant::now());
+        for (ask, outcome) in settled {
+            let result = match outcome {
+                Outcome::Answered(result) => result,
+                Outcome::TimedOut => Err(ask.too_slow().to_owned()),
+                Outcome::Lost => {
+                    Err("The daemon's background workers stopped before answering.".to_owned())
                 }
-                Ok(out)
-            });
-            if let Some(id) = &pending.tool {
-                let result = if self
-                    .chat_ref(pending.chat)
-                    .is_none_or(|c| c.tools() == clackatoo_protocol::AgentTools::Off)
-                {
-                    Err("This chat's tools have been disabled.".into())
-                } else {
-                    result.and_then(|out| match out {
-                        Output::Captured(mut snapshots) => snapshots
-                            .pop()
-                            .map(|s| s.quoted())
-                            .ok_or_else(|| "Captured context is unavailable.".into()),
-                        Output::Reply(_) => Err("Unexpected context response.".into()),
-                    })
-                };
-                self.answer_tool(pending.token, id, result);
-                continue;
-            }
-            let response = match result {
-                Ok(Output::Reply(reply)) => Response::Context(*reply),
-                Ok(Output::Captured(mut context)) => {
-                    for snapshot in &mut context {
-                        snapshot.grant = self.context_grant(pending.chat, &snapshot.id);
-                    }
-                    if let Some(submit) = pending.submit {
-                        let sent = submit.text.clone();
-                        match self.submit_chat_context(pending.chat, submit, context) {
-                            Ok(()) => {
-                                if let Some(chat) = self.chat(pending.chat) {
-                                    chat.draft_sent(sent);
-                                }
-                                self.collect_damage(pending.chat);
-                                Response::Done
-                            }
-                            Err(e) => Response::Error(e),
-                        }
-                    } else {
-                        context.pop().map_or_else(
-                            || Response::Error(Error::Other("No context was selected.".into())),
-                            |s| Response::Context(ContextReply::Snapshot(s)),
-                        )
+            };
+            match ask {
+                Ask::Tool {
+                    token,
+                    secret,
+                    chat,
+                    call,
+                } => {
+                    if self.is_context_tool(token, chat, secret.as_ref()) {
+                        let result = self.context_tool_answer(chat, result);
+                        self.answer_tool(token, &call, result);
                     }
                 }
-                Err(why) => {
-                    let _ = self.work.scheduler.cancel(pending.work);
-                    Response::Error(Error::Other(why))
+                Ask::Search(place) | Ask::Preview(place) => {
+                    if self.still_waits(place) {
+                        let response = self.context_response(place, result);
+                        self.hand_answer_with(place.token, place.ticket, response);
+                    }
                 }
-            };
-            self.hand_answer_with(pending.token, pending.ticket, response);
+                Ask::Submit(place, submission) => {
+                    if self.still_waits(place) {
+                        self.finish_submission(place, submission, result);
+                    }
+                }
+            }
         }
     }
+
+    /// What an agent's `read_context` call is answered with.
+    fn context_tool_answer(&self, chat: TerminalId, result: Result<Output>) -> Result<String> {
+        if self
+            .chat_ref(chat)
+            .is_none_or(|chat| chat.tools() == clackatoo_protocol::AgentTools::Off)
+        {
+            return Err("This chat's tools have been disabled.".into());
+        }
+        match result? {
+            Output::Captured { mut snapshots, .. } => snapshots
+                .pop()
+                .map(|snapshot| snapshot.quoted())
+                .ok_or_else(|| "Captured context is unavailable.".into()),
+            Output::Found(_) => Err("Unexpected context response.".into()),
+        }
+    }
+
+    /// What a client's search, preview or read is answered with.
+    fn context_response(&self, place: Place, result: Result<Output>) -> Response {
+        match result {
+            Ok(Output::Found(reply)) => Response::Context(*reply),
+            Ok(Output::Captured { mut snapshots, .. }) => match snapshots.pop() {
+                Some(mut snapshot) => {
+                    snapshot.grant = self.context_grant(place.chat, &snapshot.id);
+                    Response::Context(ContextReply::Snapshot(snapshot))
+                }
+                None => Response::Error(Error::Other("No context was selected.".into())),
+            },
+            Err(why) => Response::Error(Error::Other(why)),
+        }
+    }
+
+    /// Sends the message `submission` now its context is captured, or
+    /// tells its client why it can't be. A store that couldn't keep the
+    /// snapshots doesn't hold the message: they go with it, marked as not
+    /// kept.
+    fn finish_submission(&mut self, place: Place, submission: Submission, result: Result<Output>) {
+        let (mut snapshots, unkept) = match result {
+            Ok(Output::Captured { snapshots, unkept }) => (snapshots, unkept),
+            Ok(Output::Found(_)) => {
+                self.refuse_place(place, "Unexpected context response.");
+                return;
+            }
+            Err(why) => {
+                self.refuse_place(place, why);
+                return;
+            }
+        };
+        if let Some(why) = unkept {
+            log::warn!("context sent to chat {} was not kept: {why}", place.chat.0);
+            for snapshot in &mut snapshots {
+                if !snapshot.note.is_empty() {
+                    snapshot.note.push(' ');
+                }
+                snapshot.note.push_str(NOT_KEPT);
+            }
+        }
+        for snapshot in &mut snapshots {
+            snapshot.grant = self.context_grant(place.chat, &snapshot.id);
+        }
+        self.send_with_context(place, submission, snapshots);
+    }
+
+    /// Sends `submission` to its chat with `context`, and answers its
+    /// client.
+    fn send_with_context(
+        &mut self,
+        place: Place,
+        submission: Submission,
+        context: Vec<ContextSnapshot>,
+    ) {
+        let sent = submission.text.clone();
+        let response = match self.submit_chat_context(place.chat, submission, context) {
+            Ok(()) => {
+                if let Some(chat) = self.chat(place.chat) {
+                    chat.draft_sent(sent);
+                }
+                self.collect_damage(place.chat);
+                Response::Done
+            }
+            Err(error) => Response::Error(error),
+        };
+        self.hand_answer_with(place.token, place.ticket, response);
+    }
 }
+
+#[cfg(test)]
+mod tests;

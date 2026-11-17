@@ -98,6 +98,10 @@ pub(crate) struct Known {
     /// small, rather than as a link it reads itself (see
     /// `server/mentions.rs`).
     pub(crate) embeds_saved: bool,
+    /// Whether its adapter holds a session to a number of turns and a
+    /// cost, when asked to as the session opens: what a specialist's
+    /// `turns` and `cost_usd` limits need.
+    pub(crate) budgets: bool,
     /// What logs in to it, to say when it isn't logged in.
     pub(crate) login: &'static str,
     /// Where it's told which MCP servers to start, to say when a session
@@ -151,6 +155,7 @@ pub(crate) const KNOWN: &[Known] = &[
         // file's text in the message would be read again before an edit:
         // it reads a link itself, getting line numbers too.
         embeds_saved: false,
+        budgets: true,
         login: "claude",
         servers: Servers {
             set_in: "its settings (`~/.claude.json`, or the project's `.mcp.json`)",
@@ -174,6 +179,7 @@ pub(crate) const KNOWN: &[Known] = &[
         // Asking makes Codex's adapter leave out its commands' output.
         tasks: false,
         embeds_saved: true,
+        budgets: false,
         login: "codex login",
         servers: Servers {
             set_in: "`~/.codex/config.toml`",
@@ -214,6 +220,7 @@ pub(crate) const KNOWN: &[Known] = &[
         starting_mode: Some("default"),
         tasks: false,
         embeds_saved: true,
+        budgets: false,
         login: "clackatoo agent login antigravity",
         servers: Servers {
             set_in: "its Clackatoo Antigravity profile",
@@ -234,6 +241,7 @@ pub(crate) const KNOWN: &[Known] = &[
         starting_mode: None,
         tasks: false,
         embeds_saved: true,
+        budgets: false,
         login: "gemini",
         servers: Servers {
             set_in: "`~/.gemini/settings.json`",
@@ -340,6 +348,8 @@ pub struct Configured {
     pub(crate) agents: Vec<CustomAgent>,
     pub(crate) subagents: SubagentLimits,
     pub(crate) keep_agents: bool,
+    /// The shared skills never offered, by name (`skills.disabled`).
+    pub(crate) disabled_skills: std::sync::Arc<[String]>,
     pub(crate) claude_plugins: bool,
     pub(crate) codex_plugins: bool,
     pub(crate) claude_mcp: bool,
@@ -353,6 +363,7 @@ impl Default for Configured {
             agents: Vec::new(),
             subagents: SubagentLimits::default(),
             keep_agents: true,
+            disabled_skills: std::sync::Arc::default(),
             claude_plugins: false,
             codex_plugins: false,
             claude_mcp: false,
@@ -451,6 +462,16 @@ pub(crate) fn known(name: &str) -> Option<&'static Known> {
     KNOWN.iter().find(|known| known.name == name)
 }
 
+/// Whether the adapter whose package is `package`, as it names itself
+/// when it starts, is one known to hold a session to a number of turns
+/// and a cost.
+pub(crate) fn adapter_holds_budgets(package: &str) -> bool {
+    KNOWN.iter().any(|known| {
+        let name = known.package().rsplit_once('@').map(|(name, _)| name);
+        known.budgets && name == Some(package)
+    })
+}
+
 /// Whether a saved file a message mentions goes to the agent called
 /// `name` as its text, if small, rather than as a link: for any but the
 /// known agents that do better reading it themselves.
@@ -495,6 +516,18 @@ impl AgentConfig {
     /// replaced by the user's, or why there isn't one.
     pub(crate) fn find(&self, name: &str) -> Result<AgentSpec, String> {
         self.find_among(name, &self.configured.agents)
+    }
+
+    /// Whether the agent called `name`, as it's set up now, is started
+    /// through an adapter clackatoo installs that holds a session to a
+    /// number of turns and a cost. One started with a command of the
+    /// user's isn't known to be, whatever it's called, until it has
+    /// started and said what it is.
+    pub(crate) fn holds_budgets(&self, name: &str) -> bool {
+        matches!(
+            self.find(name),
+            Ok(AgentSpec { launch: Launch::Known(known), .. }) if known.budgets
+        )
     }
 
     /// The agent called `name`, as [`find`](Self::find) finds it, with

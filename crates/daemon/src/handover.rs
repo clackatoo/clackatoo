@@ -136,6 +136,14 @@
 //! 54. The regions programs marked private (OSC 46373, CLACKA-242) still
 //!     open in each terminal, so what they print after an upgrade is in
 //!     them too. Before, none was open.
+//! 55. The context people attached to chats' messages: what each turn
+//!     was sent with, on the branch shown and those kept, what waits with
+//!     queued messages, and what's chosen in the draft. Before, no
+//!     message had any.
+//! 56. How many times each managed MCP server's connections were told to
+//!     start again, as after a sign-in, so the proxies that outlive the
+//!     upgrade aren't told again for one they already made. Before, no
+//!     server was managed.
 
 pub(crate) mod relay;
 
@@ -389,10 +397,328 @@ pub(crate) struct State {
     /// terminals with any: see [`Regions`]. Since version 54; before, none
     /// was open.
     pub(crate) regions: Vec<Regions>,
-    /// Captured context for current and retained branches and pending messages. Since version 55.
+    /// The context people attached to the messages of the chats with
+    /// any: see [`ChatContext`]. Since version 55; before, none had any.
     pub(crate) context_records: Vec<ChatContext>,
-    /// Managed MCP reconnect and credential generations, since version 56.
+    /// How many times each managed MCP server's connections were told to
+    /// start again, as after a sign-in or a change to a credential, by
+    /// the server's binding: a proxy that outlives the upgrade starts
+    /// again only when its server's count has passed its own. Since
+    /// version 56; before, no server was managed.
     pub(crate) managed_mcp: Vec<(String, u64)>,
+}
+
+/// The context people attached to chat `chat`'s messages (see
+/// `clackatoo_protocol::context`), which isn't in a [`Chat`]. Since
+/// version 55.
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ChatContext {
+    pub(crate) chat: u32,
+    /// What each turn that was sent with any was sent with, by the turn's
+    /// uid: the turns of the branch shown, and of the branches kept.
+    pub(crate) turns: Vec<(u32, Vec<ContextSnapshot>)>,
+    /// What each message waiting in the queue goes with, by the
+    /// message's ID, and whether what it chose has been captured.
+    pub(crate) queued: Vec<(u64, Vec<ContextSnapshot>, bool)>,
+    /// What the message waiting for the agent's session goes with.
+    pub(crate) waiting: Vec<ContextSnapshot>,
+    /// Whether what that message chose has been captured.
+    pub(crate) waiting_resolved: bool,
+    /// What's chosen for the message being written.
+    pub(crate) draft: Vec<ContextSelection>,
+}
+
+/// What was captured of something attached to a message, as
+/// `clackatoo_protocol::ContextSnapshot` was at protocol 159: the
+/// protocol's may grow fields, and this doesn't. Since version 55.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContextSnapshot {
+    pub(crate) grant: String,
+    pub(crate) id: String,
+    pub(crate) source: ContextRef,
+    pub(crate) label: String,
+    pub(crate) location: String,
+    pub(crate) mode: ContextMode,
+    pub(crate) text: String,
+    pub(crate) bytes: u32,
+    pub(crate) revision: String,
+    pub(crate) captured: u64,
+    pub(crate) partial: bool,
+    pub(crate) note: String,
+}
+
+/// Something chosen to go with a message, and the revision of it the
+/// user last saw, as `clackatoo_protocol::ContextSelection` was at
+/// protocol 159. Since version 55.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContextSelection {
+    pub(crate) source: ContextRef,
+    pub(crate) mode: ContextMode,
+    pub(crate) expected: Option<String>,
+}
+
+/// Whether what's attached goes with its contents, as
+/// `clackatoo_protocol::ContextMode` was at protocol 159. Since version
+/// 55.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ContextMode {
+    Contents,
+    Reference,
+}
+
+/// What something attached is, as `clackatoo_protocol::ContextRef` was at
+/// protocol 159, its variants in that order: a kind of source the
+/// protocol gains later needs a new version to be handed over. Since
+/// version 55.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ContextRef {
+    Owned {
+        machine: [u8; 16],
+        source: Box<ContextRef>,
+    },
+    File {
+        path: String,
+        lines: Option<(u32, u32)>,
+    },
+    Symbol {
+        path: String,
+        name: String,
+        lines: (u32, u32),
+        signature: bool,
+    },
+    Diagnostics {
+        path: Option<String>,
+    },
+    Command {
+        terminal: u32,
+        line: u64,
+    },
+    Terminal {
+        terminal: u32,
+        first: u64,
+        last: u64,
+    },
+    Change {
+        chat: u32,
+        path: String,
+        hunk: u64,
+    },
+    Chat {
+        chat: u32,
+        first: u32,
+        last: u32,
+        requests: bool,
+    },
+    Board {
+        board: String,
+        entry: u64,
+    },
+    Project {
+        path: String,
+    },
+    Retained {
+        id: String,
+        grant: String,
+    },
+}
+
+impl From<&clackatoo_protocol::ContextSnapshot> for ContextSnapshot {
+    fn from(snapshot: &clackatoo_protocol::ContextSnapshot) -> Self {
+        Self {
+            grant: snapshot.grant.clone(),
+            id: snapshot.id.clone(),
+            source: (&snapshot.source).into(),
+            label: snapshot.label.clone(),
+            location: snapshot.location.clone(),
+            mode: snapshot.mode.into(),
+            text: snapshot.text.clone(),
+            bytes: snapshot.bytes,
+            revision: snapshot.revision.clone(),
+            captured: snapshot.captured,
+            partial: snapshot.partial,
+            note: snapshot.note.clone(),
+        }
+    }
+}
+
+impl From<ContextSnapshot> for clackatoo_protocol::ContextSnapshot {
+    fn from(snapshot: ContextSnapshot) -> Self {
+        Self {
+            grant: snapshot.grant,
+            id: snapshot.id,
+            source: snapshot.source.into(),
+            label: snapshot.label,
+            location: snapshot.location,
+            mode: snapshot.mode.into(),
+            text: snapshot.text,
+            bytes: snapshot.bytes,
+            revision: snapshot.revision,
+            captured: snapshot.captured,
+            partial: snapshot.partial,
+            note: snapshot.note,
+        }
+    }
+}
+
+impl From<&clackatoo_protocol::ContextSelection> for ContextSelection {
+    fn from(selection: &clackatoo_protocol::ContextSelection) -> Self {
+        Self {
+            source: (&selection.source).into(),
+            mode: selection.mode.into(),
+            expected: selection.expected.clone(),
+        }
+    }
+}
+
+impl From<ContextSelection> for clackatoo_protocol::ContextSelection {
+    fn from(selection: ContextSelection) -> Self {
+        Self {
+            source: selection.source.into(),
+            mode: selection.mode.into(),
+            expected: selection.expected,
+        }
+    }
+}
+
+impl From<clackatoo_protocol::ContextMode> for ContextMode {
+    fn from(mode: clackatoo_protocol::ContextMode) -> Self {
+        match mode {
+            clackatoo_protocol::ContextMode::Contents => Self::Contents,
+            clackatoo_protocol::ContextMode::Reference => Self::Reference,
+        }
+    }
+}
+
+impl From<ContextMode> for clackatoo_protocol::ContextMode {
+    fn from(mode: ContextMode) -> Self {
+        match mode {
+            ContextMode::Contents => Self::Contents,
+            ContextMode::Reference => Self::Reference,
+        }
+    }
+}
+
+impl From<&clackatoo_protocol::ContextRef> for ContextRef {
+    fn from(source: &clackatoo_protocol::ContextRef) -> Self {
+        use clackatoo_protocol::ContextRef as Theirs;
+        match source {
+            Theirs::Owned { machine, source } => Self::Owned {
+                machine: machine.0,
+                source: Box::new(source.as_ref().into()),
+            },
+            Theirs::File { path, lines } => Self::File {
+                path: path.clone(),
+                lines: *lines,
+            },
+            Theirs::Symbol {
+                path,
+                name,
+                lines,
+                signature,
+            } => Self::Symbol {
+                path: path.clone(),
+                name: name.clone(),
+                lines: *lines,
+                signature: *signature,
+            },
+            Theirs::Diagnostics { path } => Self::Diagnostics { path: path.clone() },
+            Theirs::Command { terminal, line } => Self::Command {
+                terminal: terminal.0,
+                line: *line,
+            },
+            Theirs::Terminal {
+                terminal,
+                first,
+                last,
+            } => Self::Terminal {
+                terminal: terminal.0,
+                first: *first,
+                last: *last,
+            },
+            Theirs::Change { chat, path, hunk } => Self::Change {
+                chat: chat.0,
+                path: path.clone(),
+                hunk: *hunk,
+            },
+            Theirs::Chat {
+                chat,
+                first,
+                last,
+                requests,
+            } => Self::Chat {
+                chat: chat.0,
+                first: *first,
+                last: *last,
+                requests: *requests,
+            },
+            Theirs::Board { board, entry } => Self::Board {
+                board: board.clone(),
+                entry: *entry,
+            },
+            Theirs::Project { path } => Self::Project { path: path.clone() },
+            Theirs::Retained { id, grant } => Self::Retained {
+                id: id.clone(),
+                grant: grant.clone(),
+            },
+        }
+    }
+}
+
+impl From<ContextRef> for clackatoo_protocol::ContextRef {
+    fn from(source: ContextRef) -> Self {
+        use clackatoo_protocol::{MachineId, TerminalId};
+        match source {
+            ContextRef::Owned { machine, source } => Self::Owned {
+                machine: MachineId(machine),
+                source: Box::new((*source).into()),
+            },
+            ContextRef::File { path, lines } => Self::File { path, lines },
+            ContextRef::Symbol {
+                path,
+                name,
+                lines,
+                signature,
+            } => Self::Symbol {
+                path,
+                name,
+                lines,
+                signature,
+            },
+            ContextRef::Diagnostics { path } => Self::Diagnostics { path },
+            ContextRef::Command { terminal, line } => Self::Command {
+                terminal: TerminalId(terminal),
+                line,
+            },
+            ContextRef::Terminal {
+                terminal,
+                first,
+                last,
+            } => Self::Terminal {
+                terminal: TerminalId(terminal),
+                first,
+                last,
+            },
+            ContextRef::Change { chat, path, hunk } => Self::Change {
+                chat: TerminalId(chat),
+                path,
+                hunk,
+            },
+            ContextRef::Chat {
+                chat,
+                first,
+                last,
+                requests,
+            } => Self::Chat {
+                chat: TerminalId(chat),
+                first,
+                last,
+                requests,
+            },
+            ContextRef::Board { board, entry } => Self::Board { board, entry },
+            ContextRef::Project { path } => Self::Project { path },
+            ContextRef::Retained { id, grant } => Self::Retained { id, grant },
+        }
+    }
 }
 
 /// The regions programs marked private that are open in terminal
@@ -5031,49 +5357,103 @@ mod tests {
         }
     }
 
-    #[test]
-    fn captured_context_handover_keeps_drafts_queues_and_turns() {
-        use clackatoo_protocol::{ContextMode, ContextRef, ContextSelection, ContextSnapshot};
-        let selection = ContextSelection {
-            source: ContextRef::File {
-                path: "src/a.rs".into(),
-                lines: Some((1, 2)),
+    /// A source of each kind context is captured from, the first as
+    /// another machine names it.
+    fn context_sources() -> Vec<ContextRef> {
+        vec![
+            ContextRef::Owned {
+                machine: [4; 16],
+                source: Box::new(ContextRef::File {
+                    path: "src/a.rs".into(),
+                    lines: Some((1, 2)),
+                }),
             },
-            mode: ContextMode::Contents,
-            expected: Some("revision".into()),
-        };
-        let snapshot = ContextSnapshot {
+            ContextRef::Symbol {
+                path: "src/a.rs".into(),
+                name: "main".into(),
+                lines: (3, 9),
+                signature: true,
+            },
+            ContextRef::Diagnostics {
+                path: Some("src/a.rs".into()),
+            },
+            ContextRef::Command {
+                terminal: 1,
+                line: 40,
+            },
+            ContextRef::Terminal {
+                terminal: 1,
+                first: 40,
+                last: 44,
+            },
+            ContextRef::Change {
+                chat: 2,
+                path: "src/a.rs".into(),
+                hunk: 0x0123_4567_89ab_cdef,
+            },
+            ContextRef::Chat {
+                chat: 2,
+                first: 0,
+                last: 1,
+                requests: true,
+            },
+            ContextRef::Board {
+                board: "notes".into(),
+                entry: 3,
+            },
+            ContextRef::Project { path: "src".into() },
+            ContextRef::Retained {
+                id: "id".into(),
+                grant: "grant".into(),
+            },
+        ]
+    }
+
+    /// What was captured of `source`, part of it, as a reference only if
+    /// `reference`.
+    fn context_snapshot(source: ContextRef, reference: bool) -> ContextSnapshot {
+        ContextSnapshot {
             grant: "grant".into(),
             id: "id".into(),
-            source: selection.source.clone(),
+            source,
             label: "a.rs".into(),
             location: "src/a.rs".into(),
-            mode: ContextMode::Contents,
+            mode: if reference {
+                ContextMode::Reference
+            } else {
+                ContextMode::Contents
+            },
             text: "captured".into(),
             bytes: 8,
             revision: "revision".into(),
-            captured: 7,
-            partial: false,
-            note: String::new(),
-        };
-        let mut state = state();
-        state.context_records = vec![ChatContext {
+            captured: 1_792_000_000_000,
+            partial: true,
+            note: "Lines 1 to 2 of 9".into(),
+        }
+    }
+
+    /// The context of chat 2: a turn sent with something of every kind, a
+    /// queued message and the one waiting with theirs, and the draft's.
+    fn context_record() -> ChatContext {
+        let mut sources = context_sources().into_iter();
+        let first = sources.next().expect("sources");
+        ChatContext {
             chat: 2,
-            turns: vec![(1001, vec![snapshot.clone()])],
-            queued: vec![(4, vec![snapshot.clone()], true)],
-            waiting: vec![snapshot.clone()],
+            turns: vec![(
+                1001,
+                sources
+                    .map(|source| context_snapshot(source, false))
+                    .collect(),
+            )],
+            queued: vec![(4, vec![context_snapshot(first.clone(), true)], true)],
+            waiting: vec![context_snapshot(first.clone(), false)],
             waiting_resolved: true,
-            draft: vec![selection.clone()],
-        }];
-        let mut file = tempfile::tempfile().unwrap();
-        state.write(&mut file).unwrap();
-        let restored = State::read(&mut file).unwrap();
-        let record = &restored.context_records[0];
-        assert_eq!(record.turns[0].1[0], snapshot);
-        assert_eq!(record.queued[0].1[0], snapshot);
-        assert!(record.queued[0].2 && record.waiting_resolved);
-        assert_eq!(record.waiting[0], snapshot);
-        assert_eq!(record.draft[0], selection);
+            draft: vec![ContextSelection {
+                source: first,
+                mode: ContextMode::Contents,
+                expected: Some("revision".into()),
+            }],
+        }
     }
 
     #[allow(
@@ -5081,8 +5461,9 @@ mod tests {
         reason = "one state, whole, each part of it filled"
     )]
     fn state() -> State {
-        State { context_records: Vec::new(),
-                managed_mcp: Vec::new(),
+        State {
+            context_records: vec![context_record()],
+            managed_mcp: vec![("server-binding".into(), 7)],
             graphics: vec![Graphics {
                 terminal: 1,
                 graphics: graphics(),
@@ -5788,29 +6169,6 @@ mod tests {
         state().write(&mut file).unwrap();
         let read = State::read(&mut file).unwrap();
         assert_eq!(format!("{read:?}"), format!("{:?}", state()));
-    }
-
-    #[test]
-    fn managed_mcp_generations_survive_and_version_55_still_reads_without_them() {
-        let mut current = state();
-        current.managed_mcp = vec![("server-binding".into(), 7)];
-        let mut file = tempfile::tempfile().unwrap();
-        current.write(&mut file).unwrap();
-        assert_eq!(
-            State::read(&mut file).unwrap().managed_mcp,
-            current.managed_mcp
-        );
-        current.managed_mcp.clear();
-        let mut body = postcard::to_stdvec(&current).unwrap();
-        // Version 56 appends this vector; 55 is the otherwise identical shape.
-        assert_eq!(body.pop(), Some(0));
-        let mut old = MAGIC.to_vec();
-        old.extend_from_slice(&55u32.to_le_bytes());
-        old.extend_from_slice(&body);
-        let (restored, version) = State::from_bytes(&old).unwrap();
-        assert_eq!(version, 55);
-        assert!(restored.managed_mcp.is_empty());
-        assert_eq!(format!("{restored:?}"), format!("{current:?}"));
     }
 
     fn sender() -> ChatSender {
@@ -6577,14 +6935,49 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v54.bin"]
+    #[ignore = "writes tests/fixtures/handover-v56.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v54.bin"
+            "/tests/fixtures/handover-v56.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
+    }
+
+    #[test]
+    fn version_56_keeps_how_often_managed_servers_were_told_to_reconnect() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v56.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        assert_eq!(read.managed_mcp, state().managed_mcp);
+        assert_eq!(read.context_records, state().context_records);
+        // Version 55 had no managed servers.
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v55.bin"))
+            .unwrap();
+        let old = State::read(&mut file).unwrap();
+        assert!(old.managed_mcp.is_empty());
+        assert_eq!(old.context_records, state().context_records);
+    }
+
+    #[test]
+    fn version_55_keeps_the_context_messages_were_sent_with() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v55.bin"))
+            .unwrap();
+        let (read, version) = State::read_versioned(&mut file).unwrap();
+        assert_eq!(version, 55);
+        assert_eq!(read.context_records, state().context_records);
+        assert_eq!(read.regions, state().regions);
+        // Version 54 had none.
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v54.bin"))
+            .unwrap();
+        let old = State::read(&mut file).unwrap();
+        assert!(old.context_records.is_empty());
+        assert_eq!(old.regions, state().regions);
     }
 
     #[test]
@@ -11721,16 +12114,6 @@ mod v53 {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct ChatContext {
-    pub chat: u32,
-    pub turns: Vec<(u32, Vec<clackatoo_protocol::ContextSnapshot>)>,
-    pub queued: Vec<(u64, Vec<clackatoo_protocol::ContextSnapshot>, bool)>,
-    pub waiting: Vec<clackatoo_protocol::ContextSnapshot>,
-    pub waiting_resolved: bool,
-    pub draft: Vec<clackatoo_protocol::ContextSelection>,
-}
-
 // Version 54 has no captured context metadata. Keep its shape frozen.
 mod v54 {
     use super::{
@@ -12189,6 +12572,9 @@ mod v55 {
         /// terminals with any: see [`Regions`]. Since version 54; before, none
         /// was open.
         pub(crate) regions: Vec<Regions>,
+        /// The context people attached to the messages of the chats with
+        /// any: see [`ChatContext`]. Since version 55; before, none had
+        /// any.
         pub(crate) context_records: Vec<ChatContext>,
     }
     impl From<State> for super::State {

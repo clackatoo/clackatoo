@@ -3,6 +3,7 @@ name: research
 description: Deep codebase and architecture investigations across files and available repositories; read-only, with evidence, code citations and explicit uncertainties. Use explore for quick lookups.
 when_to_use: Explain how a system works, trace behaviour across components, compare implementations, or investigate questions that need more than a quick lookup
 model: inherit
+skills: []
 limits: read-only
 ---
 

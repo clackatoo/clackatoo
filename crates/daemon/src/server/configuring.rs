@@ -263,6 +263,8 @@ impl Daemon {
     fn take_live_config(&mut self, fresh: &DaemonConfig) {
         let rules_changed = self.config.permissions.rules != fresh.permissions.rules;
         self.config.permissions = fresh.permissions.clone();
+        let skills_changed = self.config.agents.configured.disabled_skills
+            != fresh.agents.configured.disabled_skills;
         let claude_plugins = self.config.agents.configured.claude_plugins;
         let codex_plugins = self.config.agents.configured.codex_plugins;
         self.config.agents.configured = fresh.agents.configured.clone();
@@ -271,20 +273,21 @@ impl Daemon {
         self.config.agents.configured.claude_plugins = claude_plugins;
         self.config.agents.configured.codex_plugins = codex_plugins;
         self.refresh_subagent_limits();
+        if skills_changed {
+            self.skills_changed();
+        }
         let chats: Vec<_> = self
             .terminals
             .keys()
             .copied()
             .filter(|id| self.chat_ref(*id).is_some())
             .collect();
+        // Nothing waiting is cancelled: checks and open questions are
+        // looked at again under the new rules.
+        if rules_changed {
+            self.permission_rules_changed();
+        }
         for id in chats {
-            if rules_changed {
-                let actions = self
-                    .chat(id)
-                    .map(crate::chat::HostedChat::cancel_rule_questions)
-                    .unwrap_or_default();
-                self.act(id, actions);
-            }
             let specialists = self.specialists_for(id);
             if let Some(chat) = self.chat(id) {
                 chat.offer_specialists(&specialists);

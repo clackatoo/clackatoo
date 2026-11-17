@@ -157,6 +157,29 @@ impl Terminal {
         )
     }
 
+    /// The text from `from` to `to`, as [`text_for_agents`](Self::text_for_agents)
+    /// gives it, but with each run of lines with any of the hints `secret`
+    /// left out, not only those kept from agents: for text that goes
+    /// further than an agent's read does, such as onto disk or to another
+    /// screen, and so must leave out whatever may go to none of them.
+    #[must_use]
+    pub fn text_without(
+        &self,
+        from: Position,
+        to: Position,
+        whole_lines: bool,
+        secret: Hints,
+    ) -> String {
+        self.text_leaving_out(
+            from,
+            to,
+            whole_lines,
+            secret,
+            KEPT_FROM_AGENTS,
+            &|_, _, _| false,
+        )
+    }
+
     fn text_leaving_out(
         &self,
         from: Position,
