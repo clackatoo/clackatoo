@@ -170,9 +170,17 @@ impl ChatView {
             return;
         }
         let (_, action) = self.side.pending.take().expect("checked");
-        self.side.due = None;
+        // An answer that isn't the conversation (a refusal, an attachment)
+        // says nothing of whether its agent is still at work: go by the
+        // conversation as last seen, or a sheet refused a follow-up
+        // mid-answer would stop on the half it has.
+        let working = (self.side.child.as_ref()).is_some_and(|child| busy(&child.node));
+        self.side.due = working.then(|| Instant::now() + POLL);
         match response {
-            Response::Side(reply) => self.side_came(&action, reply),
+            Response::Side(reply) => {
+                self.side.due = None;
+                self.side_came(&action, reply);
+            }
             Response::Context(ContextReply::Snapshot(snapshot)) => self.side_attached(snapshot),
             Response::Error(error) => {
                 self.side.status = error.to_string();
@@ -380,6 +388,31 @@ mod tests {
         assert_eq!(view.side_due(), None);
         assert!(view.take_side_requests().is_empty());
         assert!(!view.side_unsettled());
+    }
+
+    #[test]
+    fn a_refusal_while_the_side_agent_answers_does_not_stop_the_sheet_following_it() {
+        let mut view = ChatView::new("Parent".into(), talk(&[("Main task", "Working")]));
+        view.side_supported = true;
+        view.open_side("Why cookies?".into());
+        let mut answering = talk(&[("Why cookies?", "For")]);
+        answering.state = clackatoo_protocol::ChatState::Answering;
+        let serial = view.take_side_requests()[0].0;
+        view.side_answer(
+            serial,
+            Response::Side(SideReply {
+                node: Some(Box::new(answering)),
+                notice: "Captured".into(),
+            }),
+        );
+        // A follow-up sent too soon is refused; the answer is still coming.
+        view.side.request(SideAction::Send {
+            text: "And tokens?".into(),
+        });
+        let serial = view.take_side_requests()[0].0;
+        let refused = clackatoo_protocol::Error::Other("Wait for the side answer.".into());
+        view.side_answer(serial, Response::Error(refused));
+        assert!(view.side_due().is_some());
     }
 
     #[test]
