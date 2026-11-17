@@ -272,6 +272,30 @@ fn a_folder_moved_away_and_made_again_is_watched_again() {
     // goes with it.
     std::fs::rename(project.root.join("sub"), dir.path().join("elsewhere")).unwrap();
     project.notifications();
+    {
+        let dirty = project.dirty.lock().unwrap();
+        assert!(!dirty.all, "a folder that left isn't the whole project");
+        assert!(dirty.dirs.contains(Path::new("sub")), "{dirty:?}");
+    }
+    scan(&project);
+    // Renamed within the project, it's walked where it lands, and no more.
+    std::fs::create_dir(project.root.join("old")).unwrap();
+    std::fs::write(project.root.join("old/b.curly"), "fn moved() {}\n").unwrap();
+    project.notifications();
+    scan(&project);
+    std::fs::rename(project.root.join("old"), project.root.join("new")).unwrap();
+    project.notifications();
+    {
+        let dirty = project.dirty.lock().unwrap();
+        assert!(!dirty.all, "a rename isn't the whole project: {dirty:?}");
+    }
+    scan(&project);
+    assert_eq!(
+        search(&project, "moved")["symbols"][0]["path"],
+        "new/b.curly"
+    );
+    std::fs::remove_dir_all(project.root.join("new")).unwrap();
+    project.notifications();
     scan(&project);
     assert!(
         search(&project, "first")["symbols"]

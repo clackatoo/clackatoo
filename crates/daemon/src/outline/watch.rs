@@ -47,6 +47,10 @@ impl Dirty {
 struct Dirs {
     ids: BTreeMap<i32, PathBuf>,
     paths: HashSet<PathBuf>,
+    /// Watches let go of here, whose last events may still be queued: the
+    /// kernel ends each with one saying it's gone. What they report was
+    /// accounted for when they were let go.
+    forgotten: HashSet<i32>,
 }
 
 impl Dirs {
@@ -63,8 +67,10 @@ impl Dirs {
             if let Some(path) = self.ids.remove(&id) {
                 self.paths.remove(&path);
             }
-            // Fails if the kernel dropped it already, with the folder.
+            // Fails if the kernel dropped it already, with the folder: its
+            // last word is queued either way.
             let _ = inotify::remove_watch(fd, id);
+            self.forgotten.insert(id);
         }
     }
 }
@@ -161,8 +167,11 @@ impl Watch {
             };
             let flags = event.events();
             if flags.contains(ReadFlags::IGNORED) {
-                // The folder went, and its watch with it. One not known
-                // here is one this let go of itself, already accounted for.
+                // The folder went, and its watch with it. One let go of
+                // here was accounted for then, and has no more to say.
+                if dirs.forgotten.remove(&event.wd()) {
+                    continue;
+                }
                 if let Some(path) = dirs.ids.remove(&event.wd()) {
                     dirs.paths.remove(&path);
                     result.under(path);
@@ -171,6 +180,12 @@ impl Watch {
             }
             if flags.contains(ReadFlags::QUEUE_OVERFLOW) {
                 result.all = true;
+                continue;
+            }
+            if dirs.forgotten.contains(&event.wd()) {
+                // From a folder that left: a rename tells its old parent,
+                // then the folder itself, and what's under it is already
+                // to be walked again.
                 continue;
             }
             let Some(dir) = dirs.ids.get(&event.wd()).cloned() else {

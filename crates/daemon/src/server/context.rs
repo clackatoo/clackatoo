@@ -337,7 +337,7 @@ impl Daemon {
             &mut self.work.scheduler,
             Question {
                 name: "context-tool",
-                scope: None,
+                scope: Some(store::SCOPE.into()),
                 wait: PREVIEW_WAIT,
                 priority: Priority::Interactive,
             },
@@ -739,11 +739,14 @@ impl Daemon {
             languages: self.config.languages.clone(),
             keep,
         };
+        // Jobs that open the store take turns at it. One that only reads
+        // files (a plain preview) doesn't wait behind them.
+        let scope = job.opens_store().then(|| store::SCOPE.to_owned());
         let asked = self.contexts.asked.ask(
             &mut self.work.scheduler,
             Question {
                 name,
-                scope: None,
+                scope,
                 wait,
                 priority: Priority::Interactive,
             },

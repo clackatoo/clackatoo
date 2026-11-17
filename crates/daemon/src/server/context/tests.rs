@@ -221,3 +221,97 @@ fn a_home_reached_through_a_link_is_still_the_home_that_is_never_indexed() {
     let refused = daemon.search_index(ContextKind::Symbol, &real);
     assert!(refused.is_err_and(|why| why.contains("home directory")));
 }
+
+#[test]
+fn jobs_that_open_the_store_take_turns_but_a_plain_preview_does_not_wait_for_them() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    let mut scheduler = crate::work::Scheduler::new(|| {});
+    let mut asked: Asked<(), bool> = Asked::default();
+    let question = |scope: Option<&str>| Question {
+        name: "test",
+        scope: scope.map(str::to_owned),
+        wait: Duration::from_hours(1),
+        priority: Priority::Interactive,
+    };
+    let (started, start) = mpsc::channel();
+    let (release, wait) = mpsc::channel::<()>();
+    let (told, heard) = mpsc::channel();
+    let finished = Arc::new(AtomicBool::new(false));
+    let first = Arc::clone(&finished);
+    asked
+        .ask(
+            &mut scheduler,
+            question(Some(store::SCOPE)),
+            (),
+            move |_| {
+                started.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(20)).unwrap();
+                first.store(true, Ordering::Release);
+                true
+            },
+        )
+        .unwrap();
+    start.recv_timeout(Duration::from_secs(20)).unwrap();
+    // A second store job, and a job that opens no store, queued behind.
+    let (second, tell) = (Arc::clone(&finished), told.clone());
+    asked
+        .ask(
+            &mut scheduler,
+            question(Some(store::SCOPE)),
+            (),
+            move |_| {
+                tell.send(("store", second.load(Ordering::Acquire)))
+                    .unwrap();
+                true
+            },
+        )
+        .unwrap();
+    let plain = Arc::clone(&finished);
+    asked
+        .ask(&mut scheduler, question(None), (), move |_| {
+            told.send(("plain", plain.load(Ordering::Acquire))).unwrap();
+            true
+        })
+        .unwrap();
+    // The plain one runs while the first store job still holds its worker.
+    let wait = Duration::from_secs(20);
+    assert_eq!(heard.recv_timeout(wait).unwrap(), ("plain", false));
+    release.send(()).unwrap();
+    // The second store job ran only once the first had finished.
+    assert_eq!(heard.recv_timeout(wait).unwrap(), ("store", true));
+    // And each kind of job says truly whether it opens the store.
+    let preview = |keep| capture::Capture {
+        prepared: Vec::new(),
+        languages: None,
+        keep,
+    };
+    assert!(!preview(Keep::Nothing).opens_store());
+    let draft = Keep::Draft {
+        store: PathBuf::new(),
+        in_use: BTreeSet::new(),
+    };
+    assert!(preview(draft).opens_store());
+}
+
+#[test]
+fn a_lookup_that_finds_the_store_busy_is_asked_again_not_taken_for_looked() {
+    let mut world = World::new();
+    world.end_turn();
+    let chat = world.chat;
+    until(&mut world, |daemon| daemon.contexts.history.idle());
+    let turn = told_again(&mut world, "explain this", "a.rs");
+    // Another connection holds the store, as a daemon taking over might
+    // while it brings an older layout up to date.
+    let path = world.daemon.context_store_path();
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder
+        .execute_batch("PRAGMA user_version=0; BEGIN IMMEDIATE")
+        .unwrap();
+    world.daemon.context_history_changed(chat);
+    until(&mut world, |daemon| daemon.contexts.history.retried > 0);
+    assert_eq!(attached(&world.daemon, chat, turn), 0);
+    // Let go of, the store answers, and the turn gets its attachment.
+    holder.execute_batch("COMMIT").unwrap();
+    until(&mut world, |daemon| attached(daemon, chat, turn) == 1);
+}
