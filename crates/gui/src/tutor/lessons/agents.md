@@ -24,24 +24,6 @@ Try `viw` to select a word, then `aw` to extend it. Brackets, quotes, sentences,
 
 ## Opening a chat
 
-Open `:Settings`, then **Permissions** under **Agents**, to choose who reviews
-new chats' approval requests. **The agent's own settings** uses the agent's
-mode. **clackatoo's rules** applies your Allow, Ask and Deny rules, asking when
-nothing matches. Existing chats keep their selection; change one through
-**Who answers agents' requests** in its permissions menu while it is idle.
-
-On that settings page, add a Command rule for `git status`, choose Allow, and
-save with the button or Ctrl+S if you want that exact request approved. Tool
-rules match names such as `clackatoo/list_panes` or `managed_docs/search`;
-Read and Edit rules match directories such as `{project}`. Deny wins over
-Ask, then Allow. Refresh recent decisions to see which rule decided a
-request. You do not need to save a rule to continue this lesson.
-
-Claude uses Manual and Codex keeps Workspace access while Clackatoo reviews
-their requests. Operations already permitted by the provider may run without
-requesting review. These rules do not sandbox an approved program. Tools Off,
-specialist limits and explicit browser or native-window grants still apply.
-
 `:Agent codex` or `:Agent antigravity` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.
 
 A chat works in the directory a new terminal would start in, and until its first message it says which agent and folder it has, as `Claude Code in ~/project`. Like any pane, it opens in the window's mode, so after `:Agent` it's in normal mode, and says so: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.
@@ -324,6 +306,14 @@ When the agent asks to leave Plan mode, its plan shows above the question, scrol
 
 If you have a chat open, ask it to ask you, with its question tool, which of two colours you'd like, and answer from the form.
 
+## Permission rules
+
+When an agent asks before it does something, its own settings decide what it asks about, and you answer. clackatoo can answer some of it for you by rules: open `:Settings`, then **Permissions** under **Agents**, and set **Who answers agents' requests** to **clackatoo's rules**. That's for new chats: a chat already open keeps its own, changed in its permissions menu while it's idle.
+
+A rule allows, asks about or denies a command, a tool, or reading or editing below a folder. **New rule**, or `a`, adds one: allow the command `git status`, and that request stops asking. An Allow needs the command's words exactly. A Deny or an Ask matches every command that starts with its words, so denying `git push` also catches `git push origin main`. Deny beats Ask, and Ask beats Allow; what no rule matches is asked of you. The page lists the rules' latest decisions under them. You don't need a rule to go on with this lesson.
+
+Rules save you answering, and are no wall. Files that instruct agents or run code, and stores of credentials, ask whatever a rule says. Under the rules Claude Code stays in Manual and Codex in Workspace access, and what an agent's own settings already allow never reaches a rule. Allowing every command through a tool such as `claude/Bash` allows anything, changing these rules included.
+
 ## When a turn fails, and what it spent
 
 When the model is overloaded or the connection drops, the agent tries again by itself: the line above the box says so while it waits, as `Retrying Claude, attempt 2 of 10.` If a turn fails anyway, it says why in plain words and what to do, such as signing in again with the command it names, or that the account's usage limit is reached; what the agent itself said follows underneath. The last turn, if it failed, has a **Send again** button, and `R` in normal mode does the same: the same message, images and all, as a new turn. If that turn already started commands, changes to files or other tools, the bar says so first: ask again within 5 seconds to send it anyway.
@@ -396,88 +386,47 @@ last inspected terminal output up to 4 KiB; the terminal keeps its own scrollbac
 
 ## Inspecting capabilities
 
-`:Capabilities` shows the focused chat's tools policy, command restrictions,
-browser configuration and permission, native grant, and tool connection.
-On the web, tap the model selector, then **Tools**, to open the same report.
-The selector also has **Model** and **Permissions** tabs, grouping the web
-composer controls in one sheet. Agents can call
-`harness_capabilities` themselves. A requested tool catalogue is reported
-separately from model acknowledgment: the harness cannot prove a model saw it.
+`:Capabilities` shows the focused chat's tools policy, command restrictions, browser configuration and permission, native grant, and tool connection. On the web, tap the model selector, then **Tools**, to open the same report. The selector also has **Model** and **Permissions** tabs, grouping the web composer controls in one sheet. Agents can call `harness_capabilities` themselves. A requested tool catalogue is reported separately from model acknowledgment: the harness cannot prove a model saw it.
 
+## Choosing and making specialists
 
-A Specialist gives a chat a reusable role, model and effort defaults, skills
-and limits. Open the model selector and choose from the Specialists column
-to the right of the model list, before the chat's first message. Tab moves
-between specialists and models; each list scrolls independently. The role is retained through compaction and upgrades. Agents use the
-same specialists through clackatoo's start_chat tool.
+A specialist is yours to choose for a chat of your own too: open the model selector and pick one from the Specialists column, to the right of the models, before the chat's first message. Tab moves between the two lists. The chat keeps its role through compaction and upgrades.
 
-Specialists are SPECIALIST.md files: YAML frontmatter holds metadata,
-defaults, skills and limits; the Markdown body holds instructions. Project
-roles live in .agents/specialists/NAME; personal roles live in the clackatoo
-config's specialists/NAME folder or ~/.agents/specialists/NAME. Project roles
-take precedence. Specialists and skillsets share one dependency resolver.
+Each is a `SPECIALIST.md` file: its settings at the top, between `---` lines, and its instructions below. Your own live in `~/.agents/specialists/NAME`, or `specialists/NAME` in clackatoo's config folder. A project's live in its `.agents/specialists/NAME`: they're read only once you've trusted the project with `:trust`, and never in place of one that's built in.
 
-Settings > Agents > Specialists creates and edits these files. The model
-selector's cog opens that page directly. Choose Personal or Project scope
-for a new file. Built-ins offer Make a custom copy. Save or Ctrl+S saves;
-Cancel discards the draft. Instructions accept multiline paste and Ctrl+J
-for a new line; Enter finishes a field, and Esc undoes that field edit.
-Existing chats keep their current role. Lua does not define specialists.
+Settings > Agents > Specialists lists them, and the cog beside Specialists in the model selector opens that page. **New specialist**, or `a`, opens a form; a built-in offers **Copy to change**. Tab goes from field to field, Ctrl+S saves, and Esc asks before it throws changes away. The instructions aren't in the form: **Open its file** opens them in an editor beside your work. Chats already running keep the role they started with.
 
+## Shared skills
+
+A skill is a folder with a `SKILL.md` in it: a procedure an agent loads when a task calls for it. clackatoo reads them itself and offers the same ones to every agent: your own from `~/.agents/skills` and `skills` in clackatoo's config folder, those in `~/.claude/skills` and `~/.codex/skills` one folder deep, and a project's `.agents/skills` once you've trusted the project with `:trust`. A chat is told their names, and a line about each, with its first message; type `/name` to use one, or leave the agent to load the one that fits.
+
+Settings > Agents > Skills lists them, each with a switch: off, no agent is offered it. Under **Not loaded** are those that can't be used, with why: a broken `SKILL.md`, or a project you haven't trusted. `o` opens a skill's file.
 
 ## Project code outlines
 
-Agents can use `file_outline`, `search_symbols` and `repo_map` to find code
-in their project. The shared index uses installed language grammars and
-refreshes changed files in the background. Unsaved editor source is included
-in query results without being saved into the disk index. The bottom bar's
-work indicator shows indexing progress and lets you cancel it. Results say
-when coverage is partial; an outline helps locate implementations to read.
-
+Agents can use `file_outline`, `search_symbols` and `repo_map` to find code in their project. The shared index uses installed language grammars and refreshes changed files in the background. Unsaved editor source is included in query results without being saved into the disk index. The bottom bar's work indicator shows indexing progress and lets you cancel it. Results say when coverage is partial; an outline helps locate implementations to read. Your home directory is never indexed as a project.
 
 ## Attaching workspace context
 
-Use + Context above the message box, or type @context:, to search workspace
-objects. Tab changes category; Enter previews a result, then Enter attaches it.
-Files, symbols, diagnostics, shell commands, review hunks, chat excerpts and
-board entries share this picker. Esc returns to the message box.
+Use + Context above the message box, or type @context:, to search workspace objects. Tab changes category; Enter previews a result, then Enter attaches it. Files, symbols, diagnostics, shell commands, review hunks, chat excerpts and board entries share this picker. Esc returns to the message box.
 
-Inspect the preview before sending. Use Narrow lines for a first-last range,
-Contents / ref to supply only a reference, and Copy snapshot to copy its text.
-The wheel and Page Up / Page Down scroll the preview. Every attached object
-can be inspected or removed; Earlier and Later expose longer attachment lists.
+Inspect the preview before sending. Use Narrow lines for a first-last range, Contents / ref to supply only a reference, and Copy snapshot to copy its text. The wheel and Page Up / Page Down scroll the preview. Every attached object can be inspected or removed; Earlier and Later expose longer attachment lists.
 
-:Ask and <Space>a also attach the current terminal selection or command,
-review hunk, board entry or chat answer to a nearby chat. Editor selections
-continue to work. Files can be dragged from an explorer onto a chat.
+:Ask and <Space>a also attach the current terminal selection or command, review hunk, board entry or chat answer to a nearby chat. Editor selections continue to work. Files can be dragged from an explorer onto a chat. What's taken from a terminal leaves out the lines a program marked secret.
 
-Accepted messages keep immutable snapshots, including while queued. Editing
-a source afterwards never changes a queued message or its transcript's context.
-Use Context ... inspect on a sent turn to inspect or reattach its snapshot.
-The phone has the same Context browser. Selected sources that cannot be read
-hold the message so you can refresh or remove them without losing the draft.
+Accepted messages keep immutable snapshots, including while queued. Editing a source afterwards never changes a queued message or its transcript's context. Use Context ... inspect on a sent turn to inspect or reattach its snapshot. The phone has the same Context browser. Selected sources that cannot be read hold the message so you can refresh or remove them without losing the draft.
 
 ## Ask a side question
 
-Type `/btw Why did we choose this approach?` to ask about the current
-conversation while its main agent keeps working. The side sheet has its own
-composer and follows up from the context captured when it opened. Esc hides
-it; `/btw` reopens it. Copy an answer, attach it to the main draft with
-**Send to main**, or **Keep as chat** to continue in a normal tab.
+Type `/btw Why did we choose this approach?` to ask about the current conversation while its main agent keeps working. The side sheet has its own composer and follows up from the context captured when it opened. Esc hides it; `/btw` reopens it. Copy an answer, attach it to the main draft with **Send to main**, or **Keep as chat** to continue in a normal tab.
 
 ## Shared MCP servers
 
-Open `:Settings`, then **MCP Servers** under **Agents** to add a command or
-Streamable HTTP server. Test its connection, inspect its tools, store private
-credentials, sign in through a browser, or review a Claude/Codex import.
-Project and bundled definitions require local review before they run.
-With Tools set to Ask, each external call asks for permission before it is
-forwarded. Servers stay separate from Clackatoo's built-in tools. Specialists
-can bundle servers and select them with `mcp_servers` in `SPECIALIST.md`.
-Provider-managed MCP is off by default; its global switch and provider
-overrides take effect after a daemon restart or upgrade.
+clackatoo connects chats to MCP servers itself, so every agent gets the same ones. Open `:Settings`, then **MCP Servers** under **Agents**: **Add a server**, or `a`, opens a form for a command to run, or an address reached over HTTP. A server's page shows how it's connected and the tools it offers, and tests it. One that comes from a project runs nothing until you've read what it runs and chosen **Review and enable**. A token a server needs is a **Private credential**, kept on this machine and out of the project's files.
 
-A server that needs a login has a gold **Sign in** button on its row of the
-list: click it, or move to it with `l` and press Enter. When a chat's agent
-can't use a server for want of a login, the chat shows an **MCP sign in**
-shelf above its box with the same button, saying how signing in goes.
+When an agent calls one of a server's tools and the chat's Tools setting is Ask, the chat asks you: **Allow**, **Always allow this server**, for the rest of the chat, or **Reject**. The question waits for as long as you take. A server that stops is connected to again by itself.
+
+A server that needs a login has a gold **Sign in** button on its row of the list: click it, or move to it with `h` and press Enter. When a chat's agent can't use a server for want of a login, the chat shows an **MCP sign in** shelf above its box with the same button, saying how signing in goes.
+
+Whether agents also use the servers set up in their own settings is on the Agents page. It's off unless you turn it on, and changes at the daemon's next upgrade or restart.
+

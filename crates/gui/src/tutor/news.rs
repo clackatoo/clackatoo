@@ -1667,6 +1667,30 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Scroll wide Agent tables sideways with a trackpad swipe or horizontal mouse wheel",
     },
+    News {
+        id: "mcp-approvals",
+        date: "2026-11-17",
+        lesson: "agents",
+        what: "MCP servers: approvals wait for you, Always allow this server, and servers reconnect by themselves",
+    },
+    News {
+        id: "skills",
+        date: "2026-11-17",
+        lesson: "agents",
+        what: "Shared skills: one list for every agent, a switch for each in Settings, and a project's need :trust",
+    },
+    News {
+        id: "settings-forms",
+        date: "2026-11-17",
+        lesson: "agents",
+        what: "Settings' MCP, Specialists and Permissions pages are lists and forms, and ask before discarding",
+    },
+    News {
+        id: "rule-words",
+        date: "2026-11-17",
+        lesson: "agents",
+        what: "Permission rules: Deny and Ask match a command by its first words; a change cancels nothing waiting",
+    },
 ];
 
 impl News {
