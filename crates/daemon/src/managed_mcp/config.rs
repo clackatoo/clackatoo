@@ -255,6 +255,19 @@ impl Bound {
     pub(crate) fn trusted(&self) -> bool {
         self.editable && self.scope == McpScope::Personal || self.approved
     }
+    /// As [`info`](Self::info), for a project's definition nobody has
+    /// reviewed that has the name of one of the user's own servers (see
+    /// [`Registry::unreviewed`]): it says what enabling it will do.
+    pub(crate) fn waiting_info(&self) -> McpServerInfo {
+        McpServerInfo {
+            detail: "Review and enable this project server before it may start. Until then \
+                     chats here use your own server of this name; enabling this one puts it \
+                     in its place."
+                .into(),
+            ..self.info()
+        }
+    }
+
     pub(crate) fn info(&self) -> McpServerInfo {
         let enabled = self.definition.as_ref().is_some_and(|d| d.enabled);
         let trusted = self.trusted();
@@ -295,6 +308,12 @@ impl Bound {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Registry {
     pub(crate) servers: BTreeMap<String, Bound>,
+    /// A project's definitions nobody has reviewed, each with the name of
+    /// one of the user's own, which is the one in `servers` until the
+    /// project's is enabled: a file anyone may have put in a project
+    /// can't switch a server of the user's off by naming it. For
+    /// Settings, to list as needing review.
+    pub(crate) unreviewed: BTreeMap<String, Bound>,
     /// What to tell the user of each file or entry that couldn't be read.
     pub(crate) problems: Vec<String>,
     /// The files that couldn't be read at all. Only their servers are
@@ -381,7 +400,17 @@ impl Registry {
                     .push(format!("{} has an invalid server name", path.display()));
                 continue;
             }
-            if let Some(previous) = self.servers.get_mut(&name) {
+            let personal = editable && scope == McpScope::Personal;
+            let waits = (self.servers.get(&name)).is_some_and(|previous| {
+                let projects = previous.editable && previous.scope == McpScope::Project;
+                projects && previous.definition.is_some() && !previous.trusted()
+            });
+            if personal && waits {
+                // The user's own takes its place back, below.
+                if let Some(waiting) = self.servers.remove(&name) {
+                    self.unreviewed.insert(name.clone(), waiting);
+                }
+            } else if let Some(previous) = self.servers.get_mut(&name) {
                 if !editable && !previous.editable && previous.path != path {
                     previous.definition = None;
                     previous.problem = format!(
