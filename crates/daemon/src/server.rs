@@ -5000,6 +5000,7 @@ impl Daemon {
             self.forget_listings(token);
             self.forget_link_client(token);
             self.forget_relay_client(token);
+            self.forget_mcp_client(token);
             self.tutor.forget(token);
             // What's lent to its machine may be parked now.
             if client.machine.is_some() {
