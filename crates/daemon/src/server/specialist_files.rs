@@ -56,7 +56,7 @@ impl Daemon {
                 scope: source.map_or(SpecialistScope::Personal, |path| {
                     specialist_files::source_scope(roots, path)
                 }),
-                editable: source.is_some_and(|path| specialist_files::editable(path, name)),
+                editable: source.is_some_and(|path| specialist_files::editable(roots, path, name)),
             }
         };
         (super::specialists::with_built_in(Some(catalogue)).iter())
@@ -64,6 +64,9 @@ impl Daemon {
             .collect()
     }
 
+    /// Saves `edit`, a specialist as the window at `token` edited it, as
+    /// a file: at `path`, if it changes one, or else as a new one of
+    /// `scope`, for what `pane` shows. Saves wait their turn.
     pub(super) fn save_specialist_file(
         &mut self,
         token: Token,
@@ -158,9 +161,13 @@ impl Daemon {
         }
     }
 
+    /// Whether a save is being made.
     pub(super) fn specialist_files_busy(&self) -> bool {
         self.specialist_files.running.is_some()
     }
+    /// Answers every save waiting or being made, as the daemon upgrades:
+    /// its worker doesn't go on, so whether the file was written isn't
+    /// known.
     pub(super) fn finish_specialist_files(&mut self) {
         let mut jobs = std::mem::take(&mut self.specialist_files.queue);
         if let Some((job, _)) = self.specialist_files.running.take() {

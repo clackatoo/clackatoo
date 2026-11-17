@@ -30,6 +30,7 @@ mod skillsets;
 pub(crate) mod specialist_edit;
 pub(crate) mod specialist_files;
 
+pub(crate) use discover::owned_by_user;
 use reading::MOST_FILE;
 pub(crate) use reading::Tree;
 
@@ -48,6 +49,9 @@ const MOST_DESCRIBED: usize = 200;
 
 /// The most characters kept of a description, as Settings shows it.
 const MOST_DESCRIPTION: usize = 1536;
+
+/// The most bytes of skills an agent's `list_skills` is given.
+const MOST_LISTED: usize = 32 * 1024;
 
 /// What ends a catalogue too long to announce whole.
 const MORE: &str = "More skills are available through list_skills.\n";
@@ -150,6 +154,14 @@ pub(crate) struct Unloaded {
 pub(crate) enum Missing {
     #[allow(missing_docs, reason = "said by their names")]
     Skill { specialist: String, name: String },
+    /// A skill it names is there, but can't be used: it's broken, or
+    /// switched off.
+    #[allow(missing_docs, reason = "said above")]
+    Unusable {
+        specialist: String,
+        name: String,
+        problem: String,
+    },
     #[allow(missing_docs, reason = "said by their names")]
     Skillset { specialist: String, name: String },
     #[allow(missing_docs, reason = "said by their names")]
@@ -164,6 +176,14 @@ impl std::fmt::Display for Missing {
             Self::Skill { specialist, name } => {
                 write!(f, "specialist {specialist} needs missing skill {name}")
             }
+            Self::Unusable {
+                specialist,
+                name,
+                problem,
+            } => write!(
+                f,
+                "specialist {specialist} needs skill {name}, which can't be used: {problem}"
+            ),
             Self::Skillset { specialist, name } => {
                 write!(f, "specialist {specialist} needs missing skillset {name}")
             }
@@ -241,10 +261,12 @@ impl Found {
         self.entries.contains_key(name) || self.is_invalid(name)
     }
 
+    /// Whether a skill called `name` was found that can't be used.
     fn is_invalid(&self, name: &str) -> bool {
         self.invalid.iter().any(|invalid| invalid.name == name)
     }
 
+    /// How many skills have been found, usable or not.
     fn len(&self) -> usize {
         self.entries.len() + self.invalid.len()
     }
@@ -346,6 +368,14 @@ impl Catalogue {
         }
         if let Some(skills) = &specialist.extra.skills {
             for name in skills {
+                let unusable = (self.skills.invalid.iter()).find(|info| info.name == *name);
+                if let Some(info) = unusable {
+                    return Err(Missing::Unusable {
+                        specialist: own.clone(),
+                        name: name.clone(),
+                        problem: info.problem.clone().unwrap_or_default(),
+                    });
+                }
                 let entry = self
                     .skills
                     .entries
@@ -377,6 +407,8 @@ impl Catalogue {
         Ok(scoped)
     }
 
+    /// Leaves the MCP servers `specialist` chooses: those it names, or
+    /// those its own bundles bring, or else those every chat gets.
     fn scope_mcp(&mut self, specialist: &crate::specialists::Specialist) -> Result<(), Missing> {
         let extra = &specialist.extra;
         if let Some(names) = &extra.mcp_servers {
@@ -414,6 +446,8 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Takes the skills of the folder at `path`, one of a bundle's, said
+    /// to come from `source`.
     fn include_directory(&mut self, path: &Path, source: &str) -> Result<(), Missing> {
         let directory = self
             .directories
@@ -423,9 +457,10 @@ impl Catalogue {
         Ok(())
     }
 
-    /// Every skill found, for Settings and `list_skills`: those offered,
-    /// then those that can't be, with why, and the specialists and
-    /// skillsets that weren't loaded, which have nowhere else to be shown.
+    /// Everything found, for Settings: the skills offered, then those
+    /// that can't be, with why, and the specialists and skillsets that
+    /// weren't loaded, which have nowhere else to be shown. For the user
+    /// only: it has names from folders that aren't trusted.
     pub(crate) fn infos(&self) -> Vec<Skill> {
         let unloaded = self.unloaded.iter().map(|(name, unloaded)| Skill {
             name: name.clone(),
@@ -442,6 +477,48 @@ impl Catalogue {
             .chain(self.untrusted.iter().cloned())
             .chain(unloaded)
             .collect()
+    }
+
+    /// What an agent's `list_skills` gets: the skills it's offered, and
+    /// those it asked for that can't be used, each with the start of its
+    /// description, as JSON, in [`MOST_LISTED`] bytes at most. Nothing
+    /// from a folder that isn't trusted is in it, not even a name: only
+    /// how many things weren't loaded, which Settings lists.
+    pub(crate) fn listing(&self) -> String {
+        let shown = (self.skills.entries.values())
+            .map(|entry| &entry.info)
+            .chain(&self.skills.invalid);
+        let mut listed = Vec::new();
+        let mut size = 0;
+        let mut left_out = 0;
+        for info in shown {
+            let info = Skill {
+                description: brief(&info.description, MOST_DESCRIBED),
+                ..info.clone()
+            };
+            let Ok(json) = serde_json::to_string(&info) else {
+                continue;
+            };
+            if size + json.len() > MOST_LISTED {
+                left_out += 1;
+            } else {
+                size += json.len() + 1;
+                listed.push(json);
+            }
+        }
+        let mut text = format!("[{}]", listed.join(","));
+        if left_out > 0 {
+            let _ = write!(text, "\n{left_out} more skills don't fit here.");
+        }
+        let unloaded = self.untrusted.len() + self.unloaded.len();
+        if unloaded > 0 {
+            let _ = write!(
+                text,
+                "\n{unloaded} more skills, skillsets or specialists were found but aren't \
+                 loaded. The user can see them, and why, in Settings, under Skills."
+            );
+        }
+        text
     }
 
     /// Whether `other`, read later from the same places, offers what this
@@ -576,6 +653,14 @@ impl Catalogue {
         }
         Ok(text)
     }
+}
+
+/// Whether `name` can be a skill's: at most 64 lowercase letters,
+/// digits, hyphens, underscores or colons.
+pub(crate) fn names_a_skill(name: &str) -> bool {
+    let fits =
+        |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_:".contains(&byte);
+    !name.is_empty() && name.len() <= 64 && name.bytes().all(fits)
 }
 
 /// Mixes `item` into `stamp`, a fingerprint of what's been found.

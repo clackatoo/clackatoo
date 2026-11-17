@@ -332,6 +332,13 @@ pub(crate) enum Pane {
         /// pass this over, and give it the default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagents: Option<u8>,
+        /// Who answers its agent's approval requests: `provider`, the
+        /// agent's own permissions, or `clackatoo`, the user's rules
+        /// (CLACKA-253). Builds before then pass this over, and give it
+        /// the default for new chats, as does this one for a value it
+        /// doesn't know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<String>,
     },
     /// An editor, editing a file, or a buffer with no file yet, by an
     /// empty path.
@@ -420,6 +427,14 @@ pub(crate) struct Beside {
 /// start needs to make it a subagent again, with no more than it had.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Started {
+    /// The specialist it was started as, whole, as it was then: its role
+    /// and limits come back with it though the files that defined it
+    /// have changed or gone. It's the daemon's own type, against this
+    /// file's rule, since the release that first wrote it: a field it
+    /// gains reads as its default here, and one this build doesn't know
+    /// is passed over, but none of its names may change (a test here
+    /// holds them). Builds before then pass this over, and start it
+    /// again by `specialist`'s name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) definition: Option<Box<crate::specialists::Specialist>>,
     /// The chat whose agent started it, or took it on, by its ID in the
@@ -939,6 +954,7 @@ mod tests {
                                         started: None,
                                         branches: None,
                                         subagents: None,
+                                        permissions: None,
                                     }),
                                     Layout::Pane(Pane::Review {
                                         chat: Some(7),
@@ -1104,6 +1120,7 @@ mod tests {
             started: Some(started),
             branches: None,
             subagents: None,
+            permissions: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);
@@ -1129,11 +1146,80 @@ mod tests {
             }),
             branches: None,
             subagents: None,
+            permissions: None,
         });
         let text = String::from_utf8(state.encode()).unwrap();
         for absent in ["parent", "turn", "specialist", "limits", "kept", "mode"] {
             assert!(!text.contains(&format!("\"{absent}\"")), "{absent}: {text}");
         }
+    }
+
+    /// The specialist a chat was started as is kept by these names, which
+    /// files written since v2026.11.38 hold: one renamed would come back
+    /// as its default from every file kept before.
+    #[test]
+    fn a_started_chats_specialist_is_kept_by_the_names_it_always_was() {
+        use crate::specialists::{Budget, Extras, Limits, Specialist};
+        let definition = Specialist {
+            name: "reviewer".into(),
+            description: "Reviews".into(),
+            instructions: "Review it".into(),
+            limits: Limits::ReadOnly,
+            agent: Some("claude".into()),
+            models: vec![("claude".into(), "haiku".into())],
+            inherit_model: true,
+            efforts: vec![("*".into(), "low".into())],
+            extra: Extras {
+                when_to_use: "For reviews".into(),
+                user_invocable: false,
+                agent_invocable: true,
+                delegates_to: Some(vec!["explore".into()]),
+                skills: Some(Vec::new()),
+                skillsets: None,
+                mcp_servers: Some(vec!["docs".into()]),
+                budget: Budget {
+                    seconds: Some(60),
+                    turns: Some(3),
+                    usd_micros: None,
+                },
+                directories: vec!["/src".into()],
+            },
+        };
+        let kept = serde_json::json!({
+            "name": "reviewer",
+            "description": "Reviews",
+            "instructions": "Review it",
+            "limits": "ReadOnly",
+            "agent": "claude",
+            "models": [["claude", "haiku"]],
+            "inherit_model": true,
+            "efforts": [["*", "low"]],
+            "extra": {
+                "when_to_use": "For reviews",
+                "user_invocable": false,
+                "agent_invocable": true,
+                "delegates_to": ["explore"],
+                "skills": [],
+                "skillsets": null,
+                "mcp_servers": ["docs"],
+                "budget": { "seconds": 60, "turns": 3, "usd_micros": null },
+                "directories": ["/src"],
+            },
+        });
+        assert_eq!(serde_json::to_value(&definition).unwrap(), kept);
+        assert_eq!(
+            serde_json::from_value::<Specialist>(kept.clone()).unwrap(),
+            definition
+        );
+        // What a newer build adds is passed over, and what an older one
+        // left out is its default.
+        let mut newer = kept;
+        newer["a_newer_field"] = true.into();
+        newer["extra"]["another"] = 1.into();
+        newer["extra"].as_object_mut().unwrap().remove("budget");
+        let read = serde_json::from_value::<Specialist>(newer).unwrap();
+        assert_eq!(read.extra.budget, Budget::default());
+        assert_eq!(read.name, "reviewer");
     }
 
     #[test]
@@ -1154,6 +1240,7 @@ mod tests {
             started: None,
             branches: None,
             subagents,
+            permissions: None,
         };
         for subagents in [Some(0), Some(4)] {
             state.workspaces[1].tabs[0].layout = Layout::Pane(chat(subagents));
@@ -1219,6 +1306,7 @@ mod tests {
             started: None,
             branches: Some(Box::new(branches.clone())),
             subagents: None,
+            permissions: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);

@@ -67,6 +67,8 @@ pub(crate) struct Budget {
 }
 
 impl Budget {
+    /// These ceilings, each no higher than `parent`'s: the lower of the
+    /// two where both set one, and whichever is set where one does.
     pub(crate) fn capped(self, parent: Self) -> Self {
         fn cap<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
             match (a, b) {
@@ -101,14 +103,18 @@ impl std::fmt::Display for Unenforced {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} cannot enforce specialist turn or USD budgets through its adapter; \
-             use a time budget or Claude Code",
-            self.agent
+            "{} cannot enforce specialist turn or USD budgets: only the adapters clackatoo \
+             installs for these agents hold them: {}. Use a time budget, or one of those",
+            self.agent,
+            crate::agents::AgentConfig::holding_budgets()
         )
     }
 }
 
 impl Extras {
+    /// What `value`, a specialist's settings, says beyond its role,
+    /// agent, model and access: who may ask for it, what it's given, who
+    /// it may delegate to, and its budgets.
     pub(crate) fn parse(value: &serde_json::Value) -> Result<Self, String> {
         let mut extra = Self::default();
         if let Some(value) = value.get("when_to_use") {
@@ -184,6 +190,9 @@ impl Extras {
     }
 }
 
+/// The access limit `value`, a specialist's `limits`, names: written as
+/// the name alone, or as `access` in a table with its budgets. `None` if
+/// it names none.
 pub(crate) fn access(value: Option<&serde_json::Value>) -> Result<Option<Limits>, String> {
     let Some(value) = value else { return Ok(None) };
     let value = if value.is_object() {

@@ -285,6 +285,7 @@ impl Daemon {
             chat.turned_down(&asked.tool, &known)
                 .or_else(|| chat.about_own_tools(&asked.tool, &known, serving))
         };
+        let cwd = chat.real_cwd();
         // A managed MCP server's call asks the user itself, through
         // clackatoo's proxy, when it must (see `about_managed_call`).
         let answered = answered.or_else(|| {
@@ -297,7 +298,6 @@ impl Daemon {
             self.collect_damage(id);
             return;
         }
-        let cwd = chat.real_cwd();
         let action = Action::provider(&asked.name, &cwd.to_string_lossy(), &asked.tool);
         if rules && checked.is_none() && !interaction {
             self.check_permission(id, action, move |daemon, checked| match checked {

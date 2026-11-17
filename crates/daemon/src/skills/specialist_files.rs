@@ -158,14 +158,15 @@ pub(crate) fn source_scope(roots: &Roots, path: &Path) -> SpecialistScope {
 
 /// Whether Settings changes the specialist called `name` in place, in
 /// the file at `path` that defines it: only a `SPECIALIST.md` in a folder
-/// of that name. One a `skillset.toml` defines is copied instead, as
-/// writing a `SPECIALIST.md` beside it would put the manifest, and the
-/// version it gives, out of use.
-pub(crate) fn editable(path: &Path, name: &str) -> bool {
-    let in_own_folder = (path.parent())
-        .and_then(Path::file_name)
-        .is_some_and(|folder| folder == name);
-    in_own_folder && path.file_name().is_some_and(|file| file == NAME)
+/// of that name, in one of the folders specialists and skillsets are
+/// kept in, which is where [`save`] writes. The rest are copied: one
+/// inside another bundle, and one a `skillset.toml` defines, as writing a
+/// `SPECIALIST.md` beside it would put the manifest, and the version it
+/// gives, out of use.
+pub(crate) fn editable(roots: &Roots, path: &Path, name: &str) -> bool {
+    package_locations(roots)
+        .iter()
+        .any(|place| place.folder().join(name).join(NAME) == path)
 }
 
 /// The `SPECIALIST.md` that `edit`, Settings' draft, amounts to. A field
@@ -247,14 +248,18 @@ pub(crate) fn save(
         &target,
         &text,
     )?;
-    // The configured root is trusted, like daemon/settings.lua's directory;
-    // a fresh installation may not have created it yet. Package traversal
-    // below that root still refuses symlinks at every component.
-    if roots.config.as_ref() == Some(base) {
-        std::fs::create_dir_all(base).map_err(|e| e.to_string())?;
+    let directory = match place.scope {
+        // Nothing of a project's is reached through a link.
+        SpecialistScope::Project => crate::regular::dir_below(base, &below.join(&edit.name), true),
+        // The user's own folders are theirs to arrange: `~/.agents` may
+        // be a link into their dotfiles, and a fresh installation may not
+        // have made the folder yet. The specialist's own folder, inside
+        // it, is still never a link.
+        SpecialistScope::Personal => std::fs::create_dir_all(place.folder())
+            .and_then(|()| place.folder().canonicalize())
+            .and_then(|folder| crate::regular::dir_below(&folder, Path::new(&edit.name), true)),
     }
-    let directory = crate::regular::dir_below(base, &below.join(&edit.name), true)
-        .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?;
     let mut lock = std::fs::File::from(
         rustix::fs::openat(
             &directory,
@@ -565,7 +570,11 @@ mod tests {
         .unwrap();
         let before = Catalogue::discover(&roots);
         let path = &before.specialist_sources["reviewer"];
-        assert!(editable(path, "reviewer"));
+        assert!(editable(&roots, path, "reviewer"));
+        // One inside it is saved as a copy: `save` writes only where
+        // specialists are kept.
+        let nested = folder.join("helpers/checks").join(NAME);
+        assert!(!editable(&roots, &nested, "checks"));
         let mut edit = super::super::specialist_edit::definition(&before.specialists["reviewer"]);
         edit.saved = Some(before.specialist_texts[path].clone());
         let mut v: Value = serde_json::from_str(&edit.settings).unwrap();
@@ -648,7 +657,7 @@ mod tests {
         .unwrap();
         let found = Catalogue::discover(&roots);
         assert_eq!(found.specialist_sources["reviewer"], manifest);
-        assert!(!editable(&manifest, "reviewer"));
+        assert!(!editable(&roots, &manifest, "reviewer"));
         let edit = draft("reviewer", "Changed");
         let personal = SpecialistScope::Personal;
         let in_place = save(&roots, &edit, personal, Some(manifest.to_str().unwrap()));
@@ -684,5 +693,21 @@ mod tests {
         big.settings = json!({ "instructions": "x".repeat(64 * 1024) }).to_string();
         let refused = save(&roots, &big, SpecialistScope::Personal, None).unwrap_err();
         assert!(refused.contains("64 KiB"), "{refused}");
+    }
+
+    /// The user's `~/.agents` may be a link, into their dotfiles: what's
+    /// read through it is saved through it too.
+    #[test]
+    fn a_personal_save_goes_through_a_linked_agents_folder() {
+        let (_dir, roots) = fixture();
+        let dotfiles = roots.home.join("dotfiles/agents");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::os::unix::fs::symlink(&dotfiles, roots.home.join(".agents")).unwrap();
+        let edit = draft("reviewer", "Review");
+        let path = save(&roots, &edit, SpecialistScope::Personal, None).unwrap();
+        assert!(dotfiles.join("specialists/reviewer").join(NAME).exists());
+        let found = Catalogue::discover(&roots);
+        assert_eq!(found.specialists["reviewer"].instructions, "Review");
+        assert!(editable(&roots, &path, "reviewer"));
     }
 }

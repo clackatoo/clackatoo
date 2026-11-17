@@ -630,6 +630,7 @@ impl Daemon {
                     started: self.kept_standing(terminal_id, chat),
                     branches: chat.saved_branches().map(Box::new),
                     subagents: chat.subagents_chosen(),
+                    permissions: chat.permission_engine_chosen().map(str::to_owned),
                 }),
             },
             Content::Buffer(buffer) => {
@@ -1059,6 +1060,7 @@ impl Daemon {
                 started: _,
                 branches,
                 subagents,
+                permissions,
             }) => {
                 if *room == 0 || chats.contains_key(id) {
                     return;
@@ -1081,6 +1083,11 @@ impl Daemon {
                 if let Some(subagents) = subagents {
                     let most = self.tools.subagent_limits().working;
                     hosted.set_subagents((*subagents).min(most));
+                }
+                // Before it's given the default for new chats, which it
+                // then keeps its own in place of.
+                if let Some(engine) = permissions {
+                    hosted.restore_permission_engine(engine);
                 }
                 if let Some(session) = session {
                     hosted.go_on_with(ResumeSession {
@@ -2087,6 +2094,64 @@ mod tests {
         values.sort();
         assert!(values.contains(&("user".to_owned(), Some(4))), "{values:?}");
         assert!(values.contains(&("off".to_owned(), Some(0))), "{values:?}");
+    }
+
+    /// Who answers a chat's approval requests is kept and comes back after
+    /// a cold start, whatever new chats are given by then; one kept before
+    /// it was, or with a value this build doesn't know, is given what new
+    /// chats are (CLACKA-253).
+    #[test]
+    fn a_chats_permission_engine_comes_back_after_a_cold_start() {
+        use crate::permissions::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        // New chats are given the user's rules.
+        daemon.config.permissions.engine = Engine::Clackatoo;
+        let with = |mut chat: serde_json::Value, engine: &str| {
+            chat["pane"]["chat"]["permissions"] = engine.into();
+            chat
+        };
+        let state = serde_json::json!({
+            "clackatoo_workspaces": 1,
+            "workspaces": [kept_workspace("here", &[
+                with(kept_chat(20, "provider", None), "provider"),
+                with(kept_chat(21, "rules", None), "clackatoo"),
+                with(kept_chat(22, "newer", None), "a newer build's"),
+                kept_chat(23, "older", None),
+            ])],
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        daemon.restore_workspaces();
+        let engine = |title: &str| {
+            (daemon.terminals.values())
+                .filter_map(|slot| slot.terminal.chat_ref())
+                .find(|chat| chat.info().title == title)
+                .map(crate::chat::HostedChat::permission_engine)
+        };
+        assert_eq!(engine("provider"), Some(Engine::Provider), "its own");
+        assert_eq!(engine("rules"), Some(Engine::Clackatoo));
+        assert_eq!(engine("newer"), Some(Engine::Clackatoo), "the default");
+        assert_eq!(engine("older"), Some(Engine::Clackatoo), "the default");
+        // And it's kept again as it is.
+        let kept = daemon.kept_state();
+        let mut panes = Vec::new();
+        for tab in kept.workspaces.iter().flat_map(|workspace| &workspace.tabs) {
+            super::saved_panes(&tab.layout, &mut panes);
+        }
+        let kept_as = |wanted: &str| {
+            panes.iter().find_map(|pane| match pane {
+                crate::saved::Pane::Chat {
+                    title, permissions, ..
+                } if title == wanted => permissions.clone(),
+                _ => None,
+            })
+        };
+        assert_eq!(kept_as("provider").as_deref(), Some("provider"));
+        assert_eq!(kept_as("rules").as_deref(), Some("clackatoo"));
     }
 
     /// A chat kept with branches comes back with them waiting for its

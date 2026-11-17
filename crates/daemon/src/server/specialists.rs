@@ -32,20 +32,9 @@ impl Daemon {
         with_built_in(self.skill_catalogue(chat))
     }
 
-    /// Whether the agent called `name` holds a session to a number of
-    /// turns and a cost, as a specialist's budget may ask: its adapter
-    /// does, not its name. One that's running has said which adapter it
-    /// is; one that isn't is known by how it's started.
-    pub(super) fn holds_budgets(&self, name: &str) -> bool {
-        let said = (self.agents.named(name))
-            .and_then(|agent| self.agents.running.get(&agent))
-            .and_then(|slot| slot.agent.holds_budgets());
-        said.unwrap_or_else(|| self.config.agents.holds_budgets(name))
-    }
-
     /// Checks the agent called `agent` can hold a chat to `budget`.
     pub(super) fn check_budget(&self, budget: Budget, agent: &str) -> Result<(), Unenforced> {
-        if budget.needs_adapter() && !self.holds_budgets(agent) {
+        if budget.needs_adapter() && !self.config.agents.holds_budgets(agent) {
             return Err(Unenforced {
                 agent: agent.to_owned(),
             });
@@ -237,10 +226,9 @@ mod tests {
         );
     }
 
-    /// Turn and cost budgets go by what the agent's adapter does, not by
-    /// what the agent is called: a command of the user's called `claude`
-    /// isn't known to hold a session to them, and Claude Code's adapter
-    /// under any name is, once it has said what it is.
+    /// Turn and cost budgets are held only by an adapter clackatoo
+    /// installs and starts itself: not by a command of the user's called
+    /// `claude`, whatever it would say it is.
     #[test]
     fn budgets_go_by_the_adapter_and_not_the_agents_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -265,11 +253,6 @@ mod tests {
         }];
         let refused = daemon.check_budget(turns, "claude").unwrap_err();
         assert!(refused.to_string().contains("cannot enforce"));
-        assert!(crate::agents::adapter_holds_budgets(
-            "@agentclientprotocol/claude-agent-acp"
-        ));
-        assert!(!crate::agents::adapter_holds_budgets(
-            "@agentclientprotocol/codex-acp"
-        ));
+        assert!(refused.to_string().contains("Claude Code"));
     }
 }

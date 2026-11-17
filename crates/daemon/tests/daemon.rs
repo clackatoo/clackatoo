@@ -17412,18 +17412,20 @@ fn a_specialist_time_budget_cancels_even_without_mcp_tools() {
 #[test]
 fn specialist_selection_scopes_skills_and_enforces_invocation_and_budget_controls() {
     let daemon = TestDaemon::start_with(|dir, config| {
-        // Started with a command of the user's, it says it's Claude
-        // Code's adapter, which is what holds a session to a budget of
-        // turns and cost: its name alone wouldn't do.
-        config.agents.custom = vec![custom_agent(
-            "claude",
-            vec![
-                fake_agent().into(),
-                "--steering".into(),
-                "--log".into(),
-                dir.join("agent.log").into(),
-            ],
-        )];
+        // Claude Code's adapter, as clackatoo finds and starts it itself:
+        // only that holds a session to a budget of turns and cost. A
+        // command of the user's wouldn't do, whatever it's called.
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        script(&bin.join("npm"), "exit 1");
+        let run = format!(
+            "exec {} --steering --log {}",
+            fake_agent().display(),
+            dir.join("agent.log").display()
+        );
+        script(&bin.join("claude-agent-acp"), &run);
+        config.agents.dir = Some(dir.join("agents"));
+        config.agents.path = Some(bin.into());
         config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
         let folder = dir.join(".agents/specialists/timed");
         std::fs::create_dir_all(&folder).unwrap();

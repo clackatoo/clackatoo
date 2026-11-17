@@ -418,11 +418,6 @@ pub(crate) struct Agent {
     /// embedded `resource` blocks (`promptCapabilities.embeddedContext`).
     can_embed: bool,
     can_steer: bool,
-    /// Whether its adapter holds a session to a number of turns and a
-    /// cost, as a specialist's budget asks (see [`session_params`]), once
-    /// it has said which adapter it is: `None` until then, and for one
-    /// carried through an upgrade, which isn't asked again.
-    holds_budgets: Option<bool>,
     /// Whether the agent can list the sessions it kept, once it has said
     /// what it can.
     can_list: Option<bool>,
@@ -583,7 +578,6 @@ impl Agent {
             can_image: false,
             can_embed: false,
             can_steer: false,
-            holds_budgets: None,
             can_list: None,
             forking: Forking::default(),
             tasks,
@@ -845,12 +839,6 @@ impl Agent {
 
     pub(crate) fn can_steer(&self) -> bool {
         self.can_steer
-    }
-
-    /// Whether its adapter holds a session to a number of turns and a
-    /// cost, if it has said which adapter it is.
-    pub(crate) fn holds_budgets(&self) -> Option<bool> {
-        self.holds_budgets
     }
 
     pub(crate) fn steer(&mut self, terminal: TerminalId, message: u64, session: &str, text: &str) {
@@ -1220,10 +1208,6 @@ impl Agent {
         // detached turn on an idle race. Only this pinned, verified adapter
         // implements promptRequired and leaves completion with session/prompt.
         self.can_steer = result.as_ref().is_ok_and(safe_steering);
-        let package = (result.as_ref().ok())
-            .and_then(|result| result.pointer("/agentInfo/name"))
-            .and_then(Value::as_str);
-        self.holds_budgets = Some(package.is_some_and(crate::agents::adapter_holds_budgets));
         self.client["_meta"]["clackatoo"]["mcp_control"] = json!(result.as_ref().is_ok_and(|r| {
             r.pointer("/_meta/clackatoo/managedMcp")
                 .and_then(Value::as_bool)
@@ -1610,8 +1594,6 @@ impl Agent {
             // Not handed over: known for the adapters checked.
             can_embed: crate::agents::embeds_checked(&live.name),
             can_steer: live.can_steer,
-            // Not handed over: the daemon goes by how it's started.
-            holds_budgets: None,
             can_list: live.can_list,
             // Not handed over: known for the adapters checked.
             forking: Forking::checked(&live.name),
