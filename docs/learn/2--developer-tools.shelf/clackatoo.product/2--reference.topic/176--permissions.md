@@ -199,8 +199,16 @@ matching, including the existing parents of new files. Unresolvable paths
 ask you.
 
 `{project}` is the chat's git repository, or its working directory outside
-one. It matches nothing when that is your home directory or a folder that
+one. It names nothing when that is your home directory or a folder that
 contains it, so a project rule never comes to cover everything you own.
+
+A rule whose target names nothing, because of that or because the target is
+a broken link, behaves by its decision:
+
+- An **Allow** matches nothing.
+- A **Deny** or **Ask** cannot be placed, so Clackatoo cannot tell which
+  files it was meant to restrict. Every read (for a Read rule) or edit (for
+  an Edit rule) in that chat asks you.
 
 These matches require recognizable file inputs, which are Claude Code's own
 file tools:
@@ -229,17 +237,19 @@ judged on more than the folder's own path:
 - An Allow rule applies only when its directory contains the folder
   searched.
 - A search asks you when one of the home-directory credential stores, or
-  Clackatoo's own config and state, lies in or beneath the folder. A search
-  of your home directory, or of `~/.config`, therefore always asks.
+  Clackatoo's own config, state or data, lies in or beneath the folder. A
+  search of your home directory, or of `~/.config`, therefore always asks.
 - A search asks you when its file pattern leaves the folder, or spells the
-  name of a credential file, such as `.env*` or `*.pem`.
+  name of a credential file or folder in one of its parts, such as `.env*`,
+  `*.pem` or `**/.ssh/*`. This check goes by spelling only: a pattern such
+  as `id_rs?` or `*.{pem,crt}` matches the same files and is not caught.
 
 Two limits apply:
 
-- Files that are protected by name only, such as a `.env` somewhere beneath
-  the folder, are not found in advance. A search of a project that holds
-  one is allowed, and can print its lines. Add a Deny or Ask rule for the
-  folders that hold such files.
+- Files and folders that are protected by name only, such as a `.env` or a
+  `.ssh` folder somewhere beneath the folder searched, are not found in
+  advance. A search of a project that holds one is allowed, and can print
+  its lines. Add a Deny or Ask rule for the folders that hold them.
 - A search that names no folder is taken to search the directory the chat's
   session started in. If the agent has since changed directory in a
   command, the search runs somewhere else. Clackatoo cannot see that.
@@ -249,49 +259,60 @@ Two limits apply:
 Some files ask you even if an Allow matches, whether the Allow is a file
 rule or a rule for the whole tool. A Deny still refuses them. Names are
 compared in any letter case, and a protected name that is a symbolic link
-is still protected. The exception is the instruction files written in
-capitals, such as `AGENTS.md`: on a filesystem that distinguishes case, a
-file named `agents.md` is an ordinary file.
+is still protected.
 
 **Credentials, for Read and Edit:**
 
 | Where | What |
 | --- | --- |
-| In your home directory | `.docker`, `.azure`, `.password-store`, `.terraform.d`, `.mozilla`, `.vault-token`, `.pgpass`, `.my.cnf`, `.npmrc`, `.claude.json`, `.bash_history`, `.zsh_history` |
-| In `~/.config` | `gh`, `gcloud`, `sops`, `op`, `rclone`, `google-chrome`, `chromium`, `git/credentials`, `containers/auth.json` |
-| In `~/.local/share` | `keyrings`, `fish/fish_history`, and `clackatoo` (the browser profile, web devices and agent adapters) |
-| Agent and tool sign-ins | `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.cargo/credentials.toml`, `~/.cargo/credentials`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.gem/credentials` |
+| In your home directory | `.docker`, `.azure`, `.pulumi`, `.password-store`, `.terraform.d`, `.terraformrc`, `.mozilla`, `.thunderbird`, `.vault-token`, `.pgpass`, `.my.cnf`, `.yarnrc.yml`, `.claude.json`, `.var/app`, `snap/firefox`, and the histories `.bash_history`, `.zsh_history`, `.python_history`, `.psql_history` |
+| In your config directory | `gh`, `glab-cli`, `github-copilot`, `gcloud`, `sops`, `op`, `rclone`, `pip`, `google-chrome`, `chromium`, `BraveSoftware`, `microsoft-edge`, `Code`, `git/credentials`, `containers/auth.json` |
+| In your data directory | `keyrings`, `atuin`, `fish/fish_history` |
+| Agent and tool sign-ins | `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, `~/.cargo/credentials.toml`, `~/.cargo/credentials`, `~/.composer/auth.json`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.gem/credentials` |
+| macOS | `~/Library/Keychains`, and the Google and Firefox folders in `~/Library/Application Support` |
 | Folders, wherever they are | `.ssh`, `.aws`, `.gnupg`, `.kube`, and Clackatoo's `mcp-private` |
-| Files, wherever they are | `.env`, `.env.*` and `*.env` (but not `.env.example`, `.env.sample` or `.env.template`), `.envrc`, `.netrc`, `.git-credentials`, `.pypirc`, `.dev.vars`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `*.pem`, `*.key`, `*.tfvars`, `*.tfstate` |
-| Clackatoo | Its config and state directories |
+| Files, wherever they are | `.env`, `.env.*` and `*.env` (but not `.env.example`, `.env.sample` or `.env.template`), `.envrc`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.dev.vars`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ecdsa_sk`, `id_ed25519`, `id_ed25519_sk` |
+| Files, by ending | `.pem`, `.key`, `.ppk`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx`, `.tfvars`, `.tfvars.json`, `.tfstate`, `.tfstate.backup` |
+| The kernel | Anything under `/proc` or `/sys`, which show running programs' environments |
+| Clackatoo | Its config, state and data directories (the data directory holds the browser profile, web devices and agent adapters) |
+
+Your config directory is `~/.config` and your data directory is
+`~/.local/share`. Where `XDG_CONFIG_HOME` or `XDG_DATA_HOME` put them
+elsewhere, the stores are protected in both places.
+
+Certificates and public keys often end in `.pem` or `.key` too. Reading one
+asks you, because Clackatoo cannot tell it from a private key by its name.
 
 **Agent instructions and settings, for Edit:**
 
 | Where | What |
 | --- | --- |
-| Folders, wherever they are | `.clackatoo`, `.claude`, `.codex`, `.agents`, `.agent`, `.cursor`, `.gemini`, `.windsurf`, `.roo`, `.continue`, `.opencode`, including skills and specialists; `.github/instructions`, `.github/prompts`, `.github/agents` |
-| Files, wherever they are | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT.md`, `GEMINI.md`, `.mcp.json`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.rules`, `.aider.conf.yml`, `opencode.json`, `.claude.json`, `.github/copilot-instructions.md` |
+| Folders, wherever they are | `.clackatoo`, `.claude`, `.codex`, `.agents`, `.agent`, `.cursor`, `.gemini`, `.windsurf`, `.roo`, `.continue`, `.opencode`, `.clinerules`, including skills and specialists; `.github/instructions`, `.github/prompts`, `.github/agents` |
+| Files, wherever they are | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `AGENT.md`, `GEMINI.md`, `.mcp.json`, `.cursorrules`, `.windsurfrules`, `.clinerules`, `.roorules`, `.roomodes`, `.rules`, `.aider.conf.yml`, `opencode.json`, `opencode.jsonc`, `.claude.json`, `.github/copilot-instructions.md` |
 
 **Files that run code, for Edit:**
 
 | Where | What |
 | --- | --- |
-| Folders, wherever they are | `.git` (hooks and config), `.githooks`, `.vscode`, `.zed`, `.idea`, `.devcontainer`, `.husky`, `.mise`, `.circleci`, `.buildkite`, `.github/workflows`, `.github/actions` |
-| Files, wherever they are | `.envrc`, `.devcontainer.json`, `.pre-commit-config.yaml`, `lefthook.yml`, `lefthook.yaml`, `.lefthook.yml`, `lefthook-local.yml`, `.gitmodules`, `mise.toml`, `.mise.toml`, `mise.local.toml`, `.tool-versions`, `.yarnrc`, `.yarnrc.yml`, `.npmrc`, `.pnpmfile.cjs`, `bunfig.toml`, `.gitlab-ci.yml`, `Jenkinsfile`, `*.code-workspace`, `.cargo/config.toml`, `.cargo/config` |
-| In your home directory | `.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`, `.xprofile`, `.xsessionrc`, `.pam_environment`, `.vimrc`, `.tmux.conf`, `.tool-versions`, `.gitconfig`, `bin`, `.local/bin`, `.cargo/bin` |
-| In `~/.config` | `fish`, `git`, `nvim`, `direnv`, `mise`, `environment.d`, `systemd/user`, `autostart` |
-| In `~/.local/share` | `systemd/user`, `applications` |
+| Folders, wherever they are | `.git` (hooks and config), `.githooks`, `.vscode`, `.zed`, `.idea`, `.devcontainer`, `.husky`, `.mise`, `.yarn`, `.circleci`, `.buildkite`, `.github/workflows`, `.github/actions`, `.forgejo/workflows`, `.gitea/workflows` |
+| Files, wherever they are | `.envrc`, `.devcontainer.json`, `.pre-commit-config.yaml`, `lefthook.yml`, `lefthook.yaml`, `lefthook.toml`, `.lefthook.yml`, `.lefthook.yaml`, `lefthook-local.yml`, `lefthook-local.yaml`, `.gitmodules`, `mise.toml`, `.mise.toml`, `mise.local.toml`, `.mise.local.toml`, `.config/mise.toml`, `.tool-versions`, `.yarnrc`, `.yarnrc.yml`, `.npmrc`, `.pnpmfile.cjs`, `bunfig.toml`, `.gitlab-ci.yml`, `.gitpod.yml`, `.travis.yml`, `.drone.yml`, `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `Jenkinsfile`, `*.code-workspace`, `.cargo/config.toml`, `.cargo/config` |
+| In your home directory | `.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`, `.zlogout`, `.xprofile`, `.xsessionrc`, `.xsession`, `.xinitrc`, `.pam_environment`, `.vimrc`, `.vim`, `.emacs`, `.emacs.d`, `.tmux.conf`, `.tool-versions`, `.gitconfig`, `.cargo/env` |
+| Program folders in your home directory | `bin`, `.local/bin`, `.cargo/bin`, `.bun/bin`, `.npm-global/bin`, `go/bin` |
+| In `~/.config` | `fish`, `git`, `nvim`, `emacs`, `tmux`, `sway`, `hypr`, `i3`, `direnv`, `mise`, `environment.d`, `systemd/user`, `autostart` |
+| In `~/.local/share` | `systemd/user`, `applications`, `dbus-1/services` |
+| macOS | `~/Library/LaunchAgents` |
 
 Folder names count anywhere along a file's path, so a chat started inside
 `~/.claude/skills` is still asked before it edits a skill. There is one
-exception. Claude Code keeps agents' worktrees in `.claude/worktrees`, and a
-chat whose project is one of those worktrees is not asked about that
-`.claude` folder. It can use an Edit rule on `{project}` like any other
-project. A `.claude` folder inside the worktree still asks.
+exception. Agent tools keep their agents' worktrees in `.claude/worktrees`,
+`.codex/worktrees` and `.cursor/worktrees`. A chat whose project is one of
+those worktrees is not asked about that enclosing folder, so it can use an
+Edit rule on `{project}` like any other project. A `.claude` folder inside
+the worktree still asks.
 
 When Clackatoo cannot tell where your home directory is, every file asks,
-and rules written with `~` or `{project}` match nothing. That happens when
-the daemon runs without `HOME` set.
+and rules written with `~` or `{project}` name nothing. That happens when
+the daemon runs with `HOME` unset or set to a path that is not absolute.
 
 These lists apply to the file tools named above. They do not apply to other
 tools that reach files, such as an MCP filesystem server or a command: a
@@ -333,13 +354,15 @@ A check is **Cancelled** when nothing was decided:
 - You stopped the turn. Nothing runs, and the agent is told you stopped it
   and not to try again. This holds across a daemon upgrade. It affects that
   turn only: a turn the agent starts later, such as when a background task
-  ends, is checked as usual, before and after an upgrade.
+  ends, is checked as usual. There is one exception after an upgrade: if
+  such a later turn had already ended when the daemon upgraded, a request
+  that arrives before the next turn begins is treated as stopped.
 - The turn ended, or the chat moved to another session, before the check
   finished. Nothing runs, and the agent is told nobody refused, so it may
   ask again.
 
-A request whose agent exits while it is checked is dropped. No question is
-asked for it.
+A request whose agent exits while it is checked is dropped and recorded as
+Cancelled. No question is asked for it.
 
 Pending checks become human questions before an upgrade; they are never
 replayed.
