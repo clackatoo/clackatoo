@@ -1,5 +1,55 @@
 # Changelog
 
+## 2026.11.45 (2026-11-17)
+
+### Features
+
+- **mcp:** give tool calls their own timeout and scope unreadable files (8d678a7e)
+- **term:** text without secret lines, hinted-line counts, last blocks (8203e76d)
+- **protocol:** one label for context sources, kinds and modes (75c28ed8)
+
+### Fixes
+
+- **chats:** send a chat too big to catch up from its latest turns (efedda20)
+- **handover:** keep messages' context in types of the handover's own (38a6cd87)
+- **protocol:** say when the kinds of context and of MCP state arrived (d5481171)
+- **permissions:** a Stop is of the turn it stopped (3f527033)
+- **permissions:** make rules match what they say, and cancel nothing they can't decide (ba746b6e)
+- **mcp:** keep a managed server's proxy alive and its approvals waiting (c261e973)
+- **permissions:** ask once about a managed MCP server's call (27718615)
+- **skills:** read only what the user trusts, and announce far less (f305ede4)
+- **work:** keep request plumbing out of the work list (e649bd9e)
+- **syntax:** a C struct or enum named where it's used isn't a definition (58812dfa)
+- **context:** capture, keep and index without holding the loop or the message (70625090)
+- **side:** stop asking for an idle side conversation (c17204ea)
+- **context:** name attachments in words, not debug output (6fb85983)
+- **permissions:** a chat keeps who answers its approval requests through a cold start (d4234717)
+- **settings:** rebuild the MCP, specialist and permission pages as lists and forms (f1e67900)
+- **permissions:** a Stop is still of its turn after a daemon upgrade (4045bc88)
+- **permissions:** close the gaps a review of the rules found (b9b7e572)
+- **specialists:** hold turn and cost budgets only for adapters clackatoo starts itself (0cea6d0e)
+- **skills:** hold a project's specialists by the folder that defines them (5d1ec771)
+- **mcp:** let nothing a proxy handles vanish, and notice a stuck daemon (66130101)
+- **mcp:** ask once, by whoever decides, and allow a server for what it is (657dfe5b)
+- **work:** jobs of no project don't hold each other back (179e885d)
+- **outline,context:** what a second review found (7a30251f)
+- **side:** keep following an answer after a refusal (5df1bdae)
+- **permissions:** say who answers agents' requests in plain words (ec3d5c95)
+- **settings:** match the daemon as merged, and what the review found (2edcbfe4)
+- **permissions:** a turn the agent took after a Stop isn't stopped after an upgrade (a9ac3fde)
+- **permissions:** where a chat starts unguards nothing, and a search answers for what lies beneath it (69fcdbae)
+- **mcp:** proxy details from the second review (cd102b83)
+- **context:** store jobs take turns, wait for a busy store, and keep layout 1 (45753cd2)
+- **mcp:** one answer for a server's waiting calls, and no second ask after a restart (09716977)
+- **outline:** a folder renamed doesn't force a walk of the whole project (832501a9)
+- **side:** an error to the asking itself stops the sheet asking (7eb54fcd)
+- **mcp:** an unreviewed project server doesn't take the place of the user's own (10d22ffa)
+- **skills:** never answer a tool call from skills just taken away (15601617)
+- **permissions:** name the two permission options in Advanced as the menus do (e4d1628c)
+- **settings:** show a project's unreviewed server beside yours of its name (7f08e92f)
+- **permissions:** guard stores where they really are, and never skip a rule that restricts (a4436dc0)
+- **settings:** nothing typed is lost to a late reply, and no page says what isn't so (d2be48f1)
+
 ## 2026.11.44 (2026-11-15)
 
 ### Fixes
