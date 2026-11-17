@@ -556,12 +556,14 @@ impl HostedChat {
             },
             title: self.title.clone(),
             // Its limits and specialist go with it, never more than it may
-            // do; the user's keeping it, and a browser it was let use,
-            // are the chat's own, to be given the copy again.
+            // do; the user's keeping it, a browser it was let use, and
+            // the MCP servers it was let use without asking, are the
+            // chat's own, to be given the copy again.
             chosen: (self.chosen.iter())
                 .filter(|(setting, _)| {
                     setting != super::KEPT_SETTING
                         && setting != super::BROWSING_SETTING
+                        && !setting.starts_with(super::managed::ALLOWED)
                         && !(self.side_parent().is_some()
                             && self
                                 .setting_of(clackatoo_protocol::SettingKind::Mode)
@@ -1062,7 +1064,9 @@ impl HostedChat {
                 actions.push(super::Action::LetGo(open));
             }
             self.session = wanted.session;
-            self.chosen = wanted.chosen;
+            let mut chosen = wanted.chosen;
+            self.carry_allowed_servers(&mut chosen);
+            self.chosen = chosen;
         }
         self.known = wanted.known.min(self.node.turns.len());
         actions
@@ -2111,12 +2115,35 @@ mod tests {
     }
 
     #[test]
+    fn a_branchs_session_comes_back_with_the_servers_the_chat_allows_now() {
+        let allowed = |server: &str| (format!("clackatoo.mcp.allowed.{server}"), "yes".to_owned());
+        let mut chat = talked(&["apple"]);
+        // Allowed when the branch was left, and taken back since; and
+        // one allowed since.
+        chat.chosen.push(allowed("new"));
+        let left = BranchSession {
+            agent: "claude".into(),
+            session: Some("left".into()),
+            known: 1,
+            chosen: vec![allowed("old"), ("mode".to_owned(), "plan".to_owned())],
+        };
+        chat.take_branch_session(left);
+        assert!(chat.server_allowed("new") && !chat.server_allowed("old"));
+        // The session's own settings are its own still.
+        assert!(
+            chat.chosen
+                .contains(&("mode".to_owned(), "plan".to_owned()))
+        );
+    }
+
+    #[test]
     fn a_copy_takes_the_turns_a_fork_at_the_last_point_and_the_limits_but_not_the_grants() {
         let mut chat = talked(&["apple", "banana", "cherry"]);
         for (setting, value) in [
             (super::super::LIMITS_SETTING, "read-only"),
             (super::super::KEPT_SETTING, "on"),
             (super::super::BROWSING_SETTING, "on"),
+            ("clackatoo.mcp.allowed.docs", "yes"),
         ] {
             chat.chosen.push((setting.to_owned(), value.to_owned()));
         }
@@ -2130,6 +2157,7 @@ mod tests {
         assert!(has(super::super::LIMITS_SETTING));
         assert!(!has(super::super::KEPT_SETTING));
         assert!(!has(super::super::BROWSING_SETTING));
+        assert!(!has("clackatoo.mcp.allowed.docs"));
         let mut copy = super::super::tests::chat();
         let uids = copy.take_copy(copied);
         assert_eq!(uids.len(), 2);

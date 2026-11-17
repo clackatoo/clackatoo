@@ -190,7 +190,7 @@ const SUBAGENTS_ABOVE_SETTING: &str = "clackatoo.subagents.above";
 /// Whether the setting with `id` is the chat's own, kept whichever agent
 /// it talks to, rather than one of an agent's.
 fn chat_wide(id: &str) -> bool {
-    if id.starts_with("clackatoo.specialist.") {
+    if id.starts_with("clackatoo.specialist.") || id.starts_with(managed::ALLOWED) {
         return true;
     }
     [

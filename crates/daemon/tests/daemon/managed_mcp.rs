@@ -701,3 +701,212 @@ fn an_unreadable_mcp_json_costs_only_its_own_servers_and_no_live_connection() {
     );
     assert_eq!(starts(&marker), 1);
 }
+
+/// Sends the chat `asked`, the fake agent's own question about a call,
+/// and returns the question the chat shows of it, if it shows one,
+/// answering it with a refusal: `None` if clackatoo answered the agent
+/// itself.
+fn agent_asks(client: &mut Client, chat: TerminalId, asked: &str) -> Option<String> {
+    let turns = client.capture(chat).unwrap().chat().unwrap().turns.len() + 1;
+    client.chat(chat, ChatAction::Send(asked.into())).unwrap();
+    let ended = |node: &ChatNode| node.turns.len() == turns && last_outcome(node).is_some();
+    let node = wait_for_chat(client, chat, |node| node.question.is_some() || ended(node));
+    let Some(question) = &node.question else {
+        assert_eq!(last_words(&node), "picked allow\n");
+        return None;
+    };
+    answer(client, chat, Some("reject".into()));
+    let node = wait_for_chat(client, chat, ended);
+    assert_eq!(last_words(&node), "picked reject\n");
+    Some(question.title.clone())
+}
+
+/// A call to the fixture's tool through `proxy`, as the request `id`:
+/// whether the chat asked about it before it was answered. One asked
+/// about is allowed.
+fn proxy_calls(client: &mut Client, chat: TerminalId, proxy: &mut Proxy, id: u32) -> bool {
+    use serde_json::json;
+    proxy.send(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"write","arguments":{}}}));
+    let mut asked = false;
+    loop {
+        if let Ok(message) = proxy.output.recv_timeout(Duration::from_millis(20)) {
+            if message["id"] == id {
+                assert_eq!(message["result"]["content"][0]["text"], "upstream answered");
+                return asked;
+            }
+            continue;
+        }
+        let node = client.capture(chat).unwrap().chat().unwrap().clone();
+        if node.question.is_some() {
+            assert!(!asked, "asked twice");
+            asked = true;
+            answer(client, chat, Some("allow".into()));
+        }
+    }
+}
+
+/// Whoever asks, the user is asked once. Claude Code's question about a
+/// managed server's tool is `mcp-ask managed_fixture dynamic`, as its
+/// manual mode asks it; in a mode that asks nothing, only the proxy's
+/// call happens.
+#[test]
+fn a_managed_call_is_asked_about_once_by_clackatoo_or_by_the_agent_never_both_or_neither() {
+    let asks = "mcp-ask managed_fixture dynamic";
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let marker = daemon.dir.path().join("external-call");
+    fixture(&mut client, &marker);
+
+    // Tools: Ask. Clackatoo asks, at the proxy, so the agent's own
+    // question is answered for the user: once in a manual mode, and once
+    // in one where the agent asks nothing.
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    // Before the proxy is there, nothing says the server is clackatoo's
+    // to ask about: the agent's question stands.
+    assert_eq!(
+        agent_asks(&mut client, chat, asks).as_deref(),
+        Some("mcp__managed_fixture__note")
+    );
+    let mut proxy = Proxy::new(&mut client, chat);
+    proxy.initialize();
+    assert_eq!(agent_asks(&mut client, chat, asks), None);
+    assert!(proxy_calls(&mut client, chat, &mut proxy, 1));
+    // A server of that name the agent's own configuration has isn't
+    // clackatoo's, whatever it's called.
+    assert!(agent_asks(&mut client, chat, "mcp-ask managed_fixture project").is_some());
+
+    // Tools: Allow. Clackatoo asks nothing, so the agent's question is
+    // the one asked: "Always allow commands" must not have opened every
+    // external server unasked. In a mode where the agent asks nothing,
+    // nothing is asked, as that mode says.
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let mut proxy = Proxy::new(&mut client, chat);
+    proxy.initialize();
+    assert_eq!(
+        agent_asks(&mut client, chat, asks).as_deref(),
+        Some("mcp__managed_fixture__note")
+    );
+    assert!(!proxy_calls(&mut client, chat, &mut proxy, 1));
+}
+
+#[test]
+fn under_clackatoo_rules_a_managed_call_is_ruled_on_once_under_its_managed_name() {
+    use clackatoo_daemon::permissions::{Config, Engine, read_rules};
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.permissions = Config {
+            engine: Engine::Clackatoo,
+            // Against the agent's name for the tool, which isn't the one
+            // a managed call is ruled under: it denies nothing here.
+            rules: read_rules(
+                r#"[{"decision":"deny","kind":"tool","target":"claude/mcp__managed_fixture__note"}]"#,
+            )
+            .unwrap(),
+        };
+    });
+    let mut client = daemon.client();
+    let marker = daemon.dir.path().join("external-call");
+    fixture(&mut client, &marker);
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let mut proxy = Proxy::new(&mut client, chat);
+    proxy.initialize();
+    // The agent's own question is answered: the rules decide, at the
+    // proxy, where no rule covers the call and the user is asked.
+    assert_eq!(
+        agent_asks(&mut client, chat, "mcp-ask managed_fixture dynamic"),
+        None
+    );
+    assert!(proxy_calls(&mut client, chat, &mut proxy, 1));
+}
+
+#[test]
+fn a_server_allowed_always_asks_again_once_it_is_defined_otherwise() {
+    use serde_json::json;
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let marker = daemon.dir.path().join("external-call");
+    fixture(&mut client, &marker);
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp-server managed_fixture\nmcp write {}";
+    client.chat(chat, ChatAction::Send(prompt.into())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    answer(&mut client, chat, Some("server".into()));
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert!(ask(&mut client, chat, prompt).question.is_none());
+
+    // The same name, now another command line: not the server the user
+    // allowed.
+    let info = admin(&mut client, McpAction::List).servers.remove(0);
+    let mut settings: serde_json::Value = serde_json::from_str(&info.settings).unwrap();
+    settings["args"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("--changed"));
+    admin(
+        &mut client,
+        McpAction::Save {
+            name: info.name,
+            settings: settings.to_string(),
+            scope: info.scope,
+            expected: Some(info.revision),
+        },
+    );
+    client.chat(chat, ChatAction::Send(prompt.into())).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.question.is_some() || node.turns.len() == 3 && last_outcome(node).is_some()
+    });
+    assert!(node.question.is_some(), "it asks again: {node:?}");
+    answer(&mut client, chat, Some("reject".into()));
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+}
+
+#[test]
+fn a_server_refusing_the_credential_in_its_headers_is_an_error_not_a_sign_in() {
+    use serde_json::json;
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let settings = json!({
+        "url": format!("{}/mcp", unauthorized_server()),
+        "headers": {"Authorization": "Bearer wrong"},
+    });
+    admin(
+        &mut client,
+        McpAction::Save {
+            name: "fixture".into(),
+            scope: McpScope::Personal,
+            expected: None,
+            settings: settings.to_string(),
+        },
+    );
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let mut proxy = Proxy::new(&mut client, chat);
+    proxy.initialize();
+    proxy.send(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write"}}));
+    let why = proxy.reply(1)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        why.contains("configured headers") && !why.contains("sign in"),
+        "{why}"
+    );
+    // No button that couldn't help.
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert!(node.mcp_sign_in.is_empty(), "{:?}", node.mcp_sign_in);
+    // The proxy's word of it reaches Settings a moment after the call's.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let info = admin(&mut client, McpAction::List).servers.remove(0);
+        if info.state == clackatoo_protocol::McpState::Error {
+            assert!(
+                info.detail.contains("configured headers"),
+                "{}",
+                info.detail
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{info:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

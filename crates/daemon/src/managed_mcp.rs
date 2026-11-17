@@ -15,5 +15,10 @@ pub(crate) mod transport;
 
 pub use proxy::relay;
 
+/// What agents are told a managed server is called: this, then the name
+/// the user gave it. It keeps a managed server apart from clackatoo's
+/// own, and from any the agent has of that name.
+pub(crate) const SERVER_PREFIX: &str = "managed_";
+
 #[cfg(test)]
 mod tests;
