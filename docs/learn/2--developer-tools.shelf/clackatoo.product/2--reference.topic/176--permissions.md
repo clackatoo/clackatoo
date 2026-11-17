@@ -1,7 +1,7 @@
 ---
 title: Permissions
 type: reference
-description: Choose provider permissions or Clackatoo rules, edit literal Allow, Ask and Deny rules, and inspect recent decisions, what the rules cover and what they cannot stop.
+description: Choose whether the agent's own settings or clackatoo's rules answer its requests, edit literal Allow, Ask and Deny rules, and inspect recent decisions, what the rules cover and what they cannot stop.
 related:
   - clackatoo/reference/agent-settings
   - clackatoo/reference/agent-tools
@@ -9,30 +9,32 @@ related:
 ---
 
 Open `:Settings`, then **Permissions** under **Agents**. The page says under
-its title which machine's chats it's for. Its first control, **Permission
-engine**, chooses the engine for new chats:
+its title which machine's chats it's for. Its first control, **Who answers
+agents' requests**, chooses for new chats:
 
-- **Provider permissions** uses the agent's own permission mode.
-- **Clackatoo rules** reviews approval requests with your rules and asks you
+- **The agent's own settings** uses the agent's own permission mode.
+- **clackatoo's rules** reviews approval requests with your rules and asks you
   when none matches. There is no model reviewer.
 
 Existing chats keep their selection. To change one, open its permissions
-menu beside the model and choose **Permission engine**. Finish or stop its
+menu beside the model and choose **Who answers agents' requests**. Finish or
+stop its
 turn and answer pending permission questions first. The choice survives
 reconnects, daemon upgrades and saved workspace restoration. A chat started
 by another chat inherits its parent's engine.
 
 ## Provider modes and coverage
 
-Clackatoo rules supports Claude Code and Codex. Claude uses Manual mode;
+clackatoo's rules support Claude Code and Codex. Claude uses Manual mode;
 Codex uses Workspace access, which keeps its own sandbox. Their more
 restrictive modes, Claude's Plan and Codex's Read-only, remain available.
 Clackatoo waits for the provider to confirm a compatible mode before sending
-a pending message. Selecting Provider permissions restores the mode the chat
+a pending message. Selecting the agent's own settings restores the mode the chat
 used before the switch, where that mode is still offered.
 
-Other providers use Provider permissions. To move a chat using Clackatoo
-rules to one of those providers, select Provider permissions first.
+Other providers use the agent's own settings. To move a chat using
+clackatoo's rules to one of those providers, select the agent's own settings
+first.
 
 Rules apply to requests that reach Clackatoo:
 
@@ -55,7 +57,7 @@ permission behavior.
 
 Tools Off, Browser Off, specialist limits, native window grants and managed
 server trust remain in force. Rules cannot turn those capabilities on.
-While Clackatoo rules is selected, its rules review commands regardless of
+While clackatoo's rules are selected, they review commands regardless of
 whether Tools was set to Ask or Allow; Tools Off still refuses them.
 
 Some requests always need your direct approval, whichever rule would allow
@@ -72,17 +74,19 @@ them. A Deny still refuses them.
 
 ## Add or edit a rule
 
-The page lists each rule as a sentence, such as "Allow the command `git
-status`". Choose **New rule**, or `a`, or **Edit** beside an existing rule:
+The page lists each rule as a sentence, which says how far it reaches: "Allow
+the command `git status`" is of those words and no more, and "Deny commands
+starting `git push`" of whatever starts with them. Choose **New rule**, or `a`, or **Edit** beside an existing rule:
 it opens as a form, titled `Permissions › New rule`. Choose what it does
 **When it matches**, what **It matches** (a tool, a command, reading files or
 changing files) and its target, then **Save** or
 <kbd>Ctrl</kbd>+<kbd>S</kbd>. Typing on a field starts it, <kbd>Enter</kbd>
 finishes it and goes to the next, <kbd>Tab</kbd> goes from field to field,
-and <kbd>Esc</kbd> puts back what the field held. A target that can't be
-right says why underneath. With changes in the form, <kbd>Esc</kbd> and
-**Cancel** ask before they're thrown away. **Delete this rule** asks for a
-second press to confirm.
+and <kbd>Esc</kbd> stops typing. A target that can't be right says why
+underneath. With changes in the form, <kbd>Esc</kbd> and **Cancel** ask
+before they're thrown away. **Delete this rule** asks for a second press to
+confirm, which any other key or click takes back; <kbd>Enter</kbd> in the
+field above it never goes on to it.
 
 A rule that allows a whole tool which runs commands, such as `claude/Bash`,
 reads "Allow any command through `claude/Bash`", and its form says so as it's
@@ -95,7 +99,8 @@ itself changed or deleted meanwhile is refused, for you to open again.
 
 A list this window can't read, as a newer daemon's may be, is never shown as
 empty: the page says why under its title, lists no rules, and adds none, so
-nothing is saved over it.
+nothing is saved over it. A form open when the list became unreadable isn't
+saved either.
 
 Decisions have this precedence, regardless of list order:
 
@@ -209,8 +214,10 @@ that can run code, such as a build script.
 
 The daemon keeps the latest 64 rule decisions in memory, and the page lists
 them under **Recent decisions**, read again every two seconds while it's
-shown. Each says what was decided of which tool, in which chat and roughly
-how long ago, with the matching rule number, or why approval was needed. It does not record action arguments,
+shown. Each says what was decided of which tool (allowed, asked of you,
+denied, or stopped being asked about, for a check that was cancelled), in
+which chat and roughly how long ago, with the matching rule number, or why
+approval was needed. It does not record action arguments,
 command text or file contents. The history clears when the daemon restarts
 or upgrades.
 

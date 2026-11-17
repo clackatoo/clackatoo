@@ -31,20 +31,24 @@ A server opens as a form, titled `MCP Servers › name`:
 | Section | Holds |
 |---|---|
 | Connection | How it's connected, and what can be done about it as it is now: **Review and enable**, **Test**, **Reconnect**, **Sign in**, **Finish a sign in from another machine** and **Forget the sign in**. Only those that apply are shown: a command has no sign in |
-| Server | Its fields. A command has **Command**, **Arguments** and **Environment**; an address has **Address**, **Headers** and **Sign in with a browser**, which adds **Client ID** and **Scopes**. Then **Enabled**, **Read-only server** and how long a call may take |
+| Server | Its fields. A command has **Command**, **Arguments** and **Environment**; an address has **Address**, **Headers** and **Sign in with a browser**, which adds **Client ID** and **Scopes**. Then **Enabled**, **Read-only server**, **Give up connecting after** and **Give up on a tool call after** |
 | Tools | The tools from its last connection or test |
 | Remove | **Remove**, pressed twice, for a server that's yours to remove |
 
-**Test** initializes the server and lists its tools without calling them. A
-successful test closes its temporary connection; **Ready** means the test
-passed, and **Connected** means a chat has a live connection. What an action
+**Test** initializes the server, as it's saved, and lists its tools without
+calling them; with changes in the form it waits for them to be saved. One
+test holds up nothing else on the page. A successful test closes its
+temporary connection; **Ready** means the test passed, and **Connected**
+means a chat has a live connection. A server saved as something else,
+somewhere else, while its form has changes says so, and saving the form is
+then refused rather than saving over it. What an action
 came to is said along the foot, and stays there until the next one; what
 went wrong is said in full under the title.
 
 Nothing in a form is saved until **Save**, or <kbd>Ctrl</kbd>+<kbd>S</kbd>.
 Typing on a field starts it, <kbd>Enter</kbd> finishes it and goes to the
 next, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd> go from field to
-field, and <kbd>Esc</kbd> puts back what the field held. A field with
+field, and <kbd>Esc</kbd> stops typing. A field with
 something wrong in it says so underneath as the keys leave it. Arguments are
 written with blanks between them, and quotes round one that has a blank in
 it; environment and headers are written as JSON. With changes in the form,
@@ -99,9 +103,9 @@ out is cancelled at the server and fails with an error naming the setting; it
 may still have taken effect. `initialize` is never cancelled: a server that
 doesn't answer it in time is connected to again instead.
 
-The Settings editor shows `timeout_seconds` as **Request timeout**. Set
-`call_timeout_seconds` in the file: saving a server from the editor keeps
-the value the file has.
+A server's form in Settings shows `timeout_seconds` as **Give up connecting
+after** and `call_timeout_seconds` as **Give up on a tool call after**, each
+in seconds. Saving the form saves both as it shows them.
 
 Project and bundled commands need an explicit review of their exact
 definition before they start. **Review and enable** approves that revision on
@@ -213,7 +217,7 @@ servers. With **Tools: Allow**, calls go straight to the server. With
 | **Reject** | The call fails, and the agent is told you refused it. |
 
 Setting the chat's **Tools** again, to any value, takes back every server
-allowed this way. Under **Clackatoo permission rules** the rules decide
+allowed this way. Under **clackatoo's rules** the rules decide
 instead, with a tool written `managed_<name>/<tool>`: a call no rule covers
 asks with **Allow** and **Reject** only.
 

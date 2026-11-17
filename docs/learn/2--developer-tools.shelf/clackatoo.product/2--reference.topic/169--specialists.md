@@ -61,8 +61,7 @@ file**, and does both.
 
 Nothing is saved until **Save**, or <kbd>Ctrl</kbd>+<kbd>S</kbd>. Typing on a
 field starts it, <kbd>Enter</kbd> finishes it and goes to the next,
-<kbd>Tab</kbd> goes from field to field, and <kbd>Esc</kbd> puts back what
-the field held. A field with something wrong in it, such as a time limit
+<kbd>Tab</kbd> goes from field to field, and <kbd>Esc</kbd> stops typing. A field with something wrong in it, such as a time limit
 that's no number, says so underneath as the keys leave it. With changes in
 the form, <kbd>Esc</kbd>, **Cancel**, the cog and a click off the panel ask
 before they're thrown away. What the form doesn't show of a file, such as a

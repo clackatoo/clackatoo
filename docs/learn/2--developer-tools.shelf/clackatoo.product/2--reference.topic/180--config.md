@@ -556,11 +556,15 @@ specialist, a server and a rule open as a form: only the fields that apply,
 **Save** and **Cancel** along the foot, and what's wrong with a field said
 under it. In a form every key is the form's: typing on a field starts it,
 <kbd>Enter</kbd> finishes it and goes to the next, <kbd>Tab</kbd> and
-<kbd>Shift</kbd>+<kbd>Tab</kbd> go from field to field,
-<kbd>Ctrl</kbd>+<kbd>S</kbd> saves, and the letters that act elsewhere in the
-menu do nothing. A form with changes is never thrown away without asking:
-<kbd>Esc</kbd>, **Cancel**, the cog and a click off the panel ask first, and
-do it if asked again. A list is read when its page is shown, after anything
+<kbd>Shift</kbd>+<kbd>Tab</kbd> go between the rows with something to press
+or type into, <kbd>Esc</kbd> stops typing, <kbd>Ctrl</kbd>+<kbd>S</kbd>
+saves, and the letters that act elsewhere in the menu do nothing. A button
+that takes something away asks for a second press, which any other key or
+click takes back, and <kbd>Enter</kbd> in the field before it never goes on
+to it. A form with changes is never thrown away without asking:
+<kbd>Esc</kbd>, **Cancel**, the cog, a click off the panel, the keys that go
+back to normal mode and a `:Settings` run over it ask first, and do it if
+asked again. A list is read when its page is shown, after anything
 done on it, and when a lost connection comes back; a page with nothing to
 list says why. The search finds servers, specialists, skills and rules by
 name, as well as settings. The foot names the keys that work on the page
@@ -606,8 +610,8 @@ daemon saves in its own `daemon/settings.lua`: on **Terminals**, **Keep what
 terminals showed** and **Lines kept of each terminal** after a restart, and
 **Wide emoji**; on **Agents**, the notification **When a long command
 finishes**, the **Subagents** working at once, the native plugins and the
-servers from the agent's own configuration; on **Permissions**, the
-**Permission engine**. They show once the daemon
+servers from the agent's own configuration; on **Permissions**, **Who answers
+agents' requests**; and each switch on **Skills**. They show once the daemon
 has said them, so not with a daemon from before them. One your
 `daemon/init.lua` sets is greyed out with its place, as your window's
 `init.lua` is. One the daemon reads only as it starts says it **takes effect
