@@ -70,6 +70,11 @@ struct Told {
     reports: Vec<(McpState, String)>,
     /// Whether it's there: taking connections, and keeping those it has.
     up: bool,
+    /// Whether its loop is stuck: it takes connections and says nothing
+    /// on them.
+    stuck: bool,
+    /// Whether it drops each watch as soon as it has granted it.
+    dropping: bool,
 }
 
 /// A stand-in for the daemon, at a socket of its own.
@@ -88,6 +93,8 @@ impl FakeDaemon {
             opens: 0,
             reports: Vec::new(),
             up: false,
+            stuck: false,
+            dropping: false,
         };
         let mut daemon = Self {
             socket,
@@ -166,8 +173,17 @@ fn serve(mut stream: UnixStream, told: &(Mutex<Told>, Condvar)) {
     let mut bytes = [0; 16384];
     loop {
         let message = loop {
-            if !told.0.lock().unwrap().up {
+            let (up, stuck) = {
+                let told = told.0.lock().unwrap();
+                (told.up, told.stuck)
+            };
+            if !up {
                 return;
+            }
+            // Stuck, it reads nothing: what was sent waits in the socket.
+            if stuck {
+                std::thread::park_timeout(Duration::from_millis(5));
+                continue;
             }
             if let Some(message) = decoder.decode::<ClientMessage>(PROTOCOL_VERSION).unwrap() {
                 break message;
@@ -191,8 +207,12 @@ fn serve(mut stream: UnixStream, told: &(Mutex<Told>, Condvar)) {
             }
             other => panic!("a proxy never says {other:?}"),
         };
+        let granted = matches!(answer, ServerMessage::Response(Response::McpConnection(_)));
         let frame = frame::encode(PROTOCOL_VERSION, &answer).unwrap();
         if stream.write_all(&frame).is_err() {
+            return;
+        }
+        if granted && told.0.lock().unwrap().dropping {
             return;
         }
     }
@@ -282,12 +302,13 @@ impl Running {
             chat: TerminalId(1),
             server: "fixture".into(),
             token: "secret".into(),
+            pace,
         };
         let proxy = std::thread::spawn(move || {
             let input = std::fs::File::from(std::os::fd::OwnedFd::from(proxy_reads));
             let output = std::fs::File::from(std::os::fd::OwnedFd::from(proxy_writes));
             let runtime = super::super::transport::runtime().unwrap();
-            runtime.block_on(proxy::run(control, pace, input, output))
+            runtime.block_on(proxy::run(control, input, output))
         });
         let (said, output) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -385,6 +406,8 @@ fn quick(give_up: Duration) -> Pace {
         retry: Duration::from_millis(10),
         longest_retry: Duration::from_millis(40),
         give_up,
+        greeting: Duration::from_millis(200),
+        opening: Duration::from_secs(5),
     }
 }
 
@@ -541,4 +564,47 @@ fn a_new_grant_starts_the_server_again_in_place_and_only_a_refusal_ends_the_prox
         .daemon
         .change(|told| told.refusal = Some("this chat's tools are off".into()));
     assert_eq!(running.ended(), Err("this chat's tools are off".into()));
+}
+
+#[test]
+fn a_daemon_that_grants_a_watch_and_drops_it_every_time_is_given_up_on_too() {
+    let mut running = Running::start(quick(Duration::from_millis(300)));
+    // Each watch it grants it drops at once. Once, every grant started
+    // the clock again, and the proxy asked for ever.
+    running.daemon.change(|told| told.dropping = true);
+    running.daemon.change(|told| told.grant.generation = 1);
+    let ended = running.ended().unwrap_err();
+    assert!(ended.contains("unreachable"), "{ended}");
+    assert!(running.daemon.told.0.lock().unwrap().opens > 2);
+}
+
+#[test]
+fn a_daemon_whose_loop_is_stuck_is_noticed_and_calls_say_to_try_again() {
+    let mut running = Running::start(quick(PATIENCE));
+    assert_eq!(
+        running.call(1, "echo")["result"]["content"][0]["text"],
+        "echo"
+    );
+    // It still takes connections, and says nothing on them: the watch
+    // stays open, so only a deadline tells.
+    running.daemon.change(|told| told.stuck = true);
+    let asked = Instant::now();
+    let answer = running.call(2, "echo");
+    let why = answer["error"]["message"].as_str().unwrap();
+    assert!(
+        why.contains("daemon isn't answering") && why.contains("Try again"),
+        "{why}"
+    );
+    assert!(
+        asked.elapsed() < PATIENCE / 2,
+        "refused soon, not after a day"
+    );
+    // Unstuck, calls go through again, on the same server.
+    running.daemon.change(|told| told.stuck = false);
+    assert_eq!(
+        running.call(3, "echo")["result"]["content"][0]["text"],
+        "echo"
+    );
+    assert_eq!(running.starts().len(), 1);
+    assert_eq!(running.finish(), Ok(()));
 }

@@ -46,9 +46,18 @@ pub(crate) struct Pace {
     /// The first wait before connecting to a daemon that has gone again,
     /// doubled each time, up to `longest_retry`.
     pub(crate) retry: Duration,
+    /// The longest wait between tries. A watch that lasted longer than
+    /// this was a daemon there, not one going.
     pub(crate) longest_retry: Duration,
     /// How long a daemon may be gone before the proxy gives up.
     pub(crate) give_up: Duration,
+    /// How long the daemon may take to accept a connection and greet it.
+    /// Its loop does both in a moment: one that takes longer is stuck,
+    /// and is treated as away.
+    pub(crate) greeting: Duration,
+    /// How long the daemon may take to grant a watch. It may hold the
+    /// request while it reads the chat's servers, for up to a minute.
+    pub(crate) opening: Duration,
 }
 
 impl Default for Pace {
@@ -58,6 +67,8 @@ impl Default for Pace {
             retry: Duration::from_millis(250),
             longest_retry: Duration::from_secs(2),
             give_up: Duration::from_mins(2),
+            greeting: Duration::from_secs(5),
+            opening: Duration::from_secs(90),
         }
     }
 }
@@ -82,6 +93,7 @@ pub(crate) struct Daemon {
     pub(crate) chat: TerminalId,
     pub(crate) server: String,
     pub(crate) token: String,
+    pub(crate) pace: Pace,
 }
 
 /// A connection to the daemon, past its greeting.
@@ -93,8 +105,20 @@ struct Connection {
 }
 
 impl Daemon {
-    /// Connects to the daemon and greets it.
+    /// Connects to the daemon and greets it, within the time a daemon
+    /// that's there takes.
     async fn connect(&self) -> Result<Connection, Failed> {
+        tokio::time::timeout(self.pace.greeting, self.greet())
+            .await
+            .unwrap_or_else(|_| {
+                Err(Failed::Away(
+                    "clackatoo's daemon didn't answer a new connection".into(),
+                ))
+            })
+    }
+
+    /// Connects to the daemon and greets it, however long it takes.
+    async fn greet(&self) -> Result<Connection, Failed> {
         let away = |why: &str| Failed::Away(why.to_owned());
         let stream = tokio::net::UnixStream::connect(&self.socket)
             .await
@@ -191,21 +215,27 @@ impl Daemon {
     /// daemon to show.
     pub(crate) async fn watch(
         self,
-        pace: Pace,
         connected: Arc<AtomicBool>,
         news: tokio::sync::mpsc::Sender<News>,
     ) {
-        let ended = self.watching(pace, &connected, &news).await;
+        let ended = self.watching(&connected, &news).await;
         let _ = news.send(News::Ended(ended)).await;
     }
 
     /// Runs the watch, and returns why it's over.
     async fn watching(
         &self,
-        pace: Pace,
         connected: &AtomicBool,
         news: &tokio::sync::mpsc::Sender<News>,
     ) -> String {
+        let pace = self.pace;
+        let unreachable = |why: &str| {
+            format!(
+                "clackatoo's daemon has been unreachable for {} seconds ({why})",
+                pace.give_up.as_secs()
+            )
+        };
+        // Since when the daemon hasn't kept a watch open.
         let mut gone_since: Option<tokio::time::Instant> = None;
         let mut retry = pace.retry;
         loop {
@@ -215,10 +245,7 @@ impl Daemon {
                 Err(Failed::Away(why)) => {
                     let since = *gone_since.get_or_insert_with(tokio::time::Instant::now);
                     if since.elapsed() >= pace.give_up {
-                        return format!(
-                            "clackatoo's daemon has been unreachable for {} seconds ({why})",
-                            pace.give_up.as_secs()
-                        );
+                        return unreachable(&why);
                     }
                     tokio::time::sleep(retry).await;
                     retry = (retry * 2).min(pace.longest_retry);
@@ -261,15 +288,20 @@ impl Daemon {
                     }
                     Ok(_) => return "the daemon gave an answer this MCP proxy doesn't know".into(),
                     Err(Failed::Refused(why)) => return why,
-                    Err(Failed::Away(_)) => {
-                        gone_since = Some(tokio::time::Instant::now());
+                    Err(Failed::Away(why)) => {
                         if news.send(News::Away).await.is_err() {
                             return "the proxy stopped".into();
                         }
-                        // A watch that lasted starts over; one a daemon
-                        // keeps dropping is opened less and less often.
+                        // A watch that lasted starts over. One a daemon
+                        // keeps dropping is opened less and less often,
+                        // and counts as the daemon still being gone.
+                        let now = tokio::time::Instant::now();
                         if opened.elapsed() > pace.longest_retry {
                             retry = pace.retry;
+                            gone_since = Some(now);
+                        }
+                        if gone_since.get_or_insert(now).elapsed() >= pace.give_up {
+                            return unreachable(&why);
                         }
                         tokio::time::sleep(retry).await;
                         retry = (retry * 2).min(pace.longest_retry);
@@ -284,7 +316,10 @@ impl Daemon {
     async fn open(&self) -> Result<(Connection, Grant), Failed> {
         let mut connection = self.connect().await?;
         connection.send(self, McpProxyAction::Open).await?;
-        match connection.answer().await? {
+        let answer = tokio::time::timeout(self.pace.opening, connection.answer())
+            .await
+            .unwrap_or_else(|_| Err(Failed::Away("the daemon didn't grant a watch".into())))?;
+        match answer {
             Response::McpConnection(text) => {
                 let grant = serde_json::from_str(&text)
                     .map_err(|_| Failed::Refused("the daemon's grant couldn't be read".into()))?;
@@ -298,6 +333,7 @@ impl Daemon {
 }
 
 impl Connection {
+    /// Writes the daemon `message`.
     async fn write(&mut self, message: &ClientMessage) -> Result<(), Failed> {
         let frame = frame::encode(self.wire, message)
             .map_err(|_| Failed::Refused("a message to the daemon couldn't be encoded".into()))?;

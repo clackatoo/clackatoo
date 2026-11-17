@@ -75,9 +75,9 @@ out is cancelled at the server and fails with an error naming the setting; it
 may still have taken effect. `initialize` is never cancelled: a server that
 doesn't answer it in time is connected to again instead.
 
-The Settings editor shows `timeout_seconds` as **Request timeout**. Set
-`call_timeout_seconds` in the file: saving a server from the editor keeps
-the value the file has.
+The Settings editor shows `timeout_seconds` as **Request timeout**. Until it
+has a field for `call_timeout_seconds`, set that in `mcp.json`: saving a
+server from the editor keeps the value the file has.
 
 Project and bundled commands need an explicit review of their exact
 definition before they start. **Review and enable** approves that revision on
@@ -90,7 +90,9 @@ override. Removing an override may reveal a lower-priority definition.
 New sessions receive the current enabled selection. Direct file edits are
 picked up on the next catalogue refresh: use **Refresh** in MCP Settings for
 that project, open a new chat, or call `list_skills`. They are not watched
-continuously in this version.
+continuously in this version. At that refresh a chat's live connection to an
+edited server connects again with the new definition, as it does when you
+save from Settings.
 
 ## Connections
 
@@ -106,13 +108,22 @@ life of the agent's session, whatever happens on either side of it:
 | You save a change to the definition, choose **Reconnect**, or change a credential it uses | Calls waiting or in flight fail with an error, and the same proxy connects again with the new definition. |
 | The daemon restarts or upgrades | Calls are refused with an error saying to try again, since they can't be checked. Everything else carries on, and the server's connection is untouched. The proxy gives up only after two minutes without the daemon. |
 | An answer is over 4 MiB | That call fails with an error giving the size. |
+| A command server writes a line over 32 MiB | The line can't be read, so its connection is given up: calls in flight fail with that reason, and the proxy connects again. |
+| A command server writes a line that isn't a JSON message | The line is passed over. The first on each connection is logged and shown as the server's detail in Settings, and given as the reason if the server then fails to initialize. A command server must write one message a line, and nothing else, on its standard output. |
+| An HTTP server answers 401 to an `Authorization` header from its definition | The server shows as an error naming that header. No sign-in is offered, since none would help. |
 
-Only three things end a proxy: the agent closing it, the daemon staying away
-for two minutes, and the chat losing the server. A chat loses a server when
-you remove or disable it, change a project or bundled definition without
-reviewing it, turn the chat's **Tools** off, or pick a specialist that doesn't
-have it. If the agent starts a second proxy for the same server, it takes over
-at once and the first stops.
+A proxy ends only when:
+
+- the agent closes it, or its session with the chat ends;
+- the chat closes;
+- the daemon stays away for two minutes;
+- the chat loses the server: you remove or disable it, change a project or
+  bundled definition without reviewing it, turn the chat's **Tools** off, or
+  pick a specialist that doesn't have it;
+- the agent starts a second proxy for the same server, which takes over at
+  once;
+- it couldn't start: the chat already has 32 proxies, or its servers couldn't
+  be read for a minute.
 
 **Reconnect** starts the server's connections again without testing it first,
 so a server that holds a lock or a port is never started twice. No call is
@@ -183,10 +194,18 @@ servers. With **Tools: Allow**, calls go straight to the server. With
 | **Always allow this server** | This call goes ahead, and the chat stops asking about this server. Other servers, and the built-in tools, still ask. |
 | **Reject** | The call fails, and the agent is told you refused it. |
 
-Setting the chat's **Tools** again, to any value, takes back every server
-allowed this way. Under **Clackatoo permission rules** the rules decide
-instead, with a tool written `managed_<name>/<tool>`: a call no rule covers
-asks with **Allow** and **Reject** only.
+**Always allow this server** belongs to the chat, whichever agent or branch
+it's on, and to the server as it's defined now. A server defined otherwise
+under the same name asks again: after any change to its definition, or when a
+project's definition takes over from a personal one. A copy of the chat
+starts with no servers allowed. Setting the chat's **Tools** again, to any
+value, takes back every server allowed this way.
+
+Under **Clackatoo permission rules** the rules decide instead. A managed
+call is named `managed_<name>/<tool>` there, and only rules on that name
+apply: a rule on the agent's own name for the tool, such as
+`claude/mcp__managed_docs__search`, never does. A call no rule covers asks
+with **Allow** and **Reject** only.
 
 The question waits for as long as you take, as the built-in tools' questions
 do. It's taken back, and the call fails with the reason, when the agent
@@ -196,10 +215,20 @@ loses the server. The agent is told you refused only when you chose
 rather than ask; allow the server for the chat to send it. Calls over 256 KiB
 are always refused.
 
-You're asked once per call. Claude Code and Codex may ask about the same call
-themselves in their manual modes; where the agent's adapter says the call is
-for a server clackatoo's proxy is serving, that question is answered for you
-and only clackatoo's is shown. Other agents' own questions still appear.
+Claude Code and Codex may ask about the same call themselves, in a mode
+where they ask before using tools. You're asked once, by whichever of the two
+decides:
+
+| The chat | The agent asks before tools | The agent doesn't ask |
+|---|---|---|
+| **Tools: Ask** | Clackatoo asks, unless you allowed the server. The agent's question is answered for you. | Clackatoo asks, unless you allowed the server. |
+| **Tools: Allow** | The agent asks, with its own choices. | Nothing asks: the agent's mode allows it. |
+| **Clackatoo permission rules** | The rules decide, and ask where no rule covers the call. The agent's question is answered for you. | The rules decide. |
+
+Clackatoo answers the agent's question only for a server its own proxy is
+serving the chat, going by what the agent's adapter says of the call, never
+by the call's input. A server of the same name from the agent's own
+configuration, and any other agent's questions, are asked about as ever.
 
 A specialist with read-only or no-command limits receives only servers you
 explicitly mark **Read-only**. This is your classification of the whole

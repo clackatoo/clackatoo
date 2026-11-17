@@ -109,10 +109,13 @@ Codex's commands, which match either way. Its approvals of MCP tool calls
 always ask you. A managed tool whose name contains `/` could be mistaken for
 an MCP method, so it matches no rule either.
 
-Claude Code asks before it calls a managed server's tool, under its own
-name for it, such as `claude/mcp__managed_docs__search`. Clackatoo then
-checks the call itself as `managed_docs/search`. To run such a tool without
-a question, allow both.
+A managed server's tool is ruled on once, as `managed_docs/search`, when
+clackatoo's proxy is asked to make the call. Claude Code may ask about the
+same call first, under its own name for it, such as
+`claude/mcp__managed_docs__search`: that question is answered for you, and no
+rule is read for it. So a rule on the agent's name for a managed tool never
+applies. Write rules for managed tools on the `managed_…` name only. See
+[MCP servers](~clackatoo/reference/mcp-servers).
 
 Tool rules can also require **Exact arguments**, a complete JSON argument
 value. Blank matches any arguments; `null` matches JSON null specifically.

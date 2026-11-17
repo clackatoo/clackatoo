@@ -2,20 +2,27 @@
 //! of them the user has let its agent use without asking, and which
 //! questions waiting are about their calls.
 //!
-//! The servers allowed are kept with the chat's chosen settings, so they
-//! last through upgrades and restarts as its Tools setting does.
+//! The servers allowed are kept with the chat's chosen settings, as one
+//! of the chat's own, like its Tools setting: they last through upgrades
+//! and restarts, and stay as the chat changes agent or branch. A copy of
+//! the chat starts with none. Each is kept by what the server is, not
+//! what it's called, so a server defined otherwise under the same name
+//! asks again.
 
 use agent_client_protocol_schema::v1::{Meta, ToolCallUpdate};
 use serde_json::Value;
 
 use super::{Action, Choices, HostedChat};
+use crate::managed_mcp::SERVER_PREFIX;
 
-/// The start of the setting that says a server is allowed for the chat:
-/// the server's name follows.
-const ALLOWED: &str = "clackatoo.mcp.allowed.";
+/// The start of the setting that says a server is allowed for the chat.
+/// What follows says which: the server's definition and where it was
+/// read, as `Bound::grant` digests them.
+pub(super) const ALLOWED: &str = "clackatoo.mcp.allowed.";
 
-/// What agents are told a managed server is called: this, then its name.
-const SERVER_PREFIX: &str = "managed_";
+/// The most servers kept as allowed: past it, the oldest is forgotten.
+/// Each change to a definition that's then allowed again adds one.
+const MOST_ALLOWED: usize = 64;
 
 /// How the user answered a question about a managed server's call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,15 +45,31 @@ impl HostedChat {
         })
     }
 
-    /// Whether the user has let its agent use the managed server `server`
-    /// without asking about each call.
+    /// Whether the user has let its agent use the managed server that
+    /// is `server` (see [`ALLOWED`]) without asking about each call.
     pub(crate) fn server_allowed(&self, server: &str) -> bool {
         (self.chosen.iter())
             .any(|(id, value)| value == "yes" && id.strip_prefix(ALLOWED) == Some(server))
     }
 
-    /// Asks whether the agent may do `what` with the managed server
-    /// `server`, for the call the daemon numbered `call`, as
+    /// The servers allowed, as the settings that say so.
+    pub(super) fn allowed_servers(&self) -> Vec<(String, String)> {
+        (self.chosen.iter())
+            .filter(|(id, _)| id.starts_with(ALLOWED))
+            .cloned()
+            .collect()
+    }
+
+    /// Has `chosen`, the settings of a session being gone back to, allow
+    /// the servers the chat allows now rather than those it allowed
+    /// when that session was left: they're the chat's, not a session's.
+    pub(super) fn carry_allowed_servers(&self, chosen: &mut Vec<(String, String)>) {
+        chosen.retain(|(id, _)| !id.starts_with(ALLOWED));
+        chosen.extend(self.allowed_servers());
+    }
+
+    /// Asks whether the agent may do `what` with the managed server that
+    /// is `server`, for the call the daemon numbered `call`, as
     /// [`ask_for_tool`](Self::ask_for_tool) asks about clackatoo's own
     /// tools. `always` offers to allow the server for the chat from then
     /// on. The answer comes back as [`Action::PermitMcp`]. Returns
@@ -81,6 +104,11 @@ impl HostedChat {
         let answer = match option {
             Some("server") => {
                 if !self.server_allowed(&server) {
+                    let allowed = self.allowed_servers();
+                    if allowed.len() >= MOST_ALLOWED {
+                        let oldest = &allowed[0].0;
+                        self.chosen.retain(|(id, _)| id != oldest);
+                    }
                     (self.chosen).push((format!("{ALLOWED}{server}"), "yes".to_owned()));
                 }
                 McpAnswer::Allowed
@@ -162,6 +190,67 @@ fn managed_call<'a>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Has the user answer the question about the call `call`, asked
+    /// about the server that is `server`, with `option`.
+    fn asked_and_answered(chat: &mut HostedChat, call: u64, server: &str, option: &str) -> Action {
+        assert!(chat.ask_for_server(call, server, "use `t` on MCP server `docs`", None, true));
+        let question = chat.node.question.as_ref().unwrap().id;
+        let option = Some(option.to_owned());
+        let mut actions = chat.act(clackatoo_protocol::ChatAction::Answer { question, option });
+        assert_eq!(actions.len(), 1);
+        actions.remove(0)
+    }
+
+    fn set_tools(chat: &mut HostedChat, value: &str) {
+        chat.act(clackatoo_protocol::ChatAction::Set {
+            setting: "clackatoo.tools".into(),
+            value: value.into(),
+        });
+    }
+
+    #[test]
+    fn allowing_a_server_allows_what_it_is_and_setting_tools_takes_it_back() {
+        let mut chat = crate::chat::tests::chat();
+        let allowed = Action::PermitMcp {
+            call: 1,
+            answer: McpAnswer::Allowed,
+        };
+        assert_eq!(
+            asked_and_answered(&mut chat, 1, "personal-docs", "server"),
+            allowed
+        );
+        assert!(chat.server_allowed("personal-docs"));
+        // Another definition under the same name is another server: a
+        // project's `docs` over the personal one, or a changed command.
+        assert!(!chat.server_allowed("project-docs"));
+        // Allowing one call allows no more than it.
+        asked_and_answered(&mut chat, 2, "project-docs", "allow");
+        assert!(!chat.server_allowed("project-docs"));
+        // It didn't allow the agent's commands either.
+        assert_eq!(chat.tools(), clackatoo_protocol::AgentTools::Ask);
+        set_tools(&mut chat, "ask");
+        assert!(!chat.server_allowed("personal-docs"));
+    }
+
+    #[test]
+    fn what_is_allowed_is_the_chats_whichever_agent_it_talks_to() {
+        let agents = crate::agents::AgentConfig::default();
+        let (claude, codex) = (
+            agents.find("claude").unwrap(),
+            agents.find("codex").unwrap(),
+        );
+        let mut chat = crate::chat::tests::chat();
+        asked_and_answered(&mut chat, 1, "docs", "server");
+        chat.switch(&codex, None, None, crate::handoff::BUDGET);
+        assert!(chat.server_allowed("docs"), "kept with another agent");
+        // Taken back there, it isn't back with the agent it was allowed
+        // under: the session parked never held it.
+        set_tools(&mut chat, "ask");
+        chat.switch(&claude, None, None, crate::handoff::BUDGET);
+        assert!(!chat.server_allowed("docs"));
+        assert!(chat.allowed_servers().is_empty());
+    }
 
     fn meta(value: Value) -> Meta {
         serde_json::from_value(value).unwrap()

@@ -62,6 +62,16 @@ impl Lost {
         }
     }
 
+    /// This, with every credential `bound`'s server is given taken out
+    /// of what it says: it's told the agent as well as the user.
+    #[must_use]
+    pub(crate) fn redacted(self, bound: &Bound) -> Self {
+        match self {
+            Self::NeedsLogin(why) => Self::NeedsLogin(credentials::redacted(bound, &why)),
+            Self::Failed(why) => Self::Failed(credentials::redacted(bound, &why)),
+        }
+    }
+
     /// The state a server shows after this.
     pub(crate) fn state(&self) -> clackatoo_protocol::McpState {
         match self {
@@ -80,6 +90,24 @@ pub(super) enum Unsent {
     Lost(Lost),
 }
 
+/// What a server was heard to say.
+#[derive(Debug)]
+pub(super) enum Heard {
+    /// A message.
+    Message(Value),
+    /// A line that wasn't one and was passed over, described for the
+    /// user: nothing a server writes goes missing without a word.
+    Garbled(String),
+}
+
+/// What the task reading a command server's output makes of a line.
+enum Line {
+    Heard(Heard),
+    /// One too long to read. Whatever it answered can't be known, so the
+    /// connection is given up, which fails every call with this reason.
+    TooLong(String),
+}
+
 /// A command server: its process, the task writing its input, and the
 /// one reading its output.
 struct Process {
@@ -89,7 +117,7 @@ struct Process {
     /// How many bytes of them haven't been written yet.
     queued: Arc<std::sync::atomic::AtomicUsize>,
     /// What it wrote, a message a line.
-    output: tokio::sync::mpsc::Receiver<Value>,
+    output: tokio::sync::mpsc::Receiver<Line>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     /// The task keeping the last of its standard error.
     stderr: Option<tokio::task::JoinHandle<()>>,
@@ -113,6 +141,10 @@ pub(super) struct Upstream {
     /// last message a server turned down: `receive` only says that the
     /// connection has gone.
     failure: Arc<Mutex<Option<Unsent>>>,
+    /// Whether an HTTP server is sent an `Authorization` header from its
+    /// definition, and no sign-in of clackatoo's: if it answers 401, that
+    /// header is wrong, and signing in wouldn't help.
+    own_credential: bool,
 }
 
 impl Drop for Upstream {
@@ -235,6 +267,8 @@ impl Upstream {
             group: None,
             diagnostic: Arc::new(Mutex::new(String::new())),
             failure: Arc::new(Mutex::new(None)),
+            own_credential: !signs_in
+                && (def.headers.keys()).any(|name| name.eq_ignore_ascii_case("authorization")),
         })
     }
 
@@ -319,11 +353,16 @@ impl Upstream {
             group,
             diagnostic,
             failure: Arc::new(Mutex::new(None)),
+            own_credential: false,
         })
     }
 
-    /// Sends the server `message`, in the order this is called: the
-    /// future only says how it went.
+    /// Sends the server `message`; the future says how it went. A command
+    /// server is written its messages in the order this is called,
+    /// whenever the futures are polled. An HTTP server's are queued as
+    /// each future is first polled, so they keep the order only of
+    /// futures polled in turn, as the proxy's one thread polls the tasks
+    /// it starts them in.
     pub(super) fn send(
         &mut self,
         message: &Value,
@@ -350,8 +389,17 @@ impl Upstream {
                 Err(why) => Box::pin(async move { Err(why) }),
             },
         };
+        let own_credential = self.own_credential;
         async move {
-            let result = sent.await;
+            let result = sent.await.map_err(|why| match why {
+                // No sign-in of clackatoo's would change what it's sent.
+                Unsent::Lost(Lost::NeedsLogin(_)) if own_credential => Unsent::Lost(Lost::Failed(
+                    "The server refused the credential in its configured headers (HTTP 401). \
+                     Check that header in MCP Servers in Settings."
+                        .into(),
+                )),
+                why => why,
+            });
             if let Err(why) = &result
                 && let Ok(mut failure) = failure.lock()
                 && !matches!(*failure, Some(Unsent::Lost(_)))
@@ -362,19 +410,35 @@ impl Upstream {
         }
     }
 
-    /// The server's next message, or `None` once the connection has gone:
-    /// [`ended`](Self::ended) then says why.
-    pub(super) async fn receive(&mut self) -> Option<Value> {
-        match &mut self.kind {
-            Kind::Process(process) => process.output.recv().await,
-            Kind::Http(transport) => {
-                let message = transport.receive().await?;
-                serde_json::to_value(message).ok()
-            }
-            Kind::OAuth(transport) => {
-                let message = transport.receive().await?;
-                serde_json::to_value(message).ok()
-            }
+    /// What the server says next, or `None` once the connection has
+    /// gone: [`ended`](Self::ended) then says why.
+    pub(super) async fn receive(&mut self) -> Option<Heard> {
+        let typed = match &mut self.kind {
+            Kind::Process(process) => match process.output.recv().await? {
+                Line::Heard(heard) => return Some(heard),
+                Line::TooLong(why) => {
+                    self.fail(Unsent::Lost(Lost::Failed(why)));
+                    return None;
+                }
+            },
+            Kind::Http(transport) => serde_json::to_value(transport.receive().await?),
+            Kind::OAuth(transport) => serde_json::to_value(transport.receive().await?),
+        };
+        match typed {
+            Ok(message) => Some(Heard::Message(message)),
+            Err(_) => Some(Heard::Garbled(
+                "A message it sent couldn't be passed on as JSON".into(),
+            )),
+        }
+    }
+
+    /// Keeps `why` as the reason the connection went, unless one is
+    /// kept already.
+    fn fail(&self, why: Unsent) {
+        if let Ok(mut failure) = self.failure.lock()
+            && !matches!(*failure, Some(Unsent::Lost(_)))
+        {
+            *failure = Some(why);
         }
     }
 
@@ -397,7 +461,8 @@ impl Upstream {
         let exit = match &mut self.kind {
             Kind::Process(process) => {
                 let exit = tokio::time::timeout(LAST_WORDS, process.child.wait()).await;
-                if let Some(stderr) = process.stderr.take() {
+                // Kept if it isn't done, for `Drop` to stop.
+                if let Some(stderr) = process.stderr.as_mut() {
                     let _ = tokio::time::timeout(LAST_WORDS, stderr).await;
                 }
                 match exit {
@@ -477,11 +542,15 @@ async fn write_lines(
     }
 }
 
-/// Reads what a command server writes: a JSON message a line. A line
-/// that isn't JSON, as a server logging where it shouldn't writes, is
-/// passed over, as is one over [`MAX_READ`]. Ends, closing `said`, as the
+/// Reads what a command server writes to `stdout`: a JSON message a
+/// line. A line that isn't JSON, as a server logging where it shouldn't
+/// writes, is passed over and told of. A line over [`MAX_READ`] ends the
+/// reading, told as such. Otherwise it ends, closing `said`, as the
 /// server closes its output.
-async fn read_lines(stdout: tokio::process::ChildStdout, said: tokio::sync::mpsc::Sender<Value>) {
+async fn read_lines<R>(stdout: R, said: tokio::sync::mpsc::Sender<Line>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut stdout = tokio::io::BufReader::with_capacity(64 * 1024, stdout);
     let mut line = Vec::new();
     loop {
@@ -494,36 +563,40 @@ async fn read_lines(stdout: tokio::process::ChildStdout, said: tokio::sync::mpsc
             Ok(_) => {}
         }
         if line.len() > MAX_READ && line.last() != Some(&b'\n') {
-            if !skip_line(&mut stdout).await {
-                return;
-            }
+            let why = format!(
+                "it wrote a message over {} MiB, more than clackatoo reads",
+                MAX_READ >> 20
+            );
+            let _ = said.send(Line::TooLong(why)).await;
+            return;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-            continue;
+        let heard = match serde_json::from_slice::<Value>(&line) {
+            Ok(message) => Heard::Message(message),
+            Err(_) => Heard::Garbled(garbled(&line)),
         };
-        if said.send(message).await.is_err() {
+        if said.send(Line::Heard(heard)).await.is_err() {
             return;
         }
     }
 }
 
-/// Reads to the end of a line too long to keep. Returns whether there's
-/// more after it.
-async fn skip_line(stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>) -> bool {
-    loop {
-        let (found, used) = match stdout.fill_buf().await {
-            Ok([]) | Err(_) => return false,
-            Ok(bytes) => match bytes.iter().position(|&byte| byte == b'\n') {
-                Some(at) => (true, at + 1),
-                None => (false, bytes.len()),
-            },
-        };
-        stdout.consume(used);
-        if found {
-            return true;
-        }
-    }
+/// What to say of `line`, which a command server wrote and isn't JSON:
+/// how it starts, with nothing in it that could go unseen.
+fn garbled(line: &[u8]) -> String {
+    /// How much of the line is shown.
+    const SHOWN: usize = 120;
+    let text = String::from_utf8_lossy(line);
+    let start: String = (text.trim().chars())
+        .filter(|c| !c.is_control())
+        .take(SHOWN)
+        .collect();
+    format!(
+        "It wrote a line that isn't a JSON message, which was passed over: a command server \
+         must write one message a line and nothing else. The line starts: {start}"
+    )
 }
 
 /// The HTTP client for `bound`'s server, sending its configured headers.
@@ -793,8 +866,10 @@ async fn probe_send(upstream: &mut Upstream, bound: &Bound, message: Value) -> R
 /// test. What it asks meanwhile is turned down, but for a ping.
 async fn probe_response(upstream: &mut Upstream, bound: &Bound, id: u32) -> Result<Value, Lost> {
     loop {
-        let Some(value) = upstream.receive().await else {
-            return Err(upstream.ended(bound).await);
+        let value = match upstream.receive().await {
+            Some(Heard::Message(value)) => value,
+            Some(Heard::Garbled(_)) => continue,
+            None => return Err(upstream.ended(bound).await),
         };
         if value.get("method").is_none() && value.get("id") == Some(&serde_json::json!(id)) {
             return Ok(value);
@@ -851,6 +926,55 @@ pub(super) fn tool_infos(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// What reading `output`, as a command server wrote it, comes to.
+    fn read(output: Vec<u8>) -> Vec<Line> {
+        runtime().unwrap().block_on(async {
+            let (said, mut heard) = tokio::sync::mpsc::channel(8);
+            let reading = tokio::spawn(read_lines(std::io::Cursor::new(output), said));
+            let mut lines = Vec::new();
+            while let Some(line) = heard.recv().await {
+                lines.push(line);
+            }
+            reading.await.unwrap();
+            lines
+        })
+    }
+
+    #[test]
+    fn nothing_a_command_server_writes_goes_missing_without_a_word() {
+        // A log line among the messages, as a server printing to the
+        // wrong stream writes, and JSON spread over lines: each is told
+        // of, and the messages around them still read.
+        let lines =
+            read(b"{\"id\":1}\nstarting up \x1b[1mnow\n\n{\n\"id\": 2\n}\n{\"id\":3}".to_vec());
+        let told: Vec<String> = (lines.iter())
+            .map(|line| match line {
+                Line::Heard(Heard::Message(message)) => message.to_string(),
+                Line::Heard(Heard::Garbled(what)) => format!("garbled: {what}"),
+                Line::TooLong(why) => format!("too long: {why}"),
+            })
+            .collect();
+        assert_eq!(told.len(), 6, "{told:?}");
+        assert_eq!(told[0], r#"{"id":1}"#);
+        assert!(
+            told[1].ends_with("The line starts: starting up [1mnow"),
+            "{}",
+            told[1]
+        );
+        assert!(told[2].starts_with("garbled:") && told[2].ends_with("starts: {"));
+        assert!(told[4].ends_with("starts: }"));
+        assert_eq!(told[5], r#"{"id":3}"#);
+
+        // A line past the most read ends the reading, saying why, so
+        // what it answered fails at once rather than timing out.
+        let mut long = b"{\"id\":1}\n".to_vec();
+        long.extend(std::iter::repeat_n(b'x', MAX_READ + 2));
+        long.extend(b"\n{\"id\":2}\n");
+        let lines = read(long);
+        assert_eq!(lines.len(), 2);
+        assert!(matches!(&lines[1], Line::TooLong(why) if why.contains("over 32 MiB")));
+    }
 
     /// `message` as the SDK's HTTP transport would write it.
     fn written(message: &Value) -> Value {

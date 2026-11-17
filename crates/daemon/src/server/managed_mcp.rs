@@ -176,6 +176,9 @@ struct Permission {
     shown: String,
     /// The grant the proxy had as it asked.
     revision: String,
+    /// What the server is: its definition and where it was read, as
+    /// `Bound::grant` says it. Allowing the server always allows this.
+    identity: String,
     waits: Waits,
 }
 
@@ -364,6 +367,7 @@ impl Daemon {
                 }
             }
         }
+        self.prune_mcp_statuses();
         let lane = self.managed_mcp.lane(&action);
         lane.queue.push_back(Job {
             token,
@@ -441,7 +445,7 @@ impl Daemon {
             .into_iter()
             .map(|name| {
                 let mut entry = crate::mcp::server_entry(command, &socket, chat, &token);
-                entry["name"] = json!(format!("managed_{name}"));
+                entry["name"] = json!(format!("{}{name}", crate::managed_mcp::SERVER_PREFIX));
                 entry["args"]
                     .as_array_mut()
                     .expect("server arguments")
@@ -568,15 +572,23 @@ impl Daemon {
     }
 
     /// The option that lets `tool` go ahead once, if the chat `chat`'s
-    /// agent asks whether it may call a managed server's tool that
-    /// clackatoo's proxy serves it. The proxy asks the daemon's leave for
-    /// every call, which puts it to the user when it must, so the agent's
-    /// own question is answered at once and the user isn't asked twice:
-    /// as for clackatoo's own tools (see `HostedChat::about_own_tools`).
+    /// agent asks whether it may call a managed server's tool, and
+    /// clackatoo will decide that itself when its proxy is asked to make
+    /// the call: by the chat's permission rules, or, on Tools: Ask, by
+    /// asking the user or having their word for the server already. The
+    /// agent's own question is then answered at once, so the user is
+    /// asked once: as for clackatoo's own tools (see
+    /// `HostedChat::about_own_tools`). On Tools: Allow the proxy lets
+    /// every call through, so the agent's question is left to be asked,
+    /// and its own permission mode decides.
+    ///
     /// Which server it is goes by what the agent's adapter sets, never
     /// the model's input, and counts only while that server's proxy has
-    /// its watch open: a server of the same name from the agent's own
-    /// configuration has no proxy, and is asked about as ever.
+    /// its watch open for the chat. That is what tells clackatoo's from a
+    /// server of the same name in the agent's own configuration: Claude
+    /// Code's adapter says where a server came from, and Codex's doesn't,
+    /// but either starts one of its own in place of clackatoo's, whose
+    /// proxy then never opens a watch.
     pub(super) fn about_managed_call(
         &self,
         chat: TerminalId,
@@ -584,8 +596,17 @@ impl Daemon {
         options: &[agent_client_protocol_schema::v1::PermissionOption],
     ) -> Option<String> {
         use agent_client_protocol_schema::v1::PermissionOptionKind;
-        let server = self.chat_ref(chat)?.managed_call(tool)?;
+        let own = self.chat_ref(chat)?;
+        let server = own.managed_call(tool)?;
         if !self.serves_managed(chat, server) {
+            return None;
+        }
+        // Only where clackatoo's side decides: the chat's rules, or
+        // Tools: Ask, where the proxy asks unless the user allowed the
+        // server. On Tools: Allow the proxy asks nothing, so the agent's
+        // question is the only one, and is the user's to answer.
+        let decides = self.uses_permission_rules(chat) || own.tools() == AgentTools::Ask;
+        if !decides {
             return None;
         }
         (options.iter())
@@ -643,6 +664,7 @@ impl Daemon {
                     server,
                     shown,
                     revision,
+                    identity: String::new(),
                     waits: Waits::Person,
                 };
                 self.check_mcp_call(permission, &method, &request);
@@ -725,17 +747,23 @@ impl Daemon {
             "chat {chat}: MCP server {server}: its proxy opened, generation {}",
             grant.generation
         );
-        self.managed_mcp.statuses.insert(
-            (binding.clone(), Some(chat)),
-            Status {
+        // What went wrong last time is kept until this one connects.
+        let key = (binding.clone(), Some(chat));
+        let failed = (self.managed_mcp.statuses.get(&key)).is_some_and(|status| {
+            status.revision == grant.bound.revision
+                && matches!(status.state, McpState::Error | McpState::NeedsLogin)
+        });
+        if !failed {
+            let starting = Status {
                 revision: grant.bound.revision.clone(),
                 cwd: grant.bound.cwd.clone(),
                 state: McpState::Starting,
                 detail: String::new(),
                 tools: Vec::new(),
                 at: Instant::now(),
-            },
-        );
+            };
+            self.managed_mcp.statuses.insert(key, starting);
+        }
         let answer = serde_json::to_string(&grant).expect("grant serializes");
         self.managed_mcp.proxies.push(Proxy {
             token,
@@ -845,6 +873,7 @@ impl Daemon {
             mcp.proxies = kept;
             gone
         };
+        let any_gone = !gone.is_empty();
         for proxy in gone {
             let why = proxy
                 .ending
@@ -876,6 +905,9 @@ impl Daemon {
         for call in asked {
             self.withdraw_mcp_call(call, None);
         }
+        if any_gone {
+            self.prune_mcp_statuses();
+        }
     }
 
     /// Looks again at what every proxy and every call waiting may do, as
@@ -893,7 +925,7 @@ impl Daemon {
             }
             let last = Some(&proxy.grant.bound);
             match self.mcp_bound(proxy.chat, &proxy.server, &proxy.shown, last) {
-                Ok(bound) if *bound == proxy.grant.bound => {
+                Ok(bound) if same_definition(bound, &proxy.grant.bound) => {
                     let generation = self.mcp_generation(&proxy.binding);
                     if generation != proxy.grant.generation {
                         let bound = bound.clone();
@@ -1021,10 +1053,11 @@ impl Daemon {
             self.hand_answer_with(token, ticket, Response::Done);
             return;
         }
+        permission.identity = grant.bound.grant();
         let rules = self.uses_permission_rules(chat);
         let asks = rules
             || self.chat_ref(chat).is_some_and(|own| {
-                own.tools() == AgentTools::Ask && !own.server_allowed(&permission.server)
+                own.tools() == AgentTools::Ask && !own.server_allowed(&permission.identity)
             });
         if !asks {
             self.hand_answer_with(token, ticket, Response::Done);
@@ -1174,6 +1207,7 @@ impl Daemon {
             return;
         };
         let (chat, server) = (permission.chat, permission.server.clone());
+        let identity = permission.identity.clone();
         if request.len() > MOST_SHOWN {
             let why = format!(
                 "This call's parameters are {} KiB, more than the {} KiB the user can be shown \
@@ -1188,7 +1222,7 @@ impl Daemon {
         let always = !self.uses_permission_rules(chat);
         let whole = (!request.is_empty()).then_some(request);
         let asked = (self.chat(chat))
-            .is_some_and(|own| own.ask_for_server(call, &server, title, whole, always));
+            .is_some_and(|own| own.ask_for_server(call, &identity, title, whole, always));
         if !asked {
             let why = "Too many questions already wait for the user in this chat, so this call \
                        was not sent. Wait for their answers.";
@@ -1459,14 +1493,18 @@ impl Daemon {
         }
     }
 
-    /// Forgets what's kept of connections long gone, but not what went
-    /// wrong with one, which is kept for Settings to show until the
-    /// server next connects: only the oldest of too many goes.
+    /// Forgets what's kept of connections long gone, and of chats that
+    /// have closed, but not what went wrong with an open chat's, which is
+    /// kept for Settings to show until the server next connects. Done as
+    /// a proxy goes and as Settings asks, not every turn of the loop.
     fn prune_mcp_statuses(&mut self) {
-        /// The most kept.
+        /// The most kept: past it, the oldest go.
         const MOST: usize = 1024;
         let stale: Vec<_> = (self.managed_mcp.statuses.iter())
             .filter(|((binding, chat), status)| {
+                if chat.is_some_and(|chat| self.chat_ref(chat).is_none()) {
+                    return true;
+                }
                 let failed = matches!(status.state, McpState::Error | McpState::NeedsLogin);
                 let watched = self.mcp_status_stands(binding, *chat, status) && chat.is_some();
                 !failed && !watched && status.at.elapsed() >= Duration::from_hours(1)
@@ -1492,9 +1530,6 @@ impl Daemon {
     /// moved on, and what every proxy and waiting call may do is looked
     /// at again.
     pub(super) fn take_managed_mcp(&mut self) {
-        if !self.managed_mcp.statuses.is_empty() {
-            self.prune_mcp_statuses();
-        }
         for tests in [false, true] {
             self.take_mcp_lane(tests);
         }
@@ -2060,8 +2095,24 @@ fn mcp_call_title(method: &str, request: &str, server: &str) -> String {
     )
 }
 
+/// Whether `now`, a chat's catalogue's definition of a server, is the
+/// one a proxy was `granted`, without comparing the definitions field by
+/// field: a definition is read from the text its revision is the digest
+/// of, so the same revision from the same file is the same definition.
+/// This is asked of every proxy each turn of the loop.
+fn same_definition(now: &Bound, granted: &Bound) -> bool {
+    now.revision == granted.revision
+        && now.path == granted.path
+        && now.name == granted.name
+        && now.approved == granted.approved
+        && now.available_by_default == granted.available_by_default
+        && now.definition.is_some() == granted.definition.is_some()
+        && now.cwd == granted.cwd
+}
+
 /// Whether `bound`'s server reads the private credential called `name`,
-/// in its environment or its headers.
+/// in its environment or its headers: the only places a definition can
+/// name one. Arguments and a URL are plain text.
 fn uses_credential(bound: &Bound, name: &str) -> bool {
     let Some(definition) = &bound.definition else {
         return false;
@@ -2143,6 +2194,55 @@ mod tests {
         assert_eq!(
             permission_arguments("tools/call", &json!({"name":"read","arguments":public})),
             public
+        );
+    }
+
+    #[test]
+    fn a_proxy_from_before_the_watch_is_answered_as_that_build_expects() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = Roots::in_project(
+            dir.path().join("home"),
+            dir.path().join("home"),
+            Some(dir.path().join("config")),
+        );
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let file = dir.path().join("config/mcp.json");
+        std::fs::write(&file, r#"{"servers":{"docs":{"command":"server"}}}"#).unwrap();
+        let mut registry = config::Registry::discover(&roots, &BTreeSet::new());
+        let bound = registry.servers.remove("docs").unwrap();
+        let grant = Grant {
+            bound: bound.clone(),
+            generation: 3,
+        };
+        // The grant it has: nothing new.
+        assert_eq!(legacy_regrant(&grant.revision(), &grant), Response::Done);
+        // Only the generation moved on: it's handed the new grant, which
+        // it reconnects with.
+        let before = Grant {
+            bound,
+            generation: 2,
+        };
+        let Response::McpConnection(text) = legacy_regrant(&before.revision(), &grant) else {
+            panic!("a reconnect is a new grant");
+        };
+        assert_eq!(serde_json::from_str::<Grant>(&text).unwrap(), grant);
+        // The definition changed: that build can't take it in place.
+        std::fs::write(&file, r#"{"servers":{"docs":{"command":"other"}}}"#).unwrap();
+        let mut registry = config::Registry::discover(&roots, &BTreeSet::new());
+        let edited = Grant {
+            bound: registry.servers.remove("docs").unwrap(),
+            generation: 3,
+        };
+        assert!(!same_definition(&edited.bound, &grant.bound));
+        assert!(matches!(
+            legacy_regrant(&grant.revision(), &edited),
+            Response::Error(_)
+        ));
+        // And a catalogue still loading is said in the words it waits on.
+        assert!(
+            Denied::Loading
+                .into_legacy()
+                .contains("MCP catalogue is loading")
         );
     }
 
