@@ -1,8 +1,11 @@
-//! Managed MCP configuration and isolated session proxies.
+//! The MCP servers clackatoo manages for agents: their configuration,
+//! and the proxy each chat reaches each of them through.
 //!
-//! The daemon grants each proxy its chat's effective configuration. The
-//! proxy owns transport state, so live daemon upgrades leave upstream MCP
-//! sessions intact. It rechecks grants before requests and while idle.
+//! The daemon grants each proxy the definition its chat may use. The
+//! proxy holds the connection to the server, in a process of its own, so
+//! a daemon that upgrades leaves the server's session as it was; it
+//! connects again when the server goes, and asks the daemon's leave for
+//! each call (see `proxy`).
 pub(crate) mod config;
 pub(crate) mod credentials;
 pub(crate) mod import;

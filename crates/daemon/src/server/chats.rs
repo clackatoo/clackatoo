@@ -1073,6 +1073,7 @@ impl Daemon {
                     slot.agent.answer(&request, Ok(result));
                 }
                 (Action::Permit { call, allow }, _, _) => self.permitted(call, allow),
+                (Action::PermitMcp { call, answer }, _, _) => self.answered_mcp(call, answer),
                 (Action::Browser(on), _, _) => self.browser_turned(id, on),
                 (Action::Abandon, slot, _) => {
                     if let Some(slot) = slot {
