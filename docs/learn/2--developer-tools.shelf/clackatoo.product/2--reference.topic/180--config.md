@@ -995,6 +995,7 @@ config runs again (see [When it runs](#when-it-runs)). The
 | `daemon.permissions.rules` | JSON array of literal Allow, Ask and Deny rules. Edited in Settings → Permissions. | `[]` |
 | `daemon.plugins.claude` | Allow Claude Code's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
 | `daemon.plugins.codex` | Allow Codex's native plugins and skills alongside shared skills. Takes effect after a daemon restart or upgrade. | off |
+| `daemon.skills.disabled` | The [shared skills](~clackatoo/reference/skills#switching-skills-off) never offered to any agent, by name, with spaces or commas between them. | none |
 | `daemon.mcp.providers` | Allow provider-managed MCP servers alongside clackatoo's managed servers. Takes effect after a daemon restart or upgrade. | off |
 | `daemon.mcp.claude` | Claude Code override: `inherit`, `off`, or `allow`. Takes effect after a daemon restart or upgrade. | `inherit` |
 | `daemon.mcp.codex` | Codex override: `inherit`, `off`, or `allow`. Takes effect after a daemon restart or upgrade. | `inherit` |

@@ -28,7 +28,9 @@ repositories outside the chat's available tools and scope.
 
 Built-ins use the same `SPECIALIST.md` format as custom roles and are
 embedded in clackatoo. Inspect their instructions or make a custom copy in
-Settings; personal and project files can also override a built-in by name.
+Settings. A personal file can override a built-in by name; a project's file
+can't, as a built-in's name promises what it does: `explore` changes nothing.
+The read-only built-ins choose no shared skills (`skills: []`).
 
 ## Creating and editing specialists
 
@@ -50,7 +52,10 @@ JSON object mapping provider names to defaults.
 The editor writes `SPECIALIST.md` files on the connected daemon's machine.
 Choose **Personal** or **Project** for a new role. Existing files keep their
 location. Built-in roles offer **Make a custom copy**, retaining their
-instructions and defaults in a new file. Names stay fixed when editing an
+instructions and defaults in a new file, and so do roles a `skillset.toml`
+defines: saving one in place would put its manifest out of use. A field left
+empty isn't written to the file. A file is at most 64 KiB. Names stay fixed
+when editing an
 existing file. Conflicting edits are refused and leave your draft open.
 Running chats keep their existing role; future selections use the saved file.
 
@@ -67,7 +72,10 @@ session opens. Selecting another specialist after a conversation has started
 is refused; open a new chat instead. The selected definition is stored with
 the chat. Later edits affect new selections, and do not silently change an
 existing chat's role. Its role survives daemon upgrades, saved-workspace
-restoration, compaction and moves between agents.
+restoration, compaction and moves between agents. If a stored definition
+can't be read back, after moving to an older clackatoo, the chat says so:
+its access limits still hold, and its choice of skills, MCP servers,
+delegation targets and budgets is gone.
 
 With Tools on, an agent sees routing descriptions and can call `start_chat`
 or `start_chats` with `specialist = "reviewer"`. It can select a different
@@ -115,12 +123,27 @@ provider for delegation. Model and effort accept a name or mapping by
 provider; `model: inherit` keeps the parent's model.
 
 Project files are discovered in `.agents/specialists`, from the chat's
-working directory up to its repository root. Personal files are discovered
-in the clackatoo config's `specialists` folder and `~/.agents/specialists`.
-The nearest project definition wins, followed by clackatoo personal files,
-then home personal files and built-ins. Settings creates project files at
-the repository root, or in the working directory when there is no repository.
-Reopen Settings or start a new chat to pick up external file edits.
+working directory up to its project root, and nowhere above it. Personal
+files are discovered in the clackatoo config's `specialists` folder and
+`~/.agents/specialists`. The nearest project definition wins, followed by
+clackatoo personal files, then home personal files and built-ins. Settings
+creates project files at the repository root, or in the working directory
+when there is no repository. Reopen Settings or start a new chat to pick up
+external file edits.
+
+A project's definitions are held to more than your own:
+
+- **They load only from a [trusted folder](~clackatoo/reference/skills#project-trust)**,
+  and are never read through a symlink.
+- **None replaces a built-in.** A project's `explore`, `research`, `plan` or
+  `general` isn't loaded; give it another name.
+- **None loosens one of yours.** Where a project's specialist has the name of
+  one of your own, the project's is used, with the stricter access limit and
+  the lower budgets of the two.
+
+A specialist that can't be loaded isn't silently missing. It's listed under
+**Settings → Agents → Skills** with the reason, and an agent that asks
+`start_chat` for it is told the same reason instead of that there's none.
 
 Specialists and plain skillsets use the same dependency resolver. A
 `SPECIALIST.md` can also live inside a discovered skillset folder, and
@@ -172,13 +195,23 @@ and marks its output as partial. Normal cancellation semantics apply; it is
 not a process-kill sandbox. A new request gets a new clock. An upgrade carries
 the active deadline rather than restarting it.
 
-`turns` and `cost_usd` are initially supported by Claude Code's adapter only,
-through its native maximum-turn and USD-budget options. Choosing them with
-another agent fails with an unsupported-limit message. They use the
-runtime's own accounting and stopping boundary; USD budgets can exceed the
-ceiling by the final model operation. They are request/runtime budgets, not
-a cumulative chat or workspace ledger, and are reapplied when a runtime
-session opens. A provider change cannot silently drop an unsupported budget.
+`turns` and `cost_usd` are held by the agent's own adapter, and only Claude
+Code's does it, through its native maximum-turn and USD-budget options:
+
+- **It goes by the adapter, not the agent's name.** The Claude Code that
+  clackatoo installs is known to; an agent started with your own command isn't
+  until it has started and named Claude Code's adapter as what it is.
+- **Choosing them with any other agent fails** with an unsupported-limit
+  message, rather than running without them. A provider change can't silently
+  drop one.
+- **They're given when a session opens**, and use the runtime's own accounting
+  and stopping boundary; USD budgets can exceed the ceiling by the final model
+  operation.
+- **They're request and runtime budgets**, not a cumulative chat or workspace
+  ledger.
+
+`seconds` is clackatoo's own clock, so it holds with every agent, and runs
+only while a request is being answered.
 
 Custom tool and path permissions, memory, Action Prompts and execution
 location defaults remain separate future features.
