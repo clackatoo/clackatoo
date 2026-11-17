@@ -462,16 +462,6 @@ pub(crate) fn known(name: &str) -> Option<&'static Known> {
     KNOWN.iter().find(|known| known.name == name)
 }
 
-/// Whether the adapter whose package is `package`, as it names itself
-/// when it starts, is one known to hold a session to a number of turns
-/// and a cost.
-pub(crate) fn adapter_holds_budgets(package: &str) -> bool {
-    KNOWN.iter().any(|known| {
-        let name = known.package().rsplit_once('@').map(|(name, _)| name);
-        known.budgets && name == Some(package)
-    })
-}
-
 /// Whether a saved file a message mentions goes to the agent called
 /// `name` as its text, if small, rather than as a link: for any but the
 /// known agents that do better reading it themselves.
@@ -521,13 +511,23 @@ impl AgentConfig {
     /// Whether the agent called `name`, as it's set up now, is started
     /// through an adapter clackatoo installs that holds a session to a
     /// number of turns and a cost. One started with a command of the
-    /// user's isn't known to be, whatever it's called, until it has
-    /// started and said what it is.
+    /// user's never is, whatever it's called and whatever it says it is:
+    /// a limit is only promised where clackatoo knows what holds it.
     pub(crate) fn holds_budgets(&self, name: &str) -> bool {
         matches!(
             self.find(name),
             Ok(AgentSpec { launch: Launch::Known(known), .. }) if known.budgets
         )
+    }
+
+    /// The agents that hold a session to a number of turns and a cost, as
+    /// they're shown, to say when another is asked to.
+    pub(crate) fn holding_budgets() -> String {
+        let titles: Vec<&str> = (KNOWN.iter())
+            .filter(|known| known.budgets)
+            .map(|known| known.title)
+            .collect();
+        titles.join(", ")
     }
 
     /// The agent called `name`, as [`find`](Self::find) finds it, with
