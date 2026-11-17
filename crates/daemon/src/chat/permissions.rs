@@ -160,7 +160,7 @@ impl HostedChat {
             return Vec::new();
         }
         if self.answering() || self.is_opening() || self.node.question.is_some() {
-            self.set_notice(Some("Finish or stop this turn and answer pending questions before changing its permission engine.".into()));
+            self.set_notice(Some("Finish or stop this turn and answer its questions before changing who answers its requests.".into()));
             return Vec::new();
         }
         let before = self.mode().map(str::to_owned);
@@ -204,7 +204,7 @@ impl HostedChat {
         self.starting_mode = None;
         let Some(setting) = self.setting_of(SettingKind::Mode).cloned() else {
             self.permission_confirmed = false;
-            self.set_notice(Some("This provider did not offer a compatible permission mode. Select Provider permissions to continue.".into()));
+            self.set_notice(Some("This agent has no permission mode clackatoo's rules can work with. To go on, let the agent's own settings answer its requests, in the permissions menu.".into()));
             self.permission_mode_answered(false);
             return Vec::new();
         };
@@ -223,7 +223,7 @@ impl HostedChat {
         self.chosen.retain(|(id, _)| *id != setting.id);
         self.chosen.push((setting.id.clone(), mode.into()));
         if !setting.choices.iter().any(|choice| choice.value == mode) {
-            self.set_notice(Some("This provider did not offer a compatible permission mode. Select Provider permissions to continue.".into()));
+            self.set_notice(Some("This agent has no permission mode clackatoo's rules can work with. To go on, let the agent's own settings answer its requests, in the permissions menu.".into()));
             self.permission_mode_answered(false);
             return Vec::new();
         }
@@ -261,7 +261,7 @@ impl HostedChat {
                 self.put_back.push(action);
             }
         } else if self.queued.take().is_some() {
-            self.answered(Err("The provider did not confirm a compatible permission mode. Choose Provider permissions or retry after fixing its settings.".into()));
+            self.answered(Err("The agent didn't take the permission mode clackatoo's rules need. Let the agent's own settings answer its requests, in the permissions menu, or try again once its settings allow that mode.".into()));
         }
     }
 
@@ -270,22 +270,23 @@ impl HostedChat {
     pub(super) fn permission_setting(&self) -> Setting {
         let mut choices = vec![SettingChoice {
             value: "provider".into(),
-            name: "Provider permissions".into(),
-            description: Some("Use the provider's permission mode".into()),
+            name: "The agent's own settings".into(),
+            description: Some("The agent's own permission mode decides".into()),
         }];
         if self.permission_mode().is_some() {
             choices.push(SettingChoice {
                 value: "clackatoo".into(),
-                name: "Clackatoo rules".into(),
+                name: "clackatoo's rules".into(),
                 description: Some(
-                    "Rules review approval requests; provider sandbox permissions still apply"
+                    "Your rules answer, and you're asked when none matches; the agent's \
+                     sandbox still holds"
                         .into(),
                 ),
             });
         }
         Setting {
             id: SETTING.into(),
-            name: "Permission engine".into(),
+            name: "Who answers agents' requests".into(),
             kind: SettingKind::Other,
             value: self.permission_engine().value().into(),
             choices,

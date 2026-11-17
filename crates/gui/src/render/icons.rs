@@ -43,6 +43,8 @@ pub(crate) enum Icon {
     Lock,
     /// A cog: the settings.
     Cog,
+    /// A plug: something connected to.
+    Plug,
 }
 
 impl Icon {
@@ -122,6 +124,11 @@ impl Icon {
             Self::Lock => concat!(
                 "M7 11H17A2 2 0 0 1 19 13V19A2 2 0 0 1 17 21H7A2 2 0 0 1 5 19V13A2 2 0 0 1 7 11Z ",
                 "M8 11V8A4 4 0 0 1 16 8V11"
+            )
+            .into(),
+            Self::Plug => concat!(
+                "M9 3V8 M15 3V8 M6 8H18V12A6 6 0 0 1 12 18A6 6 0 0 1 6 12Z ",
+                "M12 18V22"
             )
             .into(),
             Self::Send => "M12 20V4 M5 11L12 4L19 11".into(),
@@ -220,6 +227,7 @@ mod tests {
                 Icon::Phone,
                 Icon::Lock,
                 Icon::Cog,
+                Icon::Plug,
             ] {
                 assert_eq!(swash::zeno::validate_svg(&icon.path()), Ok(()), "{icon:?}");
                 let mask = icon.rasterize(size);

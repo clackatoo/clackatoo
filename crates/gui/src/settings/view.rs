@@ -37,7 +37,17 @@ pub(crate) struct EasyView {
     /// The keys go to the pages down the side, not to the rows.
     pub(crate) on_side: bool,
     pub(crate) title: String,
+    /// The page the title names a thing of, said before it and a ›, as
+    /// `MCP Servers › search`: a click on it goes back there.
+    pub(crate) within: Option<String>,
     pub(crate) subtitle: String,
+    /// The page's one button, at the right of its title: `Add a server`.
+    pub(crate) primary: Option<String>,
+    /// What went wrong, or why the page can't be changed, under the
+    /// subtitle, as long as it takes to say.
+    pub(crate) banner: Option<String>,
+    /// Why the page lists nothing, in place of its rows.
+    pub(crate) empty: Option<String>,
     pub(crate) preview: Option<Preview>,
     pub(crate) sections: Vec<SectionView>,
     /// What the page says at its foot, and whether it's a link to
@@ -49,9 +59,15 @@ pub(crate) struct EasyView {
     /// picker opens below its row; the page itself is drawn scrolled by
     /// the window, without laying it out again.
     pub(crate) scroll: f32,
-    /// What was saved last, or what went wrong, along the foot.
+    /// What was saved last, or what went wrong, along the foot; and
+    /// whether it's ticked, as something saved is.
     pub(crate) footer: String,
     pub(crate) warning: bool,
+    pub(crate) ticked: bool,
+    /// The keys the foot names, and what each does, as the page is now.
+    pub(crate) hints: Vec<(&'static str, &'static str)>,
+    /// A form's buttons, at the foot's right.
+    pub(crate) buttons: Vec<FootButton>,
     /// The font picker, open over the page.
     pub(crate) fonts: Option<FontsView>,
     /// The row whose slider is being dragged.
@@ -75,10 +91,31 @@ pub(crate) struct Preview {
     pub(crate) scale: f32,
 }
 
+/// One of a form's buttons along the foot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FootButton {
+    pub(crate) label: String,
+    pub(crate) does: Foot,
+    /// Gold, as the one that finishes the form is.
+    pub(crate) main: bool,
+}
+
+/// What a button along the foot does to the form shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Foot {
+    /// Saves it.
+    Save,
+    /// Puts it away, unsaved.
+    Cancel,
+}
+
 /// Rows under a heading.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SectionView {
     pub(crate) heading: String,
+    /// A sentence under the heading, before its rows: what a list is
+    /// while it's empty.
+    pub(crate) note: Option<String>,
     pub(crate) rows: Vec<RowView>,
 }
 
@@ -92,7 +129,106 @@ pub(crate) struct RowView {
     pub(crate) notes: Vec<(String, Ink)>,
     /// Where the user's own config sets it, which locks it: `init.lua:12`.
     pub(crate) lock: Option<String>,
+    /// How it is, said in a word or two before its control: `Ready`.
+    pub(crate) status: Option<(String, Ink)>,
     pub(crate) control: ControlView,
+}
+
+impl RowView {
+    /// A row saying `label` and, under it, `help`, with `control`.
+    pub(crate) fn new(
+        label: impl Into<String>,
+        help: impl Into<String>,
+        control: ControlView,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            help: help.into(),
+            notes: Vec::new(),
+            lock: None,
+            status: None,
+            control,
+        }
+    }
+
+    /// The same, with `note` under its help, in `ink`.
+    pub(crate) fn noted(mut self, note: impl Into<String>, ink: Ink) -> Self {
+        self.notes.push((note.into(), ink));
+        self
+    }
+
+    /// The same, saying `status` before its control, in `ink`.
+    pub(crate) fn with_status(mut self, status: impl Into<String>, ink: Ink) -> Self {
+        self.status = Some((status.into(), ink));
+        self
+    }
+}
+
+/// A button of a row's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ButtonView {
+    pub(crate) label: String,
+    pub(crate) look: Look,
+    /// Whether a click or Enter presses it: one that can't be is greyed.
+    pub(crate) enabled: bool,
+}
+
+/// How a button is drawn, by what it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Look {
+    /// Gold: what the row is for.
+    Main,
+    /// Outlined: something more.
+    Plain,
+    /// Red: it takes something away.
+    Danger,
+}
+
+impl ButtonView {
+    /// A gold button saying `label`.
+    pub(crate) fn main(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            look: Look::Main,
+            enabled: true,
+        }
+    }
+
+    /// An outlined button saying `label`.
+    pub(crate) fn plain(label: impl Into<String>) -> Self {
+        Self {
+            look: Look::Plain,
+            ..Self::main(label)
+        }
+    }
+
+    /// A red button saying `label`.
+    pub(crate) fn danger(label: impl Into<String>) -> Self {
+        Self {
+            look: Look::Danger,
+            ..Self::main(label)
+        }
+    }
+
+    /// The same, greyed, taking no click.
+    pub(crate) fn disabled(mut self) -> Self {
+        self.enabled = false;
+        self
+    }
+}
+
+/// Text in a box, as a row shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FieldView {
+    pub(crate) text: String,
+    /// Where the caret is, in bytes into `text`, while it's typed into.
+    pub(crate) caret: Option<usize>,
+    /// Each character is drawn as a dot: a credential's.
+    pub(crate) masked: bool,
+    /// As wide as the row, under its words: for an address or a command.
+    pub(crate) wide: bool,
+    /// What it says, greyed, while it's empty.
+    pub(crate) hint: &'static str,
 }
 
 /// A row's control, as it's drawn.
@@ -100,6 +236,8 @@ pub(crate) struct RowView {
 pub(crate) enum ControlView {
     /// A switch, on or off.
     Toggle(bool),
+    /// A button, then a switch, on or off, which is what the keys press.
+    Switched { on: bool, button: ButtonView },
     /// Buttons side by side, the one picked lit, if one is.
     Segmented {
         labels: Vec<&'static str>,
@@ -113,8 +251,10 @@ pub(crate) enum ControlView {
     Cards(Vec<Card>),
     /// The font in use, as a button that opens the picker.
     Font(String),
-    /// Text, in a box, being typed if `editing`.
-    Field { text: String, editing: bool },
+    /// One of a list of choices, as a button that opens them.
+    Choice(String),
+    /// Text, in a box.
+    Field(FieldView),
     /// The keys bound, each as it's written, and what's recorded so far,
     /// while keys are recorded.
     Keys {
@@ -123,18 +263,12 @@ pub(crate) enum ControlView {
     },
     /// A setting only Advanced has, which a search found.
     Advanced,
-    /// Open a shared skill's source file.
-    Open,
-    /// An explicit draft action.
-    Button(&'static str),
-    /// Buttons side by side, each its label and whether it acts, gold if
-    /// it does; the keys on button `at`.
-    Buttons {
-        buttons: Vec<(&'static str, bool)>,
-        at: usize,
-    },
-    /// Wrapped instructions, edited within the draft.
-    Paragraph { text: String, editing: bool },
+    /// A button.
+    Button(ButtonView),
+    /// Buttons side by side; the keys on button `at`.
+    Buttons { buttons: Vec<ButtonView>, at: usize },
+    /// Nothing: the row only says something.
+    None,
 }
 
 /// An agent's card.
@@ -151,10 +285,15 @@ pub(crate) struct Card {
 pub(crate) struct FontsView {
     /// The row whose button it opened from.
     pub(crate) row: usize,
+    /// What it's a list of, said before what's typed: `Font`.
+    pub(crate) title: &'static str,
     pub(crate) query: String,
     pub(crate) count: String,
-    /// Which fonts it lists: monospace ones, or every one.
+    /// Which fonts it lists, monospace ones or every one; nothing for a
+    /// list that's of all there is.
     pub(crate) listing: &'static str,
+    /// How many it shows at once: [`FONT_ROWS`], or all of a short list.
+    pub(crate) shows: usize,
     pub(crate) rows: Vec<Row>,
     pub(crate) selected: Option<usize>,
     /// Which font of all `rows` starts at, and which the picker's to show
@@ -183,6 +322,12 @@ pub(crate) enum SettingsHit {
     Page(u8),
     /// A link to Advanced.
     Advanced,
+    /// The page's one button, by its title.
+    Primary,
+    /// The page a form's title says it's of: back to it.
+    Back,
+    /// A button along the foot.
+    Foot(Foot),
     /// A row, away from its control, by its place among every section's.
     Row(u16),
     /// A part of a row's control.
@@ -208,6 +353,8 @@ pub(crate) enum Part {
     More,
     /// An agent's card.
     Card(u8),
+    /// A box of text, at this many bytes into it.
+    Caret(u32),
 }
 
 /// What's needed to measure text beside the interface font's widths.
@@ -324,6 +471,14 @@ impl Scrolling {
     }
 }
 
+/// A place a caret can go in a box of text: how far across the window,
+/// and how many bytes into the text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Stop {
+    x: f32,
+    at: u32,
+}
+
 /// Text laid out: where it goes, and how big it is.
 #[derive(Clone, Debug)]
 struct Placed {
@@ -346,6 +501,8 @@ pub(crate) struct Laid {
     hovers: Vec<(SettingsHit, Fill)>,
     /// Each slider's track, by its row.
     sliders: Vec<(u16, Rect)>,
+    /// Each box of text's places for a caret, by its row.
+    fields: Vec<(u16, Vec<Stop>)>,
     /// The page, laid out whole, which is drawn scrolled, and the font
     /// picker's list.
     page: Option<Page>,
@@ -395,8 +552,21 @@ impl Laid {
             SettingsHit::Control(row, Part::Slider(_)) => {
                 SettingsHit::Control(row, Part::Slider(self.slide(row, point[0]).unwrap_or(0)))
             }
+            SettingsHit::Control(row, Part::Caret(_)) => {
+                SettingsHit::Control(row, Part::Caret(self.caret(row, point[0]).unwrap_or(0)))
+            }
             hit => hit,
         })
+    }
+
+    /// How many bytes into `row`'s box of text the caret goes for a click
+    /// at `x`: the place nearest it.
+    fn caret(&self, row: u16, x: f32) -> Option<u32> {
+        let (_, stops) = self.fields.iter().find(|(at, _)| *at == row)?;
+        stops
+            .iter()
+            .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
+            .map(|stop| stop.at)
     }
 
     /// How far up item `index` of its kind is drawn, scrolled to `at`,
@@ -482,6 +652,7 @@ impl Laid {
             SettingsHit::Control(row, Part::Slider(_)) => {
                 SettingsHit::Control(row, Part::Slider(0))
             }
+            SettingsHit::Control(row, Part::Caret(_)) => SettingsHit::Control(row, Part::Caret(0)),
             hit => hit,
         });
         if let Some(hover) = hover {
@@ -721,8 +892,27 @@ impl Lay<'_> {
         (y + height - origin[1], links)
     }
 
-    /// How many lines `text` takes broken onto lines no wider than
-    /// `width`, in `font`.
+    /// Adds `text` broken onto lines no wider than `width`, from `origin`,
+    /// a word too long for a line broken too. Returns how tall it is.
+    fn wrapped(
+        &mut self,
+        origin: [f32; 2],
+        width: f32,
+        text: &str,
+        ink: Ink,
+        font: TextFont,
+    ) -> f32 {
+        let height = self.line(font);
+        let mut y = origin[1];
+        for line in self.lines_of(text, width, font, ink) {
+            self.text([origin[0], y], &line, ink, font);
+            y += height;
+        }
+        y - origin[1]
+    }
+
+    /// `text` broken onto lines no wider than `width`, in `font`, a word
+    /// too long for a line broken too.
     fn lines_of(&mut self, text: &str, width: f32, font: TextFont, ink: Ink) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut line = String::new();
@@ -1039,7 +1229,7 @@ pub(crate) fn lay_out(
     ));
     let foot_middle = foot.y + foot.height / 2.0;
     let mut x = foot.x + lay.u(24.0);
-    if !view.warning {
+    if view.ticked && !view.warning && !view.footer.is_empty() {
         lay.icon(
             [x + lay.u(7.0), foot_middle],
             14.0,
@@ -1054,27 +1244,21 @@ pub(crate) fn lay_out(
         Ink::Muted
     };
 
+    let narrow = panel.width < lay.u(700.0);
     let mut right = foot.right() - lay.u(24.0);
-    let hints: &[(&str, &str)] = if panel.width < lay.u(700.0) {
-        &[("Esc", "close")]
-    } else if view.title == "Specialists" || view.title == "MCP Servers" {
-        &[("Ctrl+S", "save"), ("Esc", "close")]
-    } else if view.fonts.is_some() {
-        &[("Enter", "pick"), ("Tab", "every font"), ("Esc", "back")]
-    } else if view.title == "Skills" {
-        &[
-            ("Enter", "open"),
-            ("/", "search"),
-            ("m", "Advanced"),
-            ("Esc", "close"),
-        ]
-    } else {
-        &[
-            ("u", "undo"),
-            ("r", "default"),
-            ("m", "Advanced"),
-            ("Esc", "close"),
-        ]
+    // A form's buttons, at the far right, the one that finishes it last.
+    for button in view.buttons.iter().rev() {
+        right = lay_foot_button(&mut lay, button, right, foot_middle) - lay.u(8.0);
+    }
+    if !view.buttons.is_empty() {
+        right -= lay.u(8.0);
+    }
+    // The keys, as the page is now: in a narrow window, only the last,
+    // which closes or goes back, and none beside buttons.
+    let hints = match (narrow, view.buttons.is_empty()) {
+        (false, _) => &view.hints[..],
+        (true, true) => &view.hints[view.hints.len().saturating_sub(1)..],
+        (true, false) => &[],
     };
     for (index, &(key, does)) in hints.iter().enumerate().rev() {
         let does = format!(" {does}");
@@ -1115,34 +1299,69 @@ pub(crate) fn lay_out(
         [side.right(), body.y, edge, body.height],
         Paint::PaletteEdge,
     ));
-    let mut y = side.y + lay.u(16.0);
     let item_height = lay.u(40.0);
+    // Where each page goes down the side, from its top, with its group's
+    // name over the first of each group, and how tall they all are.
+    let pages = crate::options::easy::Page::ALL;
+    let mut places: Vec<(Option<f32>, f32)> = Vec::with_capacity(pages.len());
+    let mut down = lay.u(16.0);
     let mut group = "";
-    for (index, page) in crate::options::easy::Page::ALL.iter().enumerate() {
+    for page in pages {
+        let mut label = None;
         if page.group() != group {
             if !group.is_empty() {
-                y += lay.u(14.0);
+                down += lay.u(14.0);
             }
             group = page.group();
             if !compact {
+                label = Some(down);
+                down += lay.u(28.0);
+            }
+        }
+        places.push((label, down));
+        down += item_height + lay.u(2.0);
+    }
+    // In a window too short for them all, they're scrolled to show the
+    // one picked and the one either side of it, which a click goes to.
+    let most = (down + lay.u(6.0) - side.height).max(0.0);
+    let scrolled = (view.page)
+        .filter(|page| *page < places.len())
+        .map_or(0.0, |page| {
+            // No further than shows the one before, from its group's name
+            // if it has one; as far as shows the one after; and the one
+            // picked itself, if there's not room for all three.
+            let (before, after) = (page.saturating_sub(1), (page + 1).min(places.len() - 1));
+            let foot = |at: usize| places[at].1 + item_height + lay.u(6.0) - side.height;
+            let above = places[before].0.unwrap_or(places[before].1) - lay.u(16.0);
+            foot(after)
+                .max(0.0)
+                .min(above.max(0.0))
+                .max(foot(page))
+                .clamp(0.0, most)
+        });
+    let mut y = side.y;
+    for (index, (page, &(label, top))) in pages.iter().zip(&places).enumerate() {
+        if let Some(label) = label {
+            let line = side.y + label - scrolled;
+            if line >= side.y && line + lay.u(20.0) <= body.bottom() {
                 lay.text_mid(
                     side.x + lay.u(24.0),
-                    y + lay.u(10.0),
-                    group,
+                    line + lay.u(10.0),
+                    page.group(),
                     Ink::Muted,
                     SMALL,
                 );
-                y += lay.u(28.0);
             }
         }
         let item = Rect {
             x: side.x + lay.u(12.0),
-            y,
+            y: side.y + top - scrolled,
             width: side.width - lay.u(24.0),
             height: item_height,
         };
-        if item.bottom() > body.bottom() {
-            break;
+        // Text can't be cut off part way: one that isn't all in isn't drawn.
+        if item.y < side.y || item.bottom() > body.bottom() {
+            continue;
         }
         let hit = SettingsHit::Page(u8::try_from(index).unwrap_or(u8::MAX));
         let picked = view.page == Some(index);
@@ -1175,20 +1394,20 @@ pub(crate) fn lay_out(
             lay.text_mid(item.x + lay.u(42.0), middle, &title, ink, TextFont::Ui);
         }
         lay.hit(item, hit);
-        y += item_height + lay.u(2.0);
+        y = item.bottom() + lay.u(2.0);
     }
     // At the side's foot, where everything else is.
     let note_width = side.width - lay.u(48.0);
     let runs = [
         (
-            "Every setting, with its file and line, is in",
+            "Every option and key, with its file and line, is in",
             Ink::Muted,
             false,
         ),
         ("Advanced.", Ink::Accent, true),
     ];
     let note_lines = {
-        let text = "Every setting, with its file and line, is in Advanced.";
+        let text = "Every option and key, with its file and line, is in Advanced.";
         lay.lines_of(text, note_width, SMALL, Ink::Muted).len()
     };
     #[allow(clippy::cast_precision_loss)]
@@ -1213,16 +1432,59 @@ pub(crate) fn lay_out(
         height: 0.0,
     };
     let title_height = lay.line(TITLE);
-    lay.text([main.x, main.y], &view.title, Ink::Bold, TITLE);
-    let subtitle_y = main.y + title_height + lay.u(6.0);
-    let (subtitle_height, _) = lay.paragraph(
-        [main.x, subtitle_y],
+    // The page's one button, at the title's right.
+    let mut title_right = main.right();
+    if let Some(primary) = &view.primary {
+        let width = lay.width(primary, HELP, Ink::Accent) + lay.u(28.0);
+        let button = Rect {
+            x: main.right() - width,
+            y: (main.y + (title_height - lay.u(30.0)) / 2.0).round(),
+            width,
+            height: lay.u(30.0),
+        };
+        lay_pill(
+            &mut lay,
+            &ButtonView::main(primary.as_str()),
+            button,
+            SettingsHit::Primary,
+        );
+        title_right = button.x - lay.u(16.0);
+    }
+    // The page a form is of, then what it's of.
+    let mut title_x = main.x;
+    if let Some(within) = &view.within {
+        let wide = lay.text([title_x, main.y], within, Ink::Muted, TITLE);
+        let back = Rect {
+            x: title_x,
+            y: main.y,
+            width: wide,
+            height: title_height,
+        };
+        lay.hit(back, SettingsHit::Back);
+        title_x += wide + lay.u(10.0);
+        title_x += lay.text([title_x, main.y], "›", Ink::Muted, TITLE) + lay.u(10.0);
+    }
+    let title = lay.shortened(
+        &view.title,
+        (title_right - title_x).max(0.0),
+        TITLE,
+        Ink::Bold,
+    );
+    lay.text([title_x, main.y], &title, Ink::Bold, TITLE);
+    let mut y = main.y + title_height + lay.u(6.0);
+    y += lay.wrapped(
+        [main.x, y],
         main.width,
-        &[(&view.subtitle, Ink::Muted, false)],
+        &view.subtitle,
+        Ink::Muted,
         TextFont::Ui,
     );
+    if let Some(banner) = &view.banner {
+        y += lay.u(10.0);
+        y += lay.wrapped([main.x, y], main.width, banner, Ink::Warning, HELP);
+    }
     let room = Rect {
-        y: subtitle_y + subtitle_height + lay.u(22.0),
+        y: y + lay.u(22.0),
         height: 0.0,
         ..main
     };
@@ -1240,9 +1502,13 @@ enum Block {
     Preview,
     /// A section's heading, by the section's place.
     Heading(usize),
+    /// The sentence under a section's heading, by the section's place.
+    Said(usize),
     /// A row, by its section's place and its place among every row.
     Row(usize, usize),
     Note,
+    /// Why the page lists nothing.
+    Empty,
 }
 
 /// Lays out the page's sample, sections, rows and note in `room`, from
@@ -1255,8 +1521,20 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
         blocks.push(Block::Preview);
     }
     let mut flat = 0;
+    if view.empty.is_some() {
+        blocks.push(Block::Empty);
+    }
     for (section, each) in view.sections.iter().enumerate() {
-        blocks.push(Block::Heading(section));
+        // A heading with nothing under it isn't drawn.
+        if each.rows.is_empty() && each.note.is_none() {
+            continue;
+        }
+        if !each.heading.is_empty() {
+            blocks.push(Block::Heading(section));
+        }
+        if each.note.is_some() {
+            blocks.push(Block::Said(section));
+        }
         for _ in &each.rows {
             blocks.push(Block::Row(section, flat));
             flat += 1;
@@ -1278,7 +1556,8 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
         .map(
             |(at, block)| match (at.checked_sub(1).map(|at| blocks[at]), block) {
                 (None, _) | (Some(Block::Row(..)), Block::Row(..)) => 0.0,
-                (Some(Block::Heading(_)), Block::Row(..)) => lay.u(10.0),
+                (Some(Block::Heading(_)), Block::Row(..) | Block::Said(_))
+                | (Some(Block::Said(_)), Block::Row(..)) => lay.u(10.0),
                 _ => lay.u(22.0),
             },
         )
@@ -1357,6 +1636,14 @@ fn lay_page(lay: &mut Lay<'_>, view: &EasyView, room: Rect) {
             Block::Heading(section) => {
                 let heading = view.sections[section].heading.to_uppercase();
                 lay.text([room.x, y], &heading, Ink::Muted, SMALL);
+            }
+            Block::Said(section) => {
+                let note = view.sections[section].note.as_deref().unwrap_or_default();
+                lay.wrapped([room.x, y], room.width, note, Ink::Muted, HELP);
+            }
+            Block::Empty => {
+                let empty = view.empty.as_deref().unwrap_or_default();
+                lay.wrapped([room.x, y], room.width, empty, Ink::Muted, TextFont::Ui);
             }
             Block::Row(section, row) => {
                 let cards = matches!(rows[row].control, ControlView::Cards(_));
@@ -1450,6 +1737,16 @@ fn block_height(
             lay.u(32.0) + lines as f32 * preview_line(lay, scale)
         }
         Block::Heading(_) => lay.line(SMALL),
+        Block::Said(section) => {
+            let note = view.sections[section].note.as_deref().unwrap_or_default();
+            let lines = lay.lines_of(note, width, HELP, Ink::Muted).len();
+            lines as f32 * lay.line(HELP)
+        }
+        Block::Empty => {
+            let empty = view.empty.as_deref().unwrap_or_default();
+            let lines = lay.lines_of(empty, width, TextFont::Ui, Ink::Muted).len();
+            lines as f32 * lay.line(TextFont::Ui)
+        }
         Block::Note => {
             let note = view.note.map_or("", |(note, _)| note);
             let lines = lay.lines_of(note, width, HELP, Ink::Muted).len();
@@ -1477,6 +1774,8 @@ struct Shaped {
     /// How wide the chip saying where it's locked is, with the gap after
     /// it, or 0.
     lock: f32,
+    /// How wide what it says of how it is is, with the gap after it, or 0.
+    status: f32,
     /// The control goes under the words, as there's no room beside them.
     stacked: bool,
     /// How tall the words are; for agents' cards, their grid.
@@ -1516,16 +1815,21 @@ fn shape(lay: &mut Lay<'_>, row: &RowView, width: f32) -> Shaped {
             lines,
             control: [0.0, 0.0],
             lock,
+            status: 0.0,
             stacked: false,
             words: grid,
             height: grid + foot,
         };
     }
-    let control = control_size(lay, &row.control);
-    let beside = width - lay.u(36.0) - control[0] - lay.u(24.0) - lock;
-    let stacked =
-        matches!(row.control, ControlView::Paragraph { .. }) || beside < lay.u(NARROWEST_WORDS);
-    let text_width = if stacked { width - lay.u(36.0) } else { beside };
+    let status = row.status.as_ref().map_or(0.0, |(status, ink)| {
+        lay.width(status, HELP, *ink) + lay.u(12.0)
+    });
+    let inner = (width - lay.u(36.0)).max(1.0);
+    let control = control_size(lay, &row.control, inner - lock - status);
+    let beside = inner - control[0] - lay.u(24.0) - lock - status;
+    let wide = matches!(&row.control, ControlView::Field(field) if field.wide);
+    let stacked = wide || beside < lay.u(NARROWEST_WORDS);
+    let text_width = if stacked { inner } else { beside };
     let label = lay.lines_of(&row.label, text_width, TextFont::Ui, Ink::Plain);
     let lines = help_lines(lay, &row.help, &row.notes, text_width);
     let mut words = label.len().max(1) as f32 * lay.line(TextFont::Ui);
@@ -1543,6 +1847,7 @@ fn shape(lay: &mut Lay<'_>, row: &RowView, width: f32) -> Shaped {
         lines,
         control,
         lock,
+        status,
         stacked,
         words,
         height,
@@ -1577,11 +1882,16 @@ fn lock_width(lay: &mut Lay<'_>, row: &RowView) -> f32 {
     })
 }
 
-/// How big a control is drawn: its width and height.
+/// How big a control is drawn, its width and height, in a row with
+/// `room` for it at most.
 #[allow(clippy::cast_precision_loss)]
-fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
+fn control_size(lay: &mut Lay<'_>, control: &ControlView, room: f32) -> [f32; 2] {
     match control {
         ControlView::Toggle(_) => [lay.u(44.0), lay.u(26.0)],
+        ControlView::Switched { button, .. } => [
+            pill_width(lay, button) + lay.u(12.0) + lay.u(44.0),
+            lay.u(28.0),
+        ],
         ControlView::Segmented { labels, .. } => {
             let mut width = lay.u(6.0);
             for label in labels {
@@ -1591,11 +1901,7 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
         }
         ControlView::Slider { .. } => [lay.u(260.0), lay.u(20.0)],
         ControlView::Stepper(_) => [lay.u(110.0), lay.u(34.0)],
-        ControlView::Paragraph { .. } => [lay.u(440.0), lay.u(134.0)],
-        ControlView::Button(label) => [
-            lay.width(label, HELP, Ink::Accent) + lay.u(28.0),
-            lay.u(28.0),
-        ],
+        ControlView::Button(button) => [pill_width(lay, button), lay.u(28.0)],
         ControlView::Buttons { buttons, .. } => {
             let rects = button_rects(lay, buttons, Rect::default());
             [
@@ -1603,13 +1909,18 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
                 lay.u(28.0),
             ]
         }
-        ControlView::Font(name) => {
+        ControlView::Font(name) | ControlView::Choice(name) => {
             let text = lay.width(name, VALUE, Ink::Plain);
             [(text + lay.u(50.0)).max(lay.u(220.0)), lay.u(36.0)]
         }
-        ControlView::Field { text, .. } => {
-            let text = lay.width(text, VALUE, Ink::Plain);
-            [(text + lay.u(28.0)).max(lay.u(180.0)), lay.u(34.0)]
+        ControlView::Field(field) if field.wide => [room.max(lay.u(120.0)), lay.u(34.0)],
+        ControlView::Field(field) => {
+            let text = lay.width(&field.text, VALUE, Ink::Plain);
+            let most = lay.u(320.0).min(room).max(lay.u(120.0));
+            [
+                (text + lay.u(28.0)).max(lay.u(180.0)).min(most),
+                lay.u(34.0),
+            ]
         }
         ControlView::Keys { keys, recording } => {
             let mut width = 0.0;
@@ -1626,11 +1937,11 @@ fn control_size(lay: &mut Lay<'_>, control: &ControlView) -> [f32; 2] {
             width += lay.width("Record…", HELP, Ink::Plain) + lay.u(28.0);
             [width, lay.u(30.0)]
         }
-        ControlView::Advanced | ControlView::Open => [
+        ControlView::Advanced => [
             lay.width("in Advanced", HELP, Ink::Accent) + lay.u(28.0),
             lay.u(28.0),
         ],
-        ControlView::Cards(_) => [0.0, 0.0],
+        ControlView::Cards(_) | ControlView::None => [0.0, 0.0],
     }
 }
 
@@ -1729,7 +2040,7 @@ fn lay_row(
         let top = rect.y + lay.u(14.0);
         let middle = top + shaped.words + lay.u(10.0) + size[1].max(lay.u(28.0)) / 2.0;
         let control = Rect {
-            x: x + shaped.lock,
+            x: x + shaped.lock + shaped.status,
             y: (middle - size[1] / 2.0).round(),
             width: size[0],
             height: size[1],
@@ -1765,6 +2076,15 @@ fn lay_row(
         };
         lay_lock(lay, place, number, from, middle);
     }
+    // How it is, before the control.
+    if let Some((status, ink)) = &row.status {
+        let middle = if size[1] > 0.0 {
+            control.y + control.height / 2.0
+        } else {
+            rect.y + rect.height / 2.0
+        };
+        lay.text_mid(control.x - shaped.status, middle, status, *ink, HELP);
+    }
     lay_control(lay, &row.control, control, number, locked);
     // Around the button the keys are on, of buttons side by side.
     let control = match &row.control {
@@ -1772,9 +2092,11 @@ fn lay_row(
             .get(*at)
             .copied()
             .unwrap_or(control),
+        // And round the switch, which is what they press.
+        ControlView::Switched { .. } => switch_beside(lay, control),
         _ => control,
     };
-    if focused && !locked {
+    if focused && !locked && row.control != ControlView::None {
         let ring = lay.u(3.0);
         lay.fill(
             Fill::rounded(
@@ -1803,28 +2125,20 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
     let edge = lay.geometry.edge;
     let whole = SettingsHit::Control(row, Part::Whole);
     match control {
-        ControlView::Toggle(on) => {
-            let track = if *on && !locked {
-                Paint::Accent
-            } else {
-                Paint::Track
+        ControlView::Toggle(on) => lay_switch_knob(lay, *on, rect, locked, whole),
+        ControlView::Switched { on, button } => {
+            let switch = switch_beside(lay, rect);
+            let pill = Rect {
+                width: pill_width(lay, button),
+                ..rect
             };
-            lay.fill(Fill::rounded(rect.to_array(), track, rect.height / 2.0));
-            let knob = rect.height - lay.u(6.0);
-            let x = if *on {
-                rect.right() - lay.u(3.0) - knob
-            } else {
-                rect.x + lay.u(3.0)
-            };
-            let paint = if locked { Paint::Icon } else { Paint::Ink };
-            lay.fill(Fill::rounded(
-                [x, rect.y + lay.u(3.0), knob, knob],
-                paint,
-                knob / 2.0,
-            ));
-            if !locked {
-                lay.hit(rect, whole);
-            }
+            lay_pill(
+                lay,
+                button,
+                pill,
+                SettingsHit::Control(row, Part::Segment(0)),
+            );
+            lay_switch_knob(lay, *on, switch, locked, whole);
         }
         ControlView::Segmented { labels, picked } => {
             lay.fill(
@@ -1953,7 +2267,7 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
                 VALUE,
             );
         }
-        ControlView::Font(name) => {
+        ControlView::Font(name) | ControlView::Choice(name) => {
             lay.fill(
                 Fill::rounded(rect.to_array(), Paint::Well, lay.u(8.0))
                     .bordered(edge, Paint::PaletteEdge),
@@ -1974,78 +2288,7 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
                 lay.hit(rect, whole);
             }
         }
-        ControlView::Paragraph { text, editing } => {
-            lay.fill(
-                Fill::rounded(rect.to_array(), Paint::Well, lay.u(8.0)).bordered(
-                    edge,
-                    if *editing {
-                        Paint::Accent
-                    } else {
-                        Paint::PaletteEdge
-                    },
-                ),
-            );
-            let shown = if text.is_empty() {
-                "Click to write instructions"
-            } else {
-                text
-            };
-            let mut lines = Vec::new();
-            for line in shown.split('\n') {
-                if line.is_empty() {
-                    lines.push(String::new());
-                } else {
-                    lines.extend(lay.lines_of(line, rect.width - lay.u(24.0), VALUE, Ink::Plain));
-                }
-            }
-            let capacity = (1_u16..=16)
-                .take_while(|n| f32::from(*n) * lay.line(VALUE) + lay.u(16.0) <= rect.height)
-                .count();
-            let cursor = if *editing {
-                lines.iter().position(|l| l.contains('│')).unwrap_or(0)
-            } else {
-                0
-            };
-            let start = cursor.saturating_sub(capacity.saturating_sub(1));
-            for (i, line) in lines.iter().skip(start).take(capacity).enumerate() {
-                lay.text(
-                    [
-                        rect.x + lay.u(12.0),
-                        rect.y + lay.u(8.0) + i as f32 * lay.line(VALUE),
-                    ],
-                    line,
-                    Ink::Plain,
-                    VALUE,
-                );
-            }
-            lay.hit(rect, whole);
-        }
-        ControlView::Field { text, editing } => {
-            let border = if *editing {
-                Paint::Accent
-            } else {
-                Paint::PaletteEdge
-            };
-            lay.fill(
-                Fill::rounded(rect.to_array(), Paint::Well, lay.u(8.0)).bordered(edge, border),
-            );
-            let shown = if *editing {
-                crate::picker::drawn(text)
-            } else if text.is_empty() {
-                "none".to_owned()
-            } else {
-                text.clone()
-            };
-            let ink = if locked || (!*editing && text.is_empty()) {
-                Ink::Muted
-            } else {
-                Ink::Plain
-            };
-            lay.text_mid(rect.x + lay.u(12.0), middle, &shown, ink, VALUE);
-            if !locked {
-                lay.hit(rect, whole);
-            }
-        }
+        ControlView::Field(field) => lay_field(lay, field, rect, row, locked),
         ControlView::Keys { keys, recording } => {
             let mut x = rect.x;
             let chip_height = rect.height;
@@ -2096,48 +2339,231 @@ fn lay_control(lay: &mut Lay<'_>, control: &ControlView, rect: Rect, row: u16, l
         }
         ControlView::Buttons { buttons, .. } => {
             let rects = button_rects(lay, buttons, rect);
-            for (at, (&(label, acts), button)) in buttons.iter().zip(rects).enumerate() {
-                let (fill, ink) = if acts {
-                    (
-                        Fill::rounded(button.to_array(), Paint::AccentFaint, button.height / 2.0)
-                            .bordered(edge, Paint::AccentEdge),
-                        Ink::Accent,
-                    )
-                } else {
-                    (
-                        Fill::rounded(button.to_array(), Paint::Clear, button.height / 2.0)
-                            .bordered(edge, Paint::PaletteEdge),
-                        Ink::Muted,
-                    )
-                };
-                lay.fill(fill);
-                lay.text_mid(button.x + lay.u(14.0), middle, label, ink, HELP);
-                lay.hit(
-                    button,
-                    SettingsHit::Control(row, Part::Segment(u8::try_from(at).unwrap_or(0))),
-                );
+            for (at, (button, place)) in buttons.iter().zip(rects).enumerate() {
+                let part = Part::Segment(u8::try_from(at).unwrap_or(0));
+                lay_pill(lay, button, place, SettingsHit::Control(row, part));
             }
         }
-        ControlView::Advanced | ControlView::Open | ControlView::Button(_) => {
-            lay.fill(
-                Fill::rounded(rect.to_array(), Paint::AccentFaint, rect.height / 2.0)
-                    .bordered(edge, Paint::AccentEdge),
-            );
-            lay.text_mid(
-                rect.x + lay.u(14.0),
-                middle,
-                match control {
-                    ControlView::Button(label) => label,
-                    ControlView::Open => "Open file",
-                    _ => "in Advanced",
-                },
-                Ink::Accent,
-                HELP,
-            );
-            lay.hit(rect, whole);
+        ControlView::Button(button) => lay_pill(lay, button, rect, whole),
+        ControlView::Advanced => {
+            lay_pill(lay, &ButtonView::main("in Advanced"), rect, whole);
         }
-        ControlView::Cards(_) => {}
+        ControlView::Cards(_) | ControlView::None => {}
     }
+}
+
+/// Where the switch goes in `rect`, the room of a button and a switch: at
+/// its right, centred.
+fn switch_beside(lay: &Lay<'_>, rect: Rect) -> Rect {
+    let (width, height) = (lay.u(44.0), lay.u(26.0));
+    Rect {
+        x: rect.right() - width,
+        y: (rect.y + (rect.height - height) / 2.0).round(),
+        width,
+        height,
+    }
+}
+
+/// Lays out a switch in `rect`, on or off, a click on it being `hit`:
+/// greyed, taking none, if it's `locked`.
+fn lay_switch_knob(lay: &mut Lay<'_>, on: bool, rect: Rect, locked: bool, hit: SettingsHit) {
+    let track = if on && !locked {
+        Paint::Accent
+    } else {
+        Paint::Track
+    };
+    lay.fill(Fill::rounded(rect.to_array(), track, rect.height / 2.0));
+    let knob = rect.height - lay.u(6.0);
+    let x = if on {
+        rect.right() - lay.u(3.0) - knob
+    } else {
+        rect.x + lay.u(3.0)
+    };
+    let paint = if locked { Paint::Icon } else { Paint::Ink };
+    lay.fill(Fill::rounded(
+        [x, rect.y + lay.u(3.0), knob, knob],
+        paint,
+        knob / 2.0,
+    ));
+    if !locked {
+        lay.hit(rect, hit);
+    }
+}
+
+/// How wide `button` is drawn.
+fn pill_width(lay: &mut Lay<'_>, button: &ButtonView) -> f32 {
+    lay.width(&button.label, HELP, Ink::Accent) + lay.u(28.0)
+}
+
+/// Lays out `button` in `rect`, as its look says, a click on it being
+/// `hit`: greyed, taking none, if it can't be pressed.
+fn lay_pill(lay: &mut Lay<'_>, button: &ButtonView, rect: Rect, hit: SettingsHit) {
+    let edge = lay.geometry.edge;
+    let radius = rect.height / 2.0;
+    let (paint, border, ink) = match (button.enabled, button.look) {
+        (false, _) => (Paint::Clear, Paint::CardEdge, Ink::Muted),
+        (true, Look::Main) => (Paint::AccentFaint, Paint::AccentEdge, Ink::Accent),
+        (true, Look::Plain) => (Paint::Clear, Paint::PaletteEdge, Ink::Plain),
+        (true, Look::Danger) => (Paint::Warning, Paint::WarningEdge, Ink::Warning),
+    };
+    lay.fill(Fill::rounded(rect.to_array(), paint, radius).bordered(edge, border));
+    let middle = rect.y + rect.height / 2.0;
+    lay.text_mid(rect.x + lay.u(14.0), middle, &button.label, ink, HELP);
+    if button.enabled {
+        lay.hover(
+            hit,
+            Fill::rounded(rect.to_array(), Paint::ChatHover, radius),
+        );
+        lay.hit(rect, hit);
+    }
+}
+
+/// Lays out a form's `button` along the foot, ending at `right`, centred
+/// on `middle`. Returns where it starts.
+fn lay_foot_button(lay: &mut Lay<'_>, button: &FootButton, right: f32, middle: f32) -> f32 {
+    let ink = if button.main {
+        Ink::OnColor
+    } else {
+        Ink::Plain
+    };
+    let width = lay.width(&button.label, HELP, ink) + lay.u(28.0);
+    let rect = Rect {
+        x: right - width,
+        y: (middle - lay.u(14.0)).round(),
+        width,
+        height: lay.u(28.0),
+    };
+    let hit = SettingsHit::Foot(button.does);
+    let radius = lay.u(7.0);
+    if button.main {
+        lay.fill(Fill::rounded(rect.to_array(), Paint::Accent, radius));
+    } else {
+        lay.fill(
+            Fill::rounded(rect.to_array(), Paint::Clear, radius)
+                .bordered(lay.geometry.edge, Paint::PaletteEdge),
+        );
+        lay.hover(
+            hit,
+            Fill::rounded(rect.to_array(), Paint::ChatHover, radius),
+        );
+    }
+    lay.text_mid(rect.x + lay.u(14.0), middle, &button.label, ink, HELP);
+    lay.hit(rect, hit);
+    rect.x
+}
+
+/// What a credential's box shows while it isn't being typed into.
+const MASKED: &str = "••••••••";
+
+/// Lays out a box of text in `rect`, for row `row`: as much of it as
+/// fits, with the caret in view while it's typed into, a dot for each
+/// character of one that's masked, and what it's for, greyed, while it's
+/// empty. A click in it puts the caret at the place nearest.
+#[allow(clippy::cast_precision_loss)]
+fn lay_field(lay: &mut Lay<'_>, field: &FieldView, rect: Rect, row: u16, locked: bool) {
+    let border = if field.caret.is_some() {
+        Paint::Accent
+    } else {
+        Paint::PaletteEdge
+    };
+    lay.fill(
+        Fill::rounded(rect.to_array(), Paint::Well, lay.u(8.0)).bordered(lay.geometry.edge, border),
+    );
+    let middle = rect.y + rect.height / 2.0;
+    let left = rect.x + lay.u(12.0);
+    // A credential not being typed is so many dots, however long it is:
+    // only while it's typed do they count its characters, to type by.
+    if field.masked && field.caret.is_none() && !field.text.is_empty() {
+        lay.text_mid(left, middle, MASKED, Ink::Plain, VALUE);
+        let end = Stop {
+            x: left,
+            at: u32::try_from(field.text.len()).unwrap_or(u32::MAX),
+        };
+        lay.laid.fields.push((row, vec![end]));
+        lay.hit(rect, SettingsHit::Control(row, Part::Caret(0)));
+        return;
+    }
+    let advance = lay.sizes.mono_em * VALUE.scale();
+    // Each character, where it starts in the text and in cells.
+    let mut cells = 0;
+    let mut chars: Vec<(usize, char, usize)> = Vec::new();
+    for (at, ch) in field.text.char_indices() {
+        let ch = if field.masked { '•' } else { ch };
+        chars.push((at, ch, cells));
+        cells += mono_width(ch.encode_utf8(&mut [0; 4]));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let fits = (((rect.width - lay.u(24.0)) / advance.max(1.0))
+        .floor()
+        .max(1.0)) as usize;
+    // The cells shown: from the start, or with a caret too far along to
+    // show from there, from half a box's width at a time further on, so
+    // the text stays still as the caret moves about in what's shown, and
+    // a click leaves what's clicked where it is.
+    let caret_cell = field.caret.map(|caret| {
+        (chars.iter())
+            .find(|(at, ..)| *at >= caret)
+            .map_or(cells, |&(_, _, cell)| cell)
+    });
+    let from = match caret_cell {
+        Some(caret) if cells >= fits => {
+            let (quarter, half) = (fits / 4, (fits / 2).max(1));
+            let stepped = caret.saturating_sub(quarter) / half * half;
+            // No further than shows the text's end, and the caret after it.
+            stepped.min(cells + 1 - fits)
+        }
+        _ => 0,
+    };
+    let shown: Vec<&(usize, char, usize)> = (chars.iter())
+        .filter(|(_, _, cell)| *cell >= from && *cell < from + fits)
+        .collect();
+    let cut = shown.len() < chars.len() && field.caret.is_none();
+    let mut text: String = shown.iter().map(|(_, ch, _)| *ch).collect();
+    if cut {
+        text.pop();
+        text.push('…');
+    }
+    let ink = if locked { Ink::Muted } else { Ink::Plain };
+    if field.text.is_empty() && field.caret.is_none() {
+        lay.text_mid(left, middle, field.hint, Ink::Muted, VALUE);
+    } else {
+        lay.text_mid(left, middle, &text, ink, VALUE);
+    }
+    if locked {
+        return;
+    }
+    // A place for the caret before each character shown, and after the last.
+    let place = |cell: usize| left + cell.saturating_sub(from) as f32 * advance;
+    let mut stops: Vec<Stop> = (shown.iter())
+        .map(|&&(at, _, cell)| Stop {
+            x: place(cell),
+            at: u32::try_from(at).unwrap_or(u32::MAX),
+        })
+        .collect();
+    let end = shown.last().map_or(from, |&&(_, ch, cell)| {
+        cell + mono_width(ch.encode_utf8(&mut [0; 4]))
+    });
+    let after = (shown.last()).map_or(0, |&&(at, ..)| {
+        at + field.text[at..].chars().next().map_or(0, char::len_utf8)
+    });
+    stops.push(Stop {
+        x: place(end),
+        at: u32::try_from(after).unwrap_or(u32::MAX),
+    });
+    if let Some(caret) = caret_cell {
+        let height = lay.line(VALUE);
+        lay.fill(Fill::solid(
+            [
+                place(caret).round(),
+                (middle - height / 2.0).round(),
+                lay.u(1.5).max(1.0),
+                height,
+            ],
+            Paint::Accent,
+        ));
+    }
+    lay.laid.fields.push((row, stops));
+    lay.hit(rect, SettingsHit::Control(row, Part::Caret(0)));
 }
 
 /// Whether `rect`, left, top, width and height, overlaps `over`.
@@ -2147,13 +2573,13 @@ fn overlaps(over: Rect, [x, y, w, h]: [f32; 4]) -> bool {
 
 /// Where each of `buttons` side by side goes, from `rect`'s left and
 /// as tall as a button, centred in it.
-fn button_rects(lay: &mut Lay<'_>, buttons: &[(&str, bool)], rect: Rect) -> Vec<Rect> {
+fn button_rects(lay: &mut Lay<'_>, buttons: &[ButtonView], rect: Rect) -> Vec<Rect> {
     let height = lay.u(28.0);
     let y = (rect.y + (rect.height - height) / 2.0).round();
     let mut x = rect.x;
     (buttons.iter())
-        .map(|&(label, _)| {
-            let width = lay.width(label, HELP, Ink::Accent) + lay.u(28.0);
+        .map(|each| {
+            let width = pill_width(lay, each);
             let button = Rect {
                 x,
                 y,
@@ -2327,7 +2753,8 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect, scroll: f32) {
     let row_height = (cell[1] + lay.u(8.0)).round();
     let head = lay.u(40.0);
     let width = anchor.width.max(lay.u(380.0)).min(room.width);
-    let height = head + FONT_ROWS as f32 * row_height + lay.u(10.0);
+    let shows = fonts.shows.clamp(1, FONT_ROWS);
+    let height = head + shows as f32 * row_height + lay.u(10.0);
     // Below its button, or above it, or if neither has room, over it,
     // between the header and the foot.
     let top = lay.laid.panel.y + header_height(&lay.geometry) + lay.u(8.0);
@@ -2368,7 +2795,7 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect, scroll: f32) {
     lay.hit(rect, SettingsHit::Panel);
     let middle = rect.y + head / 2.0;
     let x = rect.x + lay.u(14.0);
-    let label = lay.text_mid(x, middle, "Font", Ink::Muted, TextFont::Ui);
+    let label = lay.text_mid(x, middle, fonts.title, Ink::Muted, TextFont::Ui);
     let query = crate::picker::drawn(&fonts.query);
     lay.text_mid(
         x + label + lay.u(12.0),
@@ -2377,7 +2804,11 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect, scroll: f32) {
         Ink::Plain,
         TextFont::Mono,
     );
-    let said = format!("{} · {}", fonts.listing, fonts.count);
+    let said = if fonts.listing.is_empty() {
+        fonts.count.clone()
+    } else {
+        format!("{} · {}", fonts.listing, fonts.count)
+    };
     let wide = lay.width(&said, SMALL, Ink::Muted);
     lay.text_mid(
         rect.right() - lay.u(14.0) - wide,
@@ -2394,7 +2825,7 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect, scroll: f32) {
     // list's ends as it's drawn scrolling from where it was.
     let list = rect.y + head + lay.geometry.edge;
     #[allow(clippy::cast_precision_loss)]
-    let foot = rect.y + head + lay.u(5.0) + FONT_ROWS as f32 * row_height;
+    let foot = rect.y + head + lay.u(5.0) + shows as f32 * row_height;
     let clip = [rect.x, list, rect.width, foot - list];
     let (fills_from, texts_from, hits_from, hovers_from) = (
         lay.laid.fills.len(),
@@ -2456,7 +2887,7 @@ fn lay_fonts(lay: &mut Lay<'_>, fonts: &FontsView, room: Rect, scroll: f32) {
         first: fonts.first,
         top: fonts.top,
         last: (fonts.first + fonts.rows.len())
-            .saturating_sub(FONT_ROWS)
+            .saturating_sub(shows)
             .max(fonts.first),
     });
 }
@@ -2474,26 +2905,32 @@ mod tests {
             page: Some(0),
             on_side: false,
             title: "Appearance".into(),
+            within: None,
             subtitle: String::new(),
+            primary: None,
+            banner: None,
+            empty: None,
             preview: None,
             sections: vec![SectionView {
                 heading: "Text".into(),
-                rows: vec![RowView {
-                    label: "Size".into(),
-                    help: String::new(),
-                    notes: Vec::new(),
-                    lock: None,
-                    control: ControlView::Slider {
+                note: None,
+                rows: vec![RowView::new(
+                    "Size",
+                    "",
+                    ControlView::Slider {
                         at: 0.5,
                         value: "16 pt".into(),
                     },
-                }],
+                )],
             }],
             note: None,
             focus: None,
             scroll: 0.0,
             footer: String::new(),
             warning: false,
+            ticked: true,
+            hints: vec![("Esc", "close")],
+            buttons: Vec::new(),
             fonts: None,
             sliding: Some(0),
             machine: None,
@@ -2563,6 +3000,7 @@ mod tests {
                 Ink::Caution,
             )],
             lock: Some("init.lua:3".into()),
+            status: None,
             control: ControlView::Cards(vec![card("Claude", true), card("Codex", false)]),
         });
         let laid = laid_out(&view, [1280, 800]);
@@ -2598,6 +3036,7 @@ mod tests {
             help: "A file path works with Claude Code and Codex on any machine.".into(),
             notes: Vec::new(),
             lock: None,
+            status: None,
             control: ControlView::Segmented {
                 labels: vec!["A file path", "The clipboard", "Somewhere else entirely"],
                 picked: Some(0),
@@ -2631,6 +3070,281 @@ mod tests {
         }
     }
 
+    /// The rectangle of the part of row 0's control a click on is `part`.
+    fn control(laid: &Laid, part: Part) -> Rect {
+        (laid.hits.iter())
+            .find(|(_, hit)| *hit == SettingsHit::Control(0, part))
+            .map(|(rect, _)| *rect)
+            .expect("the control")
+    }
+
+    #[test]
+    fn a_box_of_text_stays_in_its_row_and_a_click_puts_the_caret_where_it_lands() {
+        let long = "https://example.com/a/very/long/address/".repeat(8);
+        let field = |caret| {
+            page_of(RowView::new(
+                "Address",
+                "Where the server is.",
+                ControlView::Field(FieldView {
+                    text: long.clone(),
+                    caret,
+                    wide: true,
+                    ..FieldView::default()
+                }),
+            ))
+        };
+        for size in [[1280, 800], [800, 800], [640, 800]] {
+            // Not typed into: as much as fits, from its start, cut short.
+            let laid = laid_out(&field(None), size);
+            let panel = panel(&Geometry::new(size, METRICS));
+            let rect = control(&laid, Part::Caret(0));
+            assert!(
+                rect.x >= panel.x && rect.right() <= panel.right(),
+                "{size:?}"
+            );
+            let shown = (laid.texts.iter())
+                .find(|text| text.content.starts_with("https://"))
+                .expect("its text");
+            assert!(shown.content.ends_with('…'), "{}", shown.content);
+            assert!(
+                shown.origin[0] + shown.size[0] <= rect.right(),
+                "{size:?}: the text runs past its box"
+            );
+            // Typed into at its end: the end is what's shown, the caret
+            // in the box after it.
+            let laid = laid_out(&field(Some(long.len())), size);
+            let shown = (laid.texts.iter())
+                .find(|text| text.content.ends_with("address/"))
+                .expect("its end");
+            assert!(shown.origin[0] + shown.size[0] <= rect.right());
+            assert!(
+                !shown
+                    .content
+                    .starts_with("https://example.com/a/very/long/address/h")
+            );
+            let (_, stops) = &laid.fields[0];
+            let end = stops.last().expect("a place after the last character");
+            assert_eq!(end.at as usize, long.len());
+            assert!(end.x <= rect.right());
+        }
+        // The text stays still as the caret moves about in what's shown,
+        // so each Left doesn't slide it, nor a click what's clicked.
+        let shown = |caret: usize| {
+            let laid = laid_out(&field(Some(caret)), [800, 800]);
+            (laid.texts.iter())
+                .find(|text| text.content.contains("example.com"))
+                .map(|text| text.content.clone())
+                .expect("its text")
+        };
+        let end = long.len();
+        assert_eq!(shown(end), shown(end - 1));
+        assert_eq!(shown(end - 1), shown(end - 5));
+        assert_ne!(
+            shown(end),
+            shown(40),
+            "it does move once the caret's out of it"
+        );
+        // A click goes to the place nearest it, whichever part is shown.
+        let short = page_of(RowView::new(
+            "Name",
+            "",
+            ControlView::Field(FieldView {
+                text: "aébc".into(),
+                caret: Some(0),
+                ..FieldView::default()
+            }),
+        ));
+        let laid = laid_out(&short, [1280, 800]);
+        let rect = control(&laid, Part::Caret(0));
+        let (_, stops) = &laid.fields[0];
+        let places: Vec<u32> = stops.iter().map(|stop| stop.at).collect();
+        assert_eq!(places, [0, 1, 3, 4, 5], "between characters, never in one");
+        let middle = rect.y + rect.height / 2.0;
+        let click = |x: f32| laid.hit([x, middle], Scrolled::default());
+        // 8 pixels a cell at 93 hundredths: just past the second character.
+        assert_eq!(
+            click(stops[2].x + 1.0),
+            Some(SettingsHit::Control(0, Part::Caret(3)))
+        );
+        assert_eq!(
+            click(rect.right() - 2.0),
+            Some(SettingsHit::Control(0, Part::Caret(5)))
+        );
+    }
+
+    #[test]
+    fn a_credential_is_dots_that_do_not_count_its_characters_until_it_is_typed() {
+        // A credential's is dots, as many as it has characters.
+        let masked = page_of(RowView::new(
+            "Value",
+            "",
+            ControlView::Field(FieldView {
+                text: "secret".into(),
+                masked: true,
+                ..FieldView::default()
+            }),
+        ));
+        let laid = laid_out(&masked, [1280, 800]);
+        // Not typed into, it's the same dots however long it is; a click
+        // puts the caret at its end.
+        assert!(laid.texts.iter().any(|text| text.content == MASKED));
+        let rect = control(&laid, Part::Caret(0));
+        assert_eq!(
+            laid.hit([rect.x + 14.0, rect.y + 4.0], Scrolled::default()),
+            Some(SettingsHit::Control(0, Part::Caret(6)))
+        );
+        assert!(
+            !laid
+                .texts
+                .iter()
+                .any(|text| text.content.contains("secret"))
+        );
+    }
+
+    #[test]
+    fn a_switch_beside_a_button_takes_its_own_clicks() {
+        let view = page_of(RowView::new(
+            "/deploy",
+            "Deploys.",
+            ControlView::Switched {
+                on: true,
+                button: ButtonView::plain("Open its file"),
+            },
+        ));
+        for size in [[1280, 800], [640, 800]] {
+            let laid = laid_out(&view, size);
+            let switch = control(&laid, Part::Whole);
+            let button = control(&laid, Part::Segment(0));
+            assert!(button.right() <= switch.x, "{size:?}: they overlap");
+            let panel = panel(&Geometry::new(size, METRICS));
+            assert!(switch.right() <= panel.right(), "{size:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_with_nothing_to_list_says_why_and_draws_no_empty_heading() {
+        let mut view = slider_page();
+        view.sliding = None;
+        view.sections = vec![
+            SectionView {
+                heading: "Servers".into(),
+                note: Some("No servers yet.".into()),
+                rows: Vec::new(),
+            },
+            SectionView {
+                heading: "Built in".into(),
+                note: None,
+                rows: Vec::new(),
+            },
+        ];
+        view.empty = Some("Reading the servers…".into());
+        view.banner = Some("mcp.json can't be read.".into());
+        view.primary = Some("Add a server".into());
+        let laid = laid_out(&view, [1280, 800]);
+        let said: Vec<&str> = (laid.texts.iter())
+            .map(|text| text.content.as_str())
+            .collect();
+        for words in [
+            "SERVERS",
+            "No servers yet.",
+            "Reading the servers…",
+            "mcp.json can't be read.",
+            "Add a server",
+        ] {
+            assert!(said.contains(&words), "{words}: {said:?}");
+        }
+        assert!(!said.contains(&"BUILT IN"), "{said:?}");
+        assert!(
+            laid.hits
+                .iter()
+                .any(|(_, hit)| *hit == SettingsHit::Primary)
+        );
+    }
+
+    #[test]
+    fn a_forms_title_goes_back_and_its_buttons_are_along_the_foot() {
+        let mut view = page_of(RowView::new(
+            "Remove search",
+            "",
+            ControlView::Buttons {
+                buttons: vec![
+                    ButtonView::plain("Signing in…").disabled(),
+                    ButtonView::danger("Really remove"),
+                ],
+                at: 1,
+            },
+        ));
+        view.within = Some("MCP Servers".into());
+        view.title = "search".into();
+        view.hints = vec![("Tab", "next field"), ("Ctrl+S", "save"), ("Esc", "back")];
+        view.buttons = vec![
+            FootButton {
+                label: "Cancel".into(),
+                does: Foot::Cancel,
+                main: false,
+            },
+            FootButton {
+                label: "Save".into(),
+                does: Foot::Save,
+                main: true,
+            },
+        ];
+        let rect = |laid: &Laid, hit: SettingsHit| {
+            (laid.hits.iter())
+                .find(|(_, each)| *each == hit)
+                .map(|(rect, _)| *rect)
+        };
+        let laid = laid_out(&view, [1280, 800]);
+        let panel = panel(&Geometry::new([1280, 800], METRICS));
+        let cancel = rect(&laid, SettingsHit::Foot(Foot::Cancel)).expect("Cancel");
+        let save = rect(&laid, SettingsHit::Foot(Foot::Save)).expect("Save");
+        assert!(cancel.right() < save.x && save.right() < panel.right());
+        assert!(save.y > panel.bottom() - 44.0, "along the foot");
+        assert!(rect(&laid, SettingsHit::Back).is_some());
+        // A button that can't be pressed takes no click.
+        assert_eq!(rect(&laid, SettingsHit::Control(0, Part::Segment(0))), None);
+        assert!(rect(&laid, SettingsHit::Control(0, Part::Segment(1))).is_some());
+        // In a narrow window the buttons stay, and the keys give way.
+        let laid = laid_out(&view, [640, 800]);
+        assert!(rect(&laid, SettingsHit::Foot(Foot::Save)).is_some());
+        assert!(!laid.texts.iter().any(|text| text.content == "Ctrl+S"));
+    }
+
+    #[test]
+    fn the_pages_down_the_side_scroll_to_the_one_shown_in_a_short_window() {
+        let pages = crate::options::easy::Page::ALL;
+        let shown = |page: usize, height: u32| {
+            let mut view = slider_page();
+            view.page = Some(page);
+            let laid = laid_out(&view, [1280, height]);
+            (0..pages.len())
+                .filter(|&at| {
+                    let hit = SettingsHit::Page(u8::try_from(at).unwrap());
+                    laid.hits.iter().any(|(_, each)| *each == hit)
+                })
+                .collect::<Vec<_>>()
+        };
+        // Tall enough, every page is there, whichever is shown.
+        assert_eq!(shown(0, 800).len(), pages.len());
+        assert_eq!(shown(pages.len() - 1, 800).len(), pages.len());
+        // Too short for them all: the first ones with the first shown...
+        let first = shown(0, 420);
+        assert!(first.len() < pages.len());
+        assert_eq!(first[0], 0);
+        // ...and each, as it's shown, with the one either side of it, so a
+        // click reaches the next.
+        for page in 0..pages.len() {
+            let there = shown(page, 420);
+            assert!(there.contains(&page), "page {page}: {there:?}");
+            if page > 0 {
+                assert!(there.contains(&(page - 1)), "page {page}: {there:?}");
+            }
+            if page + 1 < pages.len() {
+                assert!(there.contains(&(page + 1)), "page {page}: {there:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_part_taller_than_the_room_is_cut_off_at_the_foot() {
         let view = page_of(RowView {
@@ -2638,6 +3352,7 @@ mod tests {
             help: "word ".repeat(400),
             notes: Vec::new(),
             lock: None,
+            status: None,
             control: ControlView::Toggle(true),
         });
         let geometry = Geometry::new([1280, 500], METRICS);
@@ -2678,14 +3393,17 @@ mod tests {
             help: String::new(),
             notes: Vec::new(),
             lock: None,
+            status: None,
             control: ControlView::Font("Mono".into()),
         });
         // Fonts 5 to 34 laid out, 15 to be shown first.
         view.fonts = Some(FontsView {
             row: 0,
+            title: "Font",
             query: String::new(),
             count: "30 / 30".into(),
             listing: "monospace fonts",
+            shows: FONT_ROWS,
             rows: (5..35).map(|at| row(&format!("font {at}"))).collect(),
             selected: Some(10),
             first: 5,

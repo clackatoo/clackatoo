@@ -1475,7 +1475,7 @@ impl HostedChat {
             .find(|known| known.id == setting && known.kind == SettingKind::Mode)
             .map(|known| known.value.clone());
         if was.is_some() && !self.permission_mode_allowed(&value) {
-            self.set_notice(Some("Clackatoo rules require a provider mode that sends approval requests. Switch to Provider permissions to use this mode.".into()));
+            self.set_notice(Some("clackatoo's rules need a mode in which the agent asks before it acts. To use this mode, let the agent's own settings answer its requests, in the permissions menu.".into()));
             return;
         }
         if self.set_value(&setting, &value) {
@@ -2126,7 +2126,7 @@ impl HostedChat {
         if self.permission_engine() == crate::permissions::Engine::Clackatoo
             && !matches!(to.name.as_str(), "claude" | "codex")
         {
-            self.set_notice(Some("Select Provider permissions before switching to this provider; Clackatoo rules do not support its approval mode yet.".into()));
+            self.set_notice(Some("clackatoo's rules can't answer this agent's requests yet. Let the agent's own settings answer them, in the permissions menu, before switching to it.".into()));
             return None;
         }
         // What it runs in the background goes with the agent it leaves,

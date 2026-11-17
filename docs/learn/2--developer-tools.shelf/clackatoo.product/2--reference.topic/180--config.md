@@ -537,10 +537,41 @@ what's typed in the search.
 
 **Easy** groups its pages into **General** (Appearance, Editor, Terminals,
 Keys, and Phone & other machines) and **Agents** (Agents,
-[Specialists](~clackatoo/reference/specialists), and [Skills](~clackatoo/reference/skills)). The Skills page browses shared
-procedures and skillset bundles and opens their source files. The Agents
-page has separate native-plugin opt-ins for Claude Code and Codex, off by
-default. A settings page has rows in
+[Specialists](~clackatoo/reference/specialists),
+[Skills](~clackatoo/reference/skills),
+[MCP Servers](~clackatoo/reference/mcp-servers) and
+[Permissions](~clackatoo/reference/permissions)), each with its own icon;
+in a window too short for them all, the pages down the side scroll to the one
+shown. The Agents page has separate native-plugin opt-ins for Claude Code
+and Codex, off by default, and under **Servers from the agent's own
+configuration**, whether agents also use the MCP servers of their own
+settings.
+
+The last four of those list things rather than settings: specialists,
+skills, MCP servers and permission rules, for the project of the pane that
+was focused when Settings opened, which each says under its title, with the
+daemon's machine if it's another. Each has one button by its title, which
+`a` presses too, and <kbd>Enter</kbd> opens what the keys are on. A
+specialist, a server and a rule open as a form: only the fields that apply,
+**Save** and **Cancel** along the foot, and what's wrong with a field said
+under it. In a form every key is the form's: typing on a field starts it,
+<kbd>Enter</kbd> finishes it and goes to the next, <kbd>Tab</kbd> and
+<kbd>Shift</kbd>+<kbd>Tab</kbd> go between the rows with something to press
+or type into, <kbd>Esc</kbd> stops typing, <kbd>Ctrl</kbd>+<kbd>S</kbd>
+saves, and the letters that act elsewhere in the menu do nothing. A button
+that takes something away asks for a second press, which any other key or
+click takes back, and <kbd>Enter</kbd> in the field before it never goes on
+to it. A form with changes is never thrown away without asking:
+<kbd>Esc</kbd>, **Cancel**, the cog, a click off the panel, the keys that go
+back to normal mode and a `:Settings` run over it ask first, and do it if
+asked again. A list is read when its page is shown, after anything
+done on it, and when a lost connection comes back; a page with nothing to
+list says why. The search finds servers, specialists, skills and rules by
+name, as well as settings. The foot names the keys that work on the page
+shown.
+
+A click acts only on a control; on the rest of a row, it takes the keys
+there. A settings page has rows in
 cards under small headings: what the setting does in words, a line of help,
 and its control at the right, drawn as such: a switch, buttons side by side,
 a slider, a number between − and +, a card for each agent, the font picker
@@ -578,7 +609,9 @@ Some rows are the [daemon's settings](#the-daemon-s-options), which the
 daemon saves in its own `daemon/settings.lua`: on **Terminals**, **Keep what
 terminals showed** and **Lines kept of each terminal** after a restart, and
 **Wide emoji**; on **Agents**, the notification **When a long command
-finishes** and the **Subagents** working at once. They show once the daemon
+finishes**, the **Subagents** working at once, the native plugins and the
+servers from the agent's own configuration; on **Permissions**, **Who answers
+agents' requests**; and each switch on **Skills**. They show once the daemon
 has said them, so not with a daemon from before them. One your
 `daemon/init.lua` sets is greyed out with its place, as your window's
 `init.lua` is. One the daemon reads only as it starts says it **takes effect

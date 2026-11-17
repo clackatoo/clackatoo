@@ -143,10 +143,11 @@ impl Desk {
     }
 
     /// Closes the finder, stopping the searches it was waiting on, or the
-    /// start page.
+    /// start page; and the settings menu, unless it holds a form with
+    /// changes, which asks first (see [`Desk::put_settings_away`]).
     pub(super) fn close_finder(&mut self) {
         self.start = None;
-        self.settings = None;
+        self.put_settings_away();
         self.grep_at = None;
         self.symbol_refresh = false;
         self.boards_on = None;

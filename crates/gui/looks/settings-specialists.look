@@ -1,6 +1,9 @@
-# Native specialist Settings, source locks, multiline drafts and explicit saves.
+# The Specialists page: its list, with one the project has and those
+# built in; a new one's form, typed into; its agent picked from a list;
+# saved; then one of the user's own open, with something wrong in a
+# field, and in narrow windows.
 size 1280x900
-file .agents/skillsets/auditor/SPECIALIST.md <<END
+file .agents/specialists/auditor/SPECIALIST.md <<END
 ---
 name: auditor
 description: Audit security-sensitive changes
@@ -8,29 +11,44 @@ limits: read-only
 ---
 Inspect trust boundaries and report concrete findings.
 END
-keys <C-;>:Settings<CR>
+# The project's own load only once its folder is trusted.
+keys <C-;>
+type :trust $PROJECT
+keys <CR>
+sleep 500
+keys :Settings<CR>
 wait-for Appearance
 keys }}}}}}
-wait-for Create specialist
+wait-for New specialist
 shot specialists-list
-keys <CR>
-wait-for Instructions
+keys a
+wait-for Kept in
 shot specialist-new
-keys <CR>
 type reviewer
-keys <CR>j<CR>
-type Review changes for bugs
-keys <CR>j<CR>
-type Review changes carefully.
-keys <C-j>
-type Report concrete bugs with file references.
-shot specialist-instructions
-keys <CR><C-s>
-wait-for Specialist saved
+keys <CR><Tab>
+type Reviews changes for bugs
+keys <CR>
+type After a change, before it's committed
+shot specialist-typing
+# Past its instructions, to the agent it runs as: a list to pick from.
+keys <CR><Tab><CR>
+sleep 300
+shot specialist-agent
+keys <Down><CR>
+shot specialist-picked
+keys <C-s>
+wait-for Saved reviewer
 shot specialist-saved
-# Newly saved roles reopen in the same editor, keeping their model defaults.
-keys G<CR>
-wait-for Instructions
-shot specialist-edit
-size 560x780
-shot specialist-narrow
+# One of the project's own, open: a limit that's no number says so.
+keys k<CR>
+wait-for Kept in
+keys <Tab><Tab><Tab><Tab><Tab><Tab><Tab>
+type soon
+keys <Tab>
+shot specialist-wrong
+size 800x780
+shot specialist-800
+size 640x780
+shot specialist-640
+keys <Esc><Esc>
+shot specialists-640

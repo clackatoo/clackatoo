@@ -10,8 +10,8 @@ Each chat has its own model, reasoning effort, and approval mode, picked from
 the controls in its message box, and talks to one agent at a time, which you
 can change.
 
-The permissions menu also selects **Provider permissions** or **Clackatoo
-rules** for that chat. `:Settings` > **Permissions** sets the default for new
+The permissions menu also selects, under **Who answers agents' requests**,
+**The agent's own settings** or **clackatoo's rules** for that chat. `:Settings` > **Permissions** sets the default for new
 chats, edits Allow/Ask/Deny rules and shows recent decisions. See
 [Permissions](~clackatoo/reference/permissions) for matching, provider-mode
 requirements and the approval requests those rules cover.
@@ -23,9 +23,10 @@ followed by one permissions control showing the current approval mode. At the
 right, a small context gauge sits beside Send, or Stop while the agent
 answers. Paste images with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>.
 
-The permissions menu groups the permission engine, the agent's approval
-mode, access to clackatoo's tools, and browser access. Selecting Clackatoo
-rules chooses a compatible provider mode. With Provider permissions, changing
+The permissions menu groups who answers the agent's requests, the agent's
+approval mode, access to clackatoo's tools, and browser access. Selecting
+clackatoo's rules chooses a compatible provider mode. With the agent's own
+settings, changing
 a mode or tool setting leaves the others as they were. For Claude Code,
 Manual asks before every change, Accept
 edits makes edits without asking, Plan plans before it acts, and Auto lets

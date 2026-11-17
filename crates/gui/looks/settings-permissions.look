@@ -1,18 +1,53 @@
-# Permission engine ownership, literal rule drafts and confirmed saves.
+# The Permissions page: who decides, with no rules yet; a rule's form;
+# a rule for a command saved; one that allows a tool that runs commands,
+# which says what that means; the rules as sentences; and narrow.
 size 1280x900
 keys <C-;>:Settings<CR>
 wait-for Appearance
 keys }}}}}}}}}
-wait-for Permission engine
+wait-for Who answers agents
 shot permissions
-keys j<CR>
-wait-for Exact arguments
-keys gg<CR><CR>j<CR>j<CR>
+keys a
+wait-for When it matches
+shot permission-new
+# Allow, a command, git status.
+keys h<Tab>l<Tab>
 type git status
+shot permission-command
+keys <C-s>
+wait-for Allow the command
+shot permission-saved
+# Allowing a tool that runs commands allows any command, and says so.
+keys a
+wait-for When it matches
+keys h<Tab><Tab>
+type claude/Bash
 keys <CR>
-shot permission-command-draft
-keys jj<CR>
-wait-for Command: git status
-shot permission-rule-saved
-size 560x780
-shot permissions-narrow
+shot permission-any-command
+keys <C-s>
+wait-for Allow any command
+# A Deny catches whatever starts with its words, and its form says so.
+keys a
+wait-for When it matches
+keys l<Tab>l<Tab>
+type git push
+shot permission-deny
+keys <C-s>
+wait-for Deny commands starting
+# A folder that's no folder is said under its field.
+keys a
+wait-for When it matches
+keys l<Tab>lll<Tab>
+type notes
+keys <C-s>
+shot permission-wrong
+keys <Esc><Esc>
+shot permission-rules
+# One of them open: Delete asks for a second press.
+keys <CR>
+wait-for Delete this rule
+keys <Tab><Tab><Tab><CR>
+shot permission-delete
+keys <Esc>
+size 640x780
+shot permissions-640

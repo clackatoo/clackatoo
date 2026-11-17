@@ -25,6 +25,12 @@
 //! binding's keys (see [`crate::options::settings_lua`]); keys the user's
 //! own config binds are locked, as options are.
 //!
+//! Some of Easy's pages list things that aren't options: the MCP servers,
+//! specialists, skills and permission rules the daemon has for the project
+//! the menu opened in (see [`form`]). Each is read from the daemon as its
+//! page is shown, after anything done on it, and again when a connection
+//! that was lost is back (see [`SettingsMenu::due`]).
+//!
 //! Advanced is drawn as the finder is, over the panes (see
 //! [`crate::finder::view`]), Easy as [`view`] lays it out; the menu is the
 //! window's alone, as the finder is:
@@ -44,10 +50,12 @@
 //! | `x` | Takes away this window's own value |
 //! | `d` | Takes out keys the menu saved |
 //! | `o` | Opens the line that set it |
+//! | `a` | On a page that lists things, adds one |
 //! | Esc, `q` | Clears what's typed, or else closes the menu |
 //! | `m` | Switches to Easy, or back |
 
 mod easy;
+mod form;
 mod mcp;
 mod permissions;
 mod specialists;
@@ -378,8 +386,9 @@ pub(crate) enum Outcome {
     Open(Place),
     /// The same, for a line of the daemon's config, on its machine.
     OpenDaemons(Place),
-    /// A skill file on the machine that owns the current workspace.
-    OpenSkill(Place),
+    /// A file on the machine the menu's lists are of is to be opened in an
+    /// editor, and the menu closed: a skill's, or a specialist's.
+    OpenFile(Place),
     /// The fonts installed are wanted, for the font picker: see
     /// [`SettingsMenu::fonts`].
     Fonts,
@@ -388,8 +397,6 @@ pub(crate) enum Outcome {
         action: clackatoo_protocol::McpAction,
         id: u64,
     },
-    /// Refresh permission decision history from the daemon.
-    RefreshPermissions,
     /// Save a complete specialist draft.
     SaveSpecialist {
         specialist: clackatoo_protocol::SpecialistDefinition,
@@ -588,10 +595,48 @@ enum Editing {
     Font(FontPicker),
     /// Keys being recorded, to do what a binding does.
     Keys { bound: Bound, keys: Vec<Chord> },
+    /// One of a form's row's choices being picked from a list.
+    Choice(ChoicePicker),
 }
+
+/// The pages of Easy that list things with forms to change them in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Catalogued {
+    /// MCP servers.
+    Servers,
+    Specialists,
+    /// Permission rules.
+    Rules,
+}
+
+/// Something of the daemon's the menu shows, to be read from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Read {
+    /// The agents it knows, and their models.
+    Agents,
+    /// Its settings, and what its rules last decided.
+    Settings,
+    Skills,
+    Specialists,
+    McpServers,
+}
+
+/// What a page says of something asked of the daemon when the connection
+/// to it was lost.
+const LOST_ASKING: &str = "The connection to the daemon was lost before it answered, so this \
+                           may or may not have been done. Look again once it's back.";
+
+/// What a page says of something asked while the daemon's out of reach.
+const NOT_SENT: &str =
+    "Not connected to the daemon, so nothing was sent. Try again once the connection's back.";
+
+/// How long after the daemon's settings were read they're read again,
+/// while the Permissions page shows what its rules last decided.
+const DECISIONS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The settings menu's state.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(crate) struct SettingsMenu {
     permissions: permissions::Permissions,
     /// What's typed, the row picked and the first shown.
@@ -621,13 +666,37 @@ pub(crate) struct SettingsMenu {
     /// The agents the daemon knows, for Easy's cards: each one's name,
     /// what to show, and whether it's installed.
     agents: Vec<(String, String, bool)>,
-    /// The shared skills in the working directory Settings opened in.
+    /// The shared skills of the directory Settings opened in, whether
+    /// they've been listed, and when they're read.
     skills: Vec<clackatoo_protocol::Skill>,
-    skills_status: String,
+    /// The skills the daemon's `skills.disabled` switches off, by name.
+    skills_off: Vec<String>,
+    skills_listing: form::Listing,
+    skills_feed: form::Feed,
     specialists: specialists::Specialists,
     mcp: mcp::Mcp,
+    /// When the agents the daemon knows, and its settings, are read.
+    agents_feed: form::Feed,
+    settings_feed: form::Feed,
     /// The daemon's settings are listed, as it's said them.
     daemon: bool,
+    /// The connection to the daemon is lost.
+    offline: bool,
+    /// The pane focused as the menu opened: its lists are of the project
+    /// that pane works in.
+    pane: Option<clackatoo_protocol::PaneId>,
+    /// The directory the menu's lists are for, as its pages say it, once
+    /// the daemon has said it: the one the pane focused as the menu opened
+    /// works in.
+    dir: Option<String>,
+    /// The home directory on the daemon's machine, which files' paths are
+    /// said from, once the daemon's said it.
+    home: String,
+    /// A form's changes are about to be thrown away, and the foot asks
+    /// whether to: the next key or click that would, does.
+    discarding: bool,
+    /// The key or click being handled came straight after that question.
+    confirming: bool,
 }
 
 /// Why an agent's keys don't change keys, as the window says too.
@@ -661,10 +730,20 @@ impl SettingsMenu {
             said_saved: None,
             agents: Vec::new(),
             skills: Vec::new(),
+            skills_off: Vec::new(),
+            skills_listing: form::Listing::Reading,
+            skills_feed: form::Feed::due_now(),
             specialists: specialists::Specialists::new(),
             mcp: mcp::Mcp::new(),
-            skills_status: "Loading skills…".into(),
+            agents_feed: form::Feed::due_now(),
+            settings_feed: form::Feed::due_now(),
             daemon: false,
+            offline: false,
+            pane: None,
+            dir: None,
+            home: String::new(),
+            discarding: false,
+            confirming: false,
         };
         menu.fill(facts);
         if !query.is_empty() {
@@ -763,60 +842,15 @@ impl SettingsMenu {
         facts: &Facts,
         history: &mut History,
     ) -> Outcome {
-        self.permission_follow(facts);
-        if self.permission_page() && self.permission_drafting() {
-            let mut handled = false;
-            let outcome = picker::press(press, |stroke| {
-                if stroke == Stroke::ctrl('s') {
-                    handled = true;
-                    self.permission_act(4, None, facts)
-                } else if self.permission_editing() {
-                    handled = true;
-                    self.permission_key(stroke)
-                } else {
-                    Outcome::Nothing
-                }
-            });
-            if handled {
-                return outcome;
-            }
-        }
-        if self.mcp_page() {
-            let mut handled = false;
-            let outcome = picker::press(press, |stroke| {
-                if stroke == Stroke::ctrl('s') && self.mcp.editor().is_some() {
-                    handled = true;
-                    self.finish_mcp_field();
-                    self.mcp_act(self.mcp_rows().saturating_sub(2))
-                } else if self.mcp_editing() {
-                    handled = true;
-                    self.mcp_key(stroke)
-                } else {
-                    Outcome::Nothing
-                }
-            });
-            if handled {
-                return outcome;
-            }
-        }
-        if self.specialist_page() && self.specialists.draft.is_some() {
-            let mut handled = false;
-            let outcome = picker::press(press, |stroke| {
-                if stroke == Stroke::ctrl('s') {
-                    handled = true;
-                    self.specialist_act(16)
-                } else if self.specialist_editing() {
-                    handled = true;
-                    self.specialist_key(stroke)
-                } else {
-                    Outcome::Nothing
-                }
-            });
-            if handled {
-                return outcome;
-            }
-        }
+        self.follow_rules(facts);
+        self.confirming = std::mem::take(&mut self.discarding);
         self.said = None;
+        // A form takes every key, so a letter typed a moment too soon
+        // never acts on the menu; a list open under one of its rows takes
+        // them while it's open.
+        if self.form_open() && self.editing.is_none() {
+            return picker::press(press, |stroke| self.form_stroke(stroke));
+        }
         // Keys being recorded are keys, whatever they'd do.
         if let Some(Editing::Keys { .. }) = &self.editing {
             return self.record(press, facts, history);
@@ -899,6 +933,9 @@ impl SettingsMenu {
             (_, Some('o')) if easy =>
                 Hint::Action("Open the line that set it"),
                 self.easy_open(facts);
+            (_, Some('a')) if easy =>
+                Hint::Action("Add to the page's list"),
+                self.easy_add();
             (_, Some('x' | 'd')) if easy =>
                 Hint::None,
                 Outcome::Nothing;
@@ -977,14 +1014,8 @@ impl SettingsMenu {
 
     /// Types `text`, into the search, or the value being typed.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
-        if self.permission_editing() {
-            return self.permission_paste(text);
-        }
-        if self.mcp_editing() {
-            return self.mcp_paste(text);
-        }
-        if self.specialist_editing() {
-            return self.specialist_paste(text);
+        if self.form_open() && self.editing.is_none() {
+            return self.form_paste(text);
         }
         match &mut self.editing {
             Some(Editing::Value { text: typed, .. }) => {
@@ -995,6 +1026,10 @@ impl SettingsMenu {
                 if fonts.picker.paste(text) == picker::Keyed::Typed {
                     fonts.ranking.set_query(fonts.picker.query(), &fonts.items);
                 }
+                Outcome::Changed
+            }
+            Some(Editing::Choice(choices)) => {
+                choices.paste(text);
                 Outcome::Changed
             }
             Some(Editing::Keys { .. }) => Outcome::Nothing,
@@ -1019,7 +1054,11 @@ impl SettingsMenu {
     /// Esc: what's typed goes, or else the menu does.
     fn escape(&mut self) -> Outcome {
         if !self.typing && self.picker.query().is_empty() {
-            return Outcome::Close;
+            return if self.may_leave() {
+                Outcome::Close
+            } else {
+                Outcome::Changed
+            };
         }
         self.typing = false;
         let keep = self.picked_name();
@@ -1057,6 +1096,7 @@ impl SettingsMenu {
             Some(Editing::Font(fonts)) => (fonts.picker)
                 .go(by, fonts.ranking.len())
                 .outcome(|| Outcome::Changed),
+            Some(Editing::Choice(choices)) => choices.go(by),
             _ if self.mode == Mode::Easy => {
                 // A row's worth a line, about, as the window's wheel goes.
                 #[allow(clippy::cast_precision_loss)]
@@ -1550,8 +1590,191 @@ impl SettingsMenu {
                     None => Outcome::Nothing,
                 },
             },
+            Some(Editing::Choice(choices)) => match stroke {
+                Stroke::Escape
+                | Stroke::Char {
+                    ch: 'c',
+                    ctrl: true,
+                } => {
+                    self.editing = None;
+                    Outcome::Changed
+                }
+                Stroke::Enter => {
+                    let Some(value) = choices.picked() else {
+                        return Outcome::Nothing;
+                    };
+                    let row = choices.row;
+                    self.editing = None;
+                    self.choice_picked(row, &value);
+                    Outcome::Changed
+                }
+                stroke => choices.key(stroke),
+            },
             Some(Editing::Keys { .. }) | None => Outcome::Nothing,
         }
+    }
+
+    /// The choice `value` was picked from the list row `row` of the
+    /// page's catalogue opened.
+    fn choice_picked(&mut self, row: usize, value: &str) {
+        match self.catalogue_shown() {
+            Some(Catalogued::Servers) => form::Catalogue::picked(&mut self.mcp, row, value),
+            Some(Catalogued::Specialists) => {
+                form::Catalogue::picked(&mut self.specialists, row, value);
+            }
+            Some(Catalogued::Rules) => form::Catalogue::picked(&mut self.permissions, row, value),
+            None => {}
+        }
+    }
+
+    /// What of the daemon's is due to be read at `now`: everything as the
+    /// menu opens and when a lost connection is back, a page's list as
+    /// it's shown and after something's done on it, and while their pages
+    /// are shown, the servers, as chats connect to them, and the daemon's
+    /// settings, for what its rules last decided.
+    pub(crate) fn due(&self, now: std::time::Instant) -> Vec<Read> {
+        let is_due = |due: Option<std::time::Instant>| due.is_some_and(|due| due <= now);
+        let mut reads = Vec::new();
+        if is_due(self.agents_feed.due()) {
+            reads.push(Read::Agents);
+        }
+        if is_due(self.settings_feed.due()) {
+            reads.push(Read::Settings);
+        }
+        if is_due(self.skills_feed.due()) {
+            reads.push(Read::Skills);
+        }
+        if self.specialists.due() {
+            reads.push(Read::Specialists);
+        }
+        if is_due(self.mcp_due()) {
+            reads.push(Read::McpServers);
+        }
+        reads
+    }
+
+    /// When the servers are next read: once whatever's shown, then only
+    /// while their page is.
+    fn mcp_due(&self) -> Option<std::time::Instant> {
+        let wanted = self.catalogue_shown() == Some(Catalogued::Servers)
+            || *self.mcp.listing() == form::Listing::Reading;
+        self.mcp.due().filter(|_| wanted)
+    }
+
+    /// When something is next due to be read, if anything is: the window
+    /// wakes then, to read it.
+    pub(crate) fn wake(&self) -> Option<std::time::Instant> {
+        let now = (self.specialists.due()).then(std::time::Instant::now);
+        [
+            self.agents_feed.due(),
+            self.settings_feed.due(),
+            self.skills_feed.due(),
+            self.mcp_due(),
+            now,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// `read` has been asked of the daemon.
+    pub(crate) fn reading(&mut self, read: Read) {
+        match read {
+            Read::Agents => self.agents_feed.asked(),
+            Read::Settings => self.settings_feed.asked(),
+            Read::Skills => self.skills_feed.asked(),
+            Read::Specialists => self.specialists.reading(),
+            // Its answer is known by a number: see `mcp_reading`.
+            Read::McpServers => {}
+        }
+    }
+
+    /// `read` can't be asked of the daemon, and `why`, as a sentence: its
+    /// page says so.
+    pub(crate) fn unavailable(&mut self, read: Read, why: String) {
+        match read {
+            Read::Agents => self.agents_feed.came(None),
+            Read::Settings => self.settings_feed.came(None),
+            Read::Skills => self.skills_came(Err(why)),
+            Read::Specialists => self.specialists.unavailable(why),
+            Read::McpServers => self.mcp.unavailable(why),
+        }
+    }
+
+    /// The daemon said its settings: while the Permissions page is shown,
+    /// they're read again soon, for what its rules decide meanwhile.
+    pub(crate) fn settings_came(&mut self) {
+        let shown = self.catalogue_shown() == Some(Catalogued::Rules);
+        self.settings_feed.came(shown.then_some(DECISIONS_EVERY));
+        // A skill switched off or on is listed with what came of it.
+        if self.mode == Mode::Easy && self.easy.page() == crate::options::easy::Page::Skills {
+            self.skills_feed.read_now();
+        }
+    }
+
+    /// The page shown is read again from the daemon, as it's shown.
+    fn read_page(&mut self) {
+        match self.easy.page() {
+            crate::options::easy::Page::Mcp => self.mcp.read_now(),
+            crate::options::easy::Page::Specialists => self.specialists.read_now(),
+            crate::options::easy::Page::Skills => self.skills_feed.read_now(),
+            crate::options::easy::Page::Permissions => self.settings_feed.read_now(),
+            _ => {}
+        }
+    }
+
+    /// The connection to the daemon was lost: whatever was asked of it
+    /// will never be answered, which its page says, and nothing more is
+    /// read until it's back.
+    pub(crate) fn lost(&mut self) {
+        self.unanswered(LOST_ASKING);
+    }
+
+    /// Something was asked of a daemon that's out of reach: nothing was
+    /// sent, which its page says.
+    pub(crate) fn not_sent(&mut self) {
+        self.unanswered(NOT_SENT);
+    }
+
+    /// Whatever the pages asked of the daemon will never be answered, and
+    /// `why`; nothing more is read until the connection's back.
+    fn unanswered(&mut self, why: &str) {
+        self.offline = true;
+        self.agents_feed.lost();
+        self.settings_feed.lost();
+        self.skills_feed.lost();
+        self.mcp.lost(why);
+        self.specialists.lost(why);
+        self.permissions.lost(why);
+    }
+
+    /// The connection to the daemon is back: everything is read again.
+    pub(crate) fn reconnected(&mut self) {
+        self.offline = false;
+        self.agents_feed.read_now();
+        self.settings_feed.read_now();
+        self.skills_feed.read_now();
+        self.mcp.read_now();
+        self.specialists.read_now();
+    }
+
+    /// The pane the menu's lists are for.
+    pub(crate) fn pane(&self) -> Option<clackatoo_protocol::PaneId> {
+        self.pane
+    }
+
+    /// The menu's lists are for the project `pane` works in.
+    pub(crate) fn set_pane(&mut self, pane: Option<clackatoo_protocol::PaneId>) {
+        self.pane = pane;
+    }
+
+    /// The directory the menu's lists are for, as the daemon says it, in
+    /// a `home` it's written from as `~`.
+    pub(crate) fn set_dir(&mut self, dir: &str, home: &str) {
+        self.dir = Some(form::tilde(dir, home));
+        home.clone_into(&mut self.home);
+        home.clone_into(&mut self.mcp.home);
+        home.clone_into(&mut self.specialists.home);
     }
 
     /// Whether letters type into the search.
@@ -1824,68 +2047,75 @@ impl FontPicker {
         })
     }
 
-    /// The families shown in a list `rows` long and `cols` cells wide,
-    /// `font` being the one in use: drawn from where `from` says, as it
-    /// scrolls, or with no `from`, with as many again above and below,
-    /// for Easy to draw scrolling from where it was.
-    fn shown(
-        families: &[String],
-        picker: &mut Picker,
-        items: &Items,
-        ranking: &mut Ranking,
-        font: &str,
-        (rows, cols): (usize, usize),
-        from: Option<&mut dyn FnMut(usize) -> f64>,
-    ) -> (Vec<Row>, f32) {
-        let len = ranking.len();
-        let (range, shift) = match from {
-            Some(from) => picker.shown_scrolled(rows, len, from),
-            None => (picker.shown_around(rows, len).0, 0.0),
-        };
-        let rows = range
-            .filter_map(|rank| {
-                let index = ranking.get(rank)?;
-                let text = items.get(index);
-                let accents = ranking.matched_chars(text);
-                // The first is the system's font, which is no family.
-                let current = match index {
-                    0 => font.is_empty(),
-                    index => families.get(index - 1).is_some_and(|family| family == font),
-                };
-                let inks: Vec<Ink> = (0..text.chars().count())
-                    .map(|at| {
-                        if accents
-                            .binary_search(&u32::try_from(at).unwrap_or(u32::MAX))
-                            .is_ok()
-                        {
-                            Ink::Matched
-                        } else if current {
-                            Ink::Accent
-                        } else {
-                            Ink::Plain
-                        }
-                    })
-                    .collect();
-                Some(fit(text, &inks, cols, false))
-            })
-            .collect();
-        (rows, shift)
+    /// Whether the item listed at `index` is the font in use, `font`: the
+    /// first is the system's font, which is no family.
+    fn in_use(families: &[String], font: &str, index: usize) -> bool {
+        match index {
+            0 => font.is_empty(),
+            index => families.get(index - 1).is_some_and(|family| family == font),
+        }
     }
+}
 
+/// The items of a list to pick from shown in a list `rows` long and `cols`
+/// cells wide, the one `current` says is in use lit: drawn from where
+/// `from` says, as it scrolls, or with no `from`, with as many again
+/// above and below, for Easy to draw scrolling from where it was.
+fn picker_rows(
+    picker: &mut Picker,
+    items: &Items,
+    ranking: &mut Ranking,
+    current: &dyn Fn(usize) -> bool,
+    (rows, cols): (usize, usize),
+    from: Option<&mut dyn FnMut(usize) -> f64>,
+) -> (Vec<Row>, f32) {
+    let len = ranking.len();
+    let (range, shift) = match from {
+        Some(from) => picker.shown_scrolled(rows, len, from),
+        None => (picker.shown_around(rows, len).0, 0.0),
+    };
+    let rows = range
+        .filter_map(|rank| {
+            let index = ranking.get(rank)?;
+            let text = items.get(index);
+            let accents = ranking.matched_chars(text);
+            let current = current(index);
+            let inks: Vec<Ink> = (0..text.chars().count())
+                .map(|at| {
+                    if accents
+                        .binary_search(&u32::try_from(at).unwrap_or(u32::MAX))
+                        .is_ok()
+                    {
+                        Ink::Matched
+                    } else if current {
+                        Ink::Accent
+                    } else {
+                        Ink::Plain
+                    }
+                })
+                .collect();
+            Some(fit(text, &inks, cols, false))
+        })
+        .collect();
+    (rows, shift)
+}
+
+impl FontPicker {
     /// What Easy draws of it, below the button of row `row`, `font` being
     /// the one in use.
     fn easy_view(&mut self, font: &str, row: usize) -> view::FontsView {
-        let (rows, _) = Self::shown(
-            &self.families,
+        let families = &self.families;
+        let (rows, _) = picker_rows(
             &mut self.picker,
             &self.items,
             &mut self.ranking,
-            font,
+            &|index| Self::in_use(families, font, index),
             (view::FONT_ROWS, 60),
             None,
         );
         view::FontsView {
             row,
+            title: "Font",
             query: self.picker.query().to_owned(),
             count: match &self.installed {
                 None => "looking for fonts…".into(),
@@ -1896,6 +2126,7 @@ impl FontPicker {
             } else {
                 "monospace fonts"
             },
+            shows: view::FONT_ROWS,
             rows,
             selected: self.picker.shown_selected(self.ranking.len()),
             first: self.picker.drawn(),
@@ -1923,12 +2154,11 @@ impl FontPicker {
             ranking,
         } = self;
         let len = ranking.len();
-        let (shown, shift) = Self::shown(
-            families,
+        let (shown, shift) = picker_rows(
             picker,
             items,
             ranking,
-            font,
+            &|index| Self::in_use(families, font, index),
             (rows, cols),
             Some(from),
         );
@@ -1978,6 +2208,108 @@ impl FontPicker {
                 )
             }),
             empty: (!waiting).then(|| "No font matches".into()),
+        }
+    }
+}
+
+/// A list of choices open under a row of a form, as the font picker is
+/// under its row: what's typed to find one, and the one picked.
+#[derive(Debug)]
+pub(crate) struct ChoicePicker {
+    /// The row of the page's catalogue it opened from.
+    row: usize,
+    /// What they're choices of: `Agent`.
+    title: &'static str,
+    /// What picking each gives the form, as `items` lists them.
+    values: Vec<String>,
+    /// The one the row has now, by its place.
+    current: usize,
+    picker: Picker,
+    items: Items,
+    ranking: Ranking,
+}
+
+impl ChoicePicker {
+    /// The list `pick` asks for, opened from row `row` of its catalogue,
+    /// the choice the row has picked.
+    fn new(pick: form::Pick, row: usize) -> Self {
+        let mut items = Items::default();
+        for (_, shown) in &pick.choices {
+            items.push(shown);
+        }
+        let mut ranking = Ranking::new(Case::default(), false);
+        ranking.add(&items);
+        let mut picker = Picker::default();
+        picker.set_selected(pick.picked);
+        Self {
+            row,
+            title: pick.title,
+            values: pick.choices.into_iter().map(|(value, _)| value).collect(),
+            current: pick.picked,
+            picker,
+            items,
+            ranking,
+        }
+    }
+
+    /// What the choice picked gives the form.
+    fn picked(&mut self) -> Option<String> {
+        let index = self.ranking.get(self.picker.selected())?;
+        self.values.get(index).cloned()
+    }
+
+    /// A key that isn't Enter or Esc: it moves what's picked, or types
+    /// to find a choice.
+    fn key(&mut self, stroke: Stroke) -> Outcome {
+        match self.picker.key(stroke, self.ranking.len()) {
+            Some(keyed) => keyed.outcome(|| {
+                self.ranking.set_query(self.picker.query(), &self.items);
+                Outcome::Changed
+            }),
+            None => Outcome::Nothing,
+        }
+    }
+
+    /// Types `text`, to find a choice.
+    fn paste(&mut self, text: &str) {
+        if self.picker.paste(text) == picker::Keyed::Typed {
+            self.ranking.set_query(self.picker.query(), &self.items);
+        }
+    }
+
+    /// Moves what's picked `by` choices, as the wheel does.
+    fn go(&mut self, by: isize) -> Outcome {
+        (self.picker.go(by, self.ranking.len())).outcome(|| Outcome::Changed)
+    }
+
+    /// Picks the choice shown at `row`, as a click does. Returns whether
+    /// there's one there.
+    fn click(&mut self, row: usize) -> bool {
+        self.picker.click(row, self.ranking.len())
+    }
+
+    /// What Easy draws of it, below the button of the page's row `row`.
+    fn view(&mut self, row: usize) -> view::FontsView {
+        let current = self.current;
+        let (rows, _) = picker_rows(
+            &mut self.picker,
+            &self.items,
+            &mut self.ranking,
+            &|index| index == current,
+            (view::FONT_ROWS, 60),
+            None,
+        );
+        view::FontsView {
+            row,
+            title: self.title,
+            query: self.picker.query().to_owned(),
+            count: format!("{} / {}", self.ranking.len(), self.items.len()),
+            listing: "",
+            shows: self.items.len(),
+            rows,
+            selected: self.picker.shown_selected(self.ranking.len()),
+            first: self.picker.drawn(),
+            top: self.picker.top(),
         }
     }
 }

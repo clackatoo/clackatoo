@@ -53,22 +53,33 @@ usual tools to follow the procedure.
 ## Browsing skills
 
 Open `:Settings`, then **Skills** under the **Agents** category in Easy mode.
-Each entry shows its description, source, invocation rules and file path.
+The page lists the skills for the project of the pane that was focused when
+Settings opened, and says which under its title. Each entry shows its
+description, where it's from, who starts it (you with its slash command,
+agents when it fits, or both) and its file's path.
 Skills from a skillset include the bundle's name in their source. Search for
 that name to see the bundle's skills.
-**Open file**, or <kbd>Enter</kbd> on a row, opens its `SKILL.md` in an editor
-on the workspace's machine. The Settings search also finds skills by name,
-description, source and path.
+**Open its file**, or `o` on a row, opens its `SKILL.md` in an editor on the
+workspace's machine. The Settings search also finds skills by
+name, description, source and path. With no skills, the page says where to
+put one.
 
-A skill that can't be used is listed with the reason: its file is broken, it
-asks for something shared skills don't do, its project isn't trusted, or it's
-switched off. Specialists and skillsets that couldn't be loaded are listed
-here too, by name, with what's wrong with them.
+Each skill has a switch. <kbd>Enter</kbd>, `l` or `h`, or a click on it,
+switches the skill off, or on again, for every agent, by adding its name to
+[`skills.disabled`](#switching-skills-off) or taking it out; `o`, or **Open
+its file**, opens its file. A skill switched off stays in the list, saying so.
 
-Reopen Settings to refresh the list. A new chat and `list_skills` also read
-the folders again; a catalogue read in the last two seconds is used as it is,
-so the chats an agent starts together share one read. What you change in your
-own folders reaches the chats in every project the next time any of them reads.
+Under **Not loaded** are the skills that can't be used, each with the reason:
+its file is broken, it asks for something shared skills don't do, or its
+project isn't trusted, which `:trust` puts right. Specialists and skillsets
+that couldn't be loaded are listed there too, by name, with what's wrong with
+them.
+
+The list is read each time the page is shown. A new chat and `list_skills`
+also read the folders again; a catalogue read in the last two seconds is used
+as it is, so the chats an agent starts together share one read. What you
+change in your own folders reaches the chats in every project the next time
+any of them reads.
 
 `load_skill` and a slash invocation read only the skill's own file, each time.
 So edits to an existing procedure apply on its next use, and a removed or
@@ -148,7 +159,8 @@ agent, by name, with spaces or commas between them:
 daemon.skills.disabled = "docx pptx imagegen"
 ```
 
-A skill switched off stays listed in Settings, with that as its reason. It has
+Each skill's switch on the Skills page edits this option, so switching one off
+needs no typing. A skill switched off stays listed in Settings, saying so. It has
 no slash command and no line in the catalogue, and `load_skill` refuses it.
 Open chats lose it as the option is saved. A specialist that names it in
 `skills` can't start, and says the skill is switched off.
@@ -214,10 +226,12 @@ the containing role.
 
 Unknown fields and future format numbers are refused. A bundle that's refused
 is listed under **Settings → Agents → Skills** with the reason, and the reason
-is in the daemon log too. MCP servers and hooks are reserved for later capability
-support. Bundles run no installation commands, fetch no dependencies and
-start no services. Install one by placing or symlinking its folder into a
-skillset directory, then reopen Settings to refresh.
+is in the daemon log too. Hooks are reserved for later capability support; a
+bundle's MCP servers are described under
+[Bundled MCP servers](#bundled-mcp-servers). Bundles run no installation
+commands, fetch no dependencies and start no services. Install one by placing
+or symlinking its folder into a skillset directory; the Skills page lists it
+the next time it's shown.
 
 ## Writing a skill
 

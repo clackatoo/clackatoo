@@ -35,30 +35,46 @@ The read-only built-ins choose no shared skills (`skills: []`).
 ## Creating and editing specialists
 
 Open **Settings → Agents → Specialists**, or click the cog beside
-**Specialists** in the model selector. Choose **Create specialist** or
-**Edit** beside an existing role. The form includes instructions,
-description, when-to-use guidance, optional provider, model and effort
-defaults, skills and skillsets, delegation targets, invocation controls,
-managed MCP server selections, and access, time, turn and cost limits.
+**Specialists** in the model selector. The page lists the specialists for the
+project of the pane that was focused when Settings opened, and says which
+under its title: yours first, each with where it's kept, then those built in.
+Choose **New specialist**, or `a`, or **Edit** beside one of yours. A built-in
+role offers **Copy to change**, which keeps its instructions and defaults in
+a new file; a copy that keeps the built-in's name is used in its place, and
+the form says so.
 
-Instructions accept multiline paste. While editing, <kbd>Ctrl+J</kbd>
-inserts a line, <kbd>Enter</kbd> finishes the field, and <kbd>Esc</kbd>
-undoes that field edit. **Save** validates the entire draft and saves it;
-**Cancel** discards it. <kbd>Ctrl+S</kbd> saves from any field.
-Blank optional fields inherit defaults; `[]` in a
-list selects none. Model and effort defaults accept a single name or a
-JSON object mapping provider names to defaults.
+A specialist opens as a form, titled `Specialists › name`:
 
-The editor writes `SPECIALIST.md` files on the connected daemon's machine.
-Choose **Personal** or **Project** for a new role. Existing files keep their
-location. Built-in roles offer **Make a custom copy**, retaining their
-instructions and defaults in a new file. So do roles a `skillset.toml`
-defines, as saving one in place would put its manifest out of use, and roles
-nested inside another bundle. A personal folder that's a symlink, such as a
-`~/.agents` kept with your dotfiles, is saved through. A field left
-empty isn't written to the file. A file is at most 64 KiB. Names stay fixed
-when editing an
-existing file. Conflicting edits are refused and leave your draft open.
+| Section | Holds |
+|---|---|
+| (first) | Its name, where it's kept, its description, when to use it, and **Instructions** |
+| Runs as | **Agent** and **Model**, each picked from a list of what the daemon knows, and **Effort** |
+| Limits | **May do**: Everything, No commands or Only read; and time, turn and cost limits |
+| May use | **Skills**, **Skillsets**, **MCP servers** and **Hands work to**: each as the chat that starts it, none, or only those named |
+| Started by | Whether you can start it, and whether agents can hand work to it |
+
+A specialist's instructions are the body of its `SPECIALIST.md`, and aren't
+edited in the form: **Open its file** opens the file in an editor beside your
+work and closes Settings, as a skill's **Open its file** does. With changes
+in the form, or for a new specialist, the button reads **Save, then open its
+file**, and does both.
+
+Nothing is saved until **Save**, or <kbd>Ctrl</kbd>+<kbd>S</kbd>. Typing on a
+field starts it, <kbd>Enter</kbd> finishes it and goes to the next,
+<kbd>Tab</kbd> goes from field to field, and <kbd>Esc</kbd> stops typing. A field with something wrong in it, such as a time limit
+that's no number, says so underneath as the keys leave it. With changes in
+the form, <kbd>Esc</kbd>, **Cancel**, the cog and a click off the panel ask
+before they're thrown away. What the form doesn't show of a file, such as a
+model for each agent, is saved as it was.
+
+The form writes `SPECIALIST.md` files on the connected daemon's machine.
+Choose **Personal** or **This project** for a new role. Existing files keep
+their location, and their name. Built-in roles offer **Copy to change**, and
+so do roles a `skillset.toml` defines, as saving one in place would put its
+manifest out of use, and roles nested inside another bundle. A personal
+folder that's a symlink, such as a `~/.agents` kept with your dotfiles, is
+saved through. A field left empty isn't written to the file. A file is at
+most 64 KiB. Conflicting edits are refused and leave the form open.
 Running chats keep their existing role; future selections use the saved file.
 
 ## Choosing a specialist
@@ -130,8 +146,8 @@ files are discovered in the clackatoo config's `specialists` folder and
 `~/.agents/specialists`. The nearest project definition wins, followed by
 clackatoo personal files, then home personal files and built-ins. Settings
 creates project files at the repository root, or in the working directory
-when there is no repository. Reopen Settings or start a new chat to pick up
-external file edits.
+when there is no repository. The Specialists page reads its list each time
+it's shown; a new chat picks up external file edits too.
 
 A project's definitions are held to more than your own:
 
