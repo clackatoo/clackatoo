@@ -599,14 +599,13 @@ impl Daemon {
         } else {
             method
         };
-        let action = crate::permissions::Action {
-            tool: format!("managed_{}/{}", permission.server, tool),
-            arguments: permission_arguments(method, &input),
-            command: None,
-            cwd: None,
-            file: None,
-            always_ask: false,
-        };
+        let action = crate::permissions::Action::managed(
+            &permission.server,
+            method,
+            &input,
+            permission_arguments(method, &input),
+        );
+        let asked_about = action.clone();
         permission.call = self.next_tool_question();
         let (call, chat) = (permission.call, permission.chat);
         let title = format!(
@@ -616,7 +615,7 @@ impl Daemon {
         );
         self.managed_mcp.permissions.push(permission);
         let whole = request.to_owned();
-        self.check_permission(chat, action, move |daemon, verdict| {
+        self.check_permission(chat, action, move |daemon, checked| {
             if !daemon
                 .managed_mcp
                 .permissions
@@ -625,6 +624,13 @@ impl Daemon {
             {
                 return;
             }
+            let verdict = match checked {
+                crate::permissions::Checked::Decided(verdict) => verdict,
+                crate::permissions::Checked::Cancelled(cancelled) => {
+                    daemon.cancelled_mcp(call, cancelled);
+                    return;
+                }
+            };
             match verdict.decision {
                 crate::permissions::Decision::Allow => {
                     daemon.permitted_mcp(call, true);
@@ -636,7 +642,10 @@ impl Daemon {
                     let asked = daemon.chat(chat).is_some_and(|chat| {
                         chat.ask_for_tool(call, &title, Some(&whole), crate::chat::Choices::Once)
                     });
-                    if !asked {
+                    if asked {
+                        let question = super::permissions::Question::Tool(call);
+                        daemon.asked_under_rules(chat, question, asked_about);
+                    } else {
                         daemon.permitted_mcp(call, false);
                     }
                     daemon.collect_damage(chat);
@@ -644,6 +653,25 @@ impl Daemon {
             }
         });
         Ok(true)
+    }
+
+    /// The rules check of the managed call `call` was cancelled, as its
+    /// turn ended: the proxy is told so, never that the user refused.
+    fn cancelled_mcp(&mut self, call: u64, cancelled: crate::permissions::Cancelled) {
+        let Some(at) = self
+            .managed_mcp
+            .permissions
+            .iter()
+            .position(|permission| permission.call == call)
+        else {
+            return;
+        };
+        let permission = self.managed_mcp.permissions.remove(at);
+        self.hand_answer_with(
+            permission.token,
+            permission.ticket,
+            Response::Error(Error::Other(cancelled.told().to_owned())),
+        );
     }
 
     pub(super) fn permitted_mcp(&mut self, call: u64, allow: bool) -> bool {
@@ -1191,18 +1219,17 @@ mod tests {
             ..Config::default()
         };
         let context = Context {
-            cwd: ".".into(),
             project: ".".into(),
             home: ".".into(),
             protected: vec![],
         };
-        let action = |input: &Value| Action {
-            tool: "managed_fixture/resources/read".into(),
-            arguments: permission_arguments("resources/read", input),
-            command: None,
-            cwd: None,
-            file: None,
-            always_ask: false,
+        let action = |input: &Value| {
+            Action::managed(
+                "fixture",
+                "resources/read",
+                input,
+                permission_arguments("resources/read", input),
+            )
         };
         assert_eq!(
             policy.decide(&action(&public), &context).decision,

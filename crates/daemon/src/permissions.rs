@@ -1,6 +1,13 @@
 //! User-owned rules for actions that reach clackatoo's approval boundary.
-//! Matching is bounded and literal. A command rule never interprets shell
-//! syntax; directory rules resolve links on the permission worker.
+//! Matching is bounded and literal. A command rule compares words and never
+//! interprets shell syntax; directory rules resolve links on the permission
+//! worker.
+//!
+//! The rules are a guard rail, not a sandbox. Whatever may run a command
+//! unasked can do what the user can, the file these rules are saved in
+//! included. What the rules promise is that each call they are shown is
+//! answered as they are written, and that what they can't read is asked
+//! about.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -63,7 +70,9 @@ impl Decision {
 pub enum Kind {
     /// An exact server/tool name, optionally with exact JSON arguments.
     Tool,
-    /// An exact simple command, without shell operators or expansion.
+    /// A simple command, without shell operators or expansion. An Allow
+    /// matches its words exactly; an Ask or a Deny matches every command
+    /// that starts with them.
     Command,
     /// A file read beneath a directory.
     Read,
@@ -79,7 +88,7 @@ pub struct Rule {
     pub decision: Decision,
     /// What it matches.
     pub kind: Kind,
-    /// The exact command, tool identity, or directory.
+    /// The command's words, the tool's identity, or the directory.
     pub target: String,
     /// For tool rules, require this complete JSON argument value.
     #[serde(
@@ -161,28 +170,157 @@ pub fn read_rules(text: &str) -> Result<Vec<Rule>, String> {
     Ok(rules)
 }
 
+/// Whose tool an action uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Namespace {
+    /// The chat's agent's own, named as its adapter names it.
+    Provider,
+    /// One of clackatoo's tools.
+    Clackatoo,
+    /// A managed MCP server's.
+    Managed,
+}
+
+/// What an action calls on its server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Called {
+    /// A tool, by name.
+    Tool(String),
+    /// Another MCP method of a managed server, as `resources/read`.
+    Method(String),
+    /// Nothing the daemon was told the name of. No tool rule matches it.
+    Unnamed,
+}
+
+/// Which tool an action uses. The daemon builds it from what it knows of
+/// the call: the agent's name, its own tool, the managed server asked.
+/// Nothing of it is read from the input the model wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Identity {
+    namespace: Namespace,
+    /// The agent, `clackatoo`, or the managed server's name.
+    server: String,
+    called: Called,
+}
+
+/// What a managed server's name follows in a tool rule's target.
+const MANAGED: &str = "managed_";
+
+impl Identity {
+    /// A tool of the agent `agent`, if its adapter named one.
+    pub(crate) fn provider(agent: &str, tool: Option<&str>) -> Self {
+        Self {
+            namespace: Namespace::Provider,
+            server: agent.to_owned(),
+            called: tool.map_or(Called::Unnamed, |tool| Called::Tool(tool.to_owned())),
+        }
+    }
+
+    /// Clackatoo's tool `tool`.
+    pub(crate) fn clackatoo(tool: &str) -> Self {
+        Self {
+            namespace: Namespace::Clackatoo,
+            server: crate::mcp::SERVER_NAME.to_owned(),
+            called: Called::Tool(tool.to_owned()),
+        }
+    }
+
+    /// What the MCP request `method` asks of the managed server `server`:
+    /// the tool `tool`, if it calls one and names it, or else the method.
+    pub(crate) fn managed(server: &str, method: &str, tool: Option<&str>) -> Self {
+        let called = match (method, tool) {
+            ("tools/call", Some(tool)) => Called::Tool(tool.to_owned()),
+            ("tools/call", None) => Called::Unnamed,
+            (method, _) => Called::Method(method.to_owned()),
+        };
+        Self {
+            namespace: Namespace::Managed,
+            server: server.to_owned(),
+            called,
+        }
+    }
+
+    /// Whether the daemon was told what it calls.
+    fn is_named(&self) -> bool {
+        self.called != Called::Unnamed
+    }
+
+    /// Whether a tool rule's `target` names it: `clackatoo/TOOL`,
+    /// `managed_SERVER/TOOL`, `managed_SERVER/METHOD` or `AGENT/TOOL`.
+    ///
+    /// Every MCP method but the tool call has a `/` in it, so a managed
+    /// tool whose own name has one is named by no target: it could be
+    /// taken for a method.
+    fn named_by(&self, target: &str) -> bool {
+        let Some((head, rest)) = target.split_once('/') else {
+            return false;
+        };
+        let managed = head.strip_prefix(MANAGED);
+        let server = match self.namespace {
+            Namespace::Clackatoo => head == crate::mcp::SERVER_NAME,
+            Namespace::Managed => managed == Some(self.server.as_str()),
+            Namespace::Provider => {
+                head == self.server && head != crate::mcp::SERVER_NAME && managed.is_none()
+            }
+        };
+        let called = match &self.called {
+            Called::Tool(tool) => {
+                tool == rest && !(self.namespace == Namespace::Managed && tool.contains('/'))
+            }
+            Called::Method(method) => method == rest,
+            Called::Unnamed => false,
+        };
+        server && called
+    }
+}
+
+impl std::fmt::Display for Identity {
+    /// As a tool rule's target names it, for the history.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.namespace == Namespace::Managed {
+            f.write_str(MANAGED)?;
+        }
+        let called = match &self.called {
+            Called::Tool(name) | Called::Method(name) => name,
+            Called::Unnamed => "(unnamed)",
+        };
+        write!(f, "{}/{called}", self.server)
+    }
+}
+
 /// An action's executable inputs, never its provider-written description.
 #[derive(Clone, Debug)]
 pub(crate) struct Action {
-    pub(crate) tool: String,
+    /// The tool it uses.
+    pub(crate) tool: Identity,
+    /// The tool's whole input, for tool rules that require exact arguments.
     pub(crate) arguments: Value,
+    /// The command it runs, if it runs one.
     pub(crate) command: Option<String>,
+    /// Where it runs its command, if it says: an absolute path.
     pub(crate) cwd: Option<String>,
+    /// The file it reads or writes, if that is all it does: an absolute
+    /// path.
     pub(crate) file: Option<(Kind, String)>,
-    /// Consent or a change of authority that rules may never grant.
-    pub(crate) always_ask: bool,
+    /// Why no rule may allow it, if none may: it asks for consent or a
+    /// change of authority, or holds something the rules can't read.
+    pub(crate) consent: Option<&'static str>,
 }
 
 /// The directories as the daemon knows them, supplied to the worker.
 #[derive(Clone, Debug)]
 pub(crate) struct Context {
-    pub(crate) cwd: PathBuf,
+    /// The chat's project, which `{project}` in a rule's target stands for.
     pub(crate) project: PathBuf,
+    /// The user's home, which `~` in a rule's target stands for.
     pub(crate) home: PathBuf,
+    /// Clackatoo's own config and state: an edit there always asks.
     pub(crate) protected: Vec<PathBuf>,
 }
 
 impl Action {
+    /// What the agent `agent` asks to do with `tool`, in the approval
+    /// request its adapter sent.
     pub(crate) fn provider(
         agent: &str,
         tool: &agent_client_protocol_schema::v1::ToolCallUpdate,
@@ -196,13 +334,7 @@ impl Action {
             .filter(|_| bounded)
             .cloned()
             .unwrap_or(Value::Null);
-        let name = tool
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("claudeCode"))
-            .and_then(|meta| meta.get("toolName"))
-            .and_then(Value::as_str)
-            .or(tool.fields.name.as_deref());
+        let name = provider_tool_name(tool);
         let field = |names: &[&str]| {
             names
                 .iter()
@@ -210,7 +342,8 @@ impl Action {
                 .map(str::to_owned)
         };
         let kind = tool.fields.kind;
-        let command = if kind == Some(ToolKind::Execute) || matches!(name, Some("Bash" | "Shell")) {
+        let executes = kind == Some(ToolKind::Execute) || matches!(name, Some("Bash" | "Shell"));
+        let command = if executes {
             field(&["command", "cmd"])
         } else {
             None
@@ -222,44 +355,100 @@ impl Action {
             }
             _ => None,
         };
-        let identity = if let Some(name) = name {
-            format!("{agent}/{name}")
-        } else if let (Some(server), Some(tool)) = (field(&["server"]), field(&["tool"])) {
-            format!("{server}/{tool}")
-        } else {
-            format!("{agent}/approval")
-        };
-        let always_ask = !bounded
-            || tool.fields.raw_input.is_none()
-            // The bundled Codex adapter puts non-HTTP network consent in
-            // permission content, without structured network input. Its
-            // presence requires consent; its text never grants permission.
-            || agent == "codex"
-                && tool.fields.content.as_ref().is_some_and(|content| !content.is_empty())
-            || (kind == Some(ToolKind::Execute) || matches!(name, Some("Bash" | "Shell")))
-                && command.is_none()
-            || matches!(
-                kind,
-                Some(ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
-            ) && file.is_none()
-            || name.is_none() && command.is_none()
-            || matches!(
-                name,
-                Some("ExitPlanMode" | "EnterPlanMode" | "AskUserQuestion" | "request_permissions")
-            )
-            || input.get("additionalPermissions").is_some()
+        let touches_files = matches!(
+            kind,
+            Some(ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
+        ) || matches!(name, Some("Read" | "Write" | "Edit" | "NotebookEdit"));
+        // The bundled Codex adapter puts non-HTTP network consent in
+        // permission content, without structured network input. Its
+        // presence requires consent; its text never grants permission.
+        let codex_consent = agent == "codex"
+            && tool
+                .fields
+                .content
+                .as_ref()
+                .is_some_and(|content| !content.is_empty());
+        let asks_authority = input.get("additionalPermissions").is_some()
             || input.get("permissions").is_some()
-            || input.get("url").is_some() && kind == Some(ToolKind::Execute)
-            || matches!(name, Some("Read" | "Write" | "Edit" | "NotebookEdit")) && file.is_none();
+            || input.get("url").is_some() && executes;
+        let own_decision = matches!(
+            name,
+            Some("ExitPlanMode" | "EnterPlanMode" | "AskUserQuestion" | "request_permissions")
+        );
+        let consent = if !bounded || tool.fields.raw_input.is_none() {
+            Some("Its input is missing or too large to check")
+        } else if own_decision {
+            Some("Plans, questions and sandbox changes are yours to answer")
+        } else if codex_consent || asks_authority {
+            Some("It asks for more access than the action itself")
+        } else if executes && command.is_none() {
+            Some("Its command could not be read")
+        } else if executes && !only_harmless_keys(agent, name, &input) {
+            Some("Its input holds more than the command, which the rules don't read")
+        } else if touches_files && file.is_none() {
+            Some("The files it changes could not be read")
+        } else if name.is_none() && command.is_none() {
+            Some("The provider did not name the tool")
+        } else {
+            None
+        };
         Self {
-            tool: identity,
+            tool: Identity::provider(agent, name),
             cwd: field(&["cwd", "workdir"]),
             arguments: input,
             command,
             file,
-            always_ask,
+            consent,
         }
     }
+
+    /// What the MCP request `method` asks of the managed server `server`,
+    /// with `input` as its parameters and `arguments` as what an exact
+    /// tool rule compares. A tool call that names no tool always asks.
+    pub(crate) fn managed(server: &str, method: &str, input: &Value, arguments: Value) -> Self {
+        let tool = Identity::managed(server, method, input.get("name").and_then(Value::as_str));
+        let consent = if tool.is_named() {
+            None
+        } else {
+            Some("The request did not name its tool")
+        };
+        Self {
+            tool,
+            arguments,
+            command: None,
+            cwd: None,
+            file: None,
+            consent,
+        }
+    }
+}
+
+/// The name the agent's adapter gives the tool of an approval request, if
+/// it gives one. Claude Code's adapter says it in its own metadata too.
+fn provider_tool_name(tool: &agent_client_protocol_schema::v1::ToolCallUpdate) -> Option<&str> {
+    tool.meta
+        .as_ref()
+        .and_then(|meta| meta.get("claudeCode"))
+        .and_then(|meta| meta.get("toolName"))
+        .and_then(Value::as_str)
+        .or(tool.fields.name.as_deref())
+}
+
+/// Whether `input`, what the agent `agent` gives its tool `tool` to run a
+/// command, holds only keys known to change nothing about what runs or
+/// what it may reach. Any other, as Claude Code's
+/// `dangerouslyDisableSandbox`, is one a rule about the command never
+/// read, so a rule can't allow it.
+fn only_harmless_keys(agent: &str, tool: Option<&str>, input: &Value) -> bool {
+    let harmless: &[&str] = match (agent, tool) {
+        ("claude", Some("Bash")) => &["command", "description", "timeout", "run_in_background"],
+        // Its working directory is checked against the chat's project.
+        ("codex", _) => &["command", "cwd"],
+        _ => &["command", "cmd"],
+    };
+    input
+        .as_object()
+        .is_some_and(|input| input.keys().all(|key| harmless.contains(&key.as_str())))
 }
 
 /// Bounds a clone of provider-controlled JSON without serializing it or
@@ -316,34 +505,70 @@ impl Verdict {
     }
 }
 
+/// Why a check ended with nothing decided. Nobody refused the action: the
+/// agent is told so, and may ask again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cancelled {
+    /// The turn it was asked in ended, or the user stopped it.
+    TurnEnded,
+    /// The chat closed, or went on to another session or agent.
+    ChatChanged,
+}
+
+impl Cancelled {
+    /// Its name in the history.
+    pub(crate) const NAME: &'static str = "Cancelled";
+
+    /// Why, for the history.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::TurnEnded => "The turn it was asked in ended or was stopped",
+            Self::ChatChanged => "The chat closed or changed its session",
+        }
+    }
+
+    /// What the agent is told became of its call.
+    pub(crate) const fn told(self) -> &'static str {
+        match self {
+            Self::TurnEnded => {
+                "Clackatoo cancelled this permission check: the turn it was asked in ended. \
+                 Nobody refused it; ask again if it is still needed."
+            }
+            Self::ChatChanged => {
+                "Clackatoo cancelled this permission check: the chat's session changed. \
+                 Nobody refused it; ask again if it is still needed."
+            }
+        }
+    }
+}
+
+/// How a check of an action against the rules ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Checked {
+    /// The rules allow or refuse it, or the user is to be asked.
+    Decided(Verdict),
+    /// Nothing was decided, and nothing is to be done or asked.
+    Cancelled(Cancelled),
+}
+
 impl Config {
-    /// Evaluates an action on the permission worker. Path failures ask;
-    /// a tool-wide allow cannot turn an ambiguous command into an allow.
+    /// Evaluates an action on the permission worker. A Deny that matches
+    /// always refuses. Otherwise whatever the rules can't vouch for asks,
+    /// whichever rule would allow it: consent, a place outside the
+    /// project, a path that can't be resolved, a guarded file, shell
+    /// syntax.
     pub(crate) fn decide(&self, action: &Action, context: &Context) -> Verdict {
         let file = action
             .file
             .as_ref()
-            .and_then(|(kind, path)| resolve(path, context).ok().map(|path| (*kind, path)));
+            .map(|(kind, path)| (*kind, Path::new(path), resolve(Path::new(path))));
+        let real = file
+            .as_ref()
+            .and_then(|(kind, _, real)| real.as_ref().map(|real| (*kind, real.as_path())));
         let mut matched: Option<(usize, &Rule)> = None;
         for (at, rule) in self.rules.iter().enumerate() {
-            let applies = match rule.kind {
-                Kind::Tool => {
-                    rule.target == action.tool
-                        && rule
-                            .arguments
-                            .as_ref()
-                            .is_none_or(|args| *args == action.arguments)
-                }
-                Kind::Command => action
-                    .command
-                    .as_ref()
-                    .is_some_and(|cmd| *cmd == rule.target),
-                Kind::Read | Kind::Edit => file.as_ref().is_some_and(|(kind, path)| {
-                    *kind == rule.kind
-                        && resolve(&rule.target, context).is_ok_and(|root| path.starts_with(root))
-                }),
-            };
-            if applies && matched.is_none_or(|(_, old)| rule.decision < old.decision) {
+            let stronger = matched.is_none_or(|(_, old)| rule.decision < old.decision);
+            if stronger && rule.applies(action, real, context) {
                 matched = Some((at, rule));
             }
         }
@@ -351,32 +576,31 @@ impl Config {
             decision: rule.decision,
             reason: format!("Rule {}: {} {:?}", at + 1, rule.decision.name(), rule.kind),
         });
-        if verdict
+        if let Some(denied) = verdict
             .as_ref()
-            .is_some_and(|v| v.decision == Decision::Deny)
+            .filter(|verdict| verdict.decision == Decision::Deny)
         {
-            return verdict.expect("matched deny");
+            return denied.clone();
         }
-        if action.always_ask {
-            return Verdict::ask("This action requires your direct approval");
+        if let Some(why) = action.consent {
+            return Verdict::ask(why);
         }
-        if let Some(cwd) = &action.cwd
-            && !resolve(cwd, context).is_ok_and(|cwd| cwd.starts_with(&context.project))
-        {
-            return Verdict::ask("Commands outside the chat's project require your approval");
+        if let Some(cwd) = &action.cwd {
+            let project = resolve(&context.project);
+            let inside = resolve(Path::new(cwd))
+                .zip(project)
+                .is_some_and(|(cwd, project)| cwd.starts_with(project));
+            if !inside {
+                return Verdict::ask("Commands outside the chat's project require your approval");
+            }
         }
-        if action.file.is_some() && file.is_none() {
-            return Verdict::ask("The file path could not be resolved safely");
-        }
-        if let Some((Kind::Edit, path)) = &file
-            && action
-                .file
-                .as_ref()
-                .is_some_and(|(_, input)| protected_edit(input, path, context))
-        {
-            return Verdict::ask(
-                "Permission policy and execution settings require your direct approval",
-            );
+        if let Some((kind, written, real)) = &file {
+            let Some(real) = real else {
+                return Verdict::ask("The file path could not be resolved safely");
+            };
+            if let Some(why) = guarded(*kind, written, real, context) {
+                return Verdict::ask(why);
+            }
         }
         if action
             .command
@@ -389,75 +613,226 @@ impl Config {
     }
 }
 
-/// A deliberately small accepted shell language. Arguments are literal
-/// words; quotes, substitutions, redirects, pipelines and control syntax ask.
-fn simple_command(command: &str) -> bool {
-    !command.trim().is_empty()
-        && command.len() <= 4096
-        && command
-            .chars()
-            .all(|c| c == ' ' || c.is_alphanumeric() || "_./:=,@%+-".contains(c))
-        && !command.split_whitespace().next().is_some_and(|name| {
-            let name = name.rsplit('/').next().unwrap_or(name);
-            [
-                "eval", "exec", "source", ".", "sh", "bash", "zsh", "fish", "env", "sudo",
-            ]
-            .contains(&name)
-                || name.contains('=')
-        })
-}
+impl Rule {
+    /// Whether it matches `action`, whose file, if it has one that could
+    /// be resolved, is really at `file`.
+    fn applies(&self, action: &Action, file: Option<(Kind, &Path)>, context: &Context) -> bool {
+        match self.kind {
+            Kind::Tool => {
+                action.tool.named_by(&self.target)
+                    && self
+                        .arguments
+                        .as_ref()
+                        .is_none_or(|arguments| *arguments == action.arguments)
+            }
+            Kind::Command => action
+                .command
+                .as_ref()
+                .is_some_and(|command| self.matches_command(command)),
+            Kind::Read | Kind::Edit => file.is_some_and(|(kind, path)| {
+                kind == self.kind
+                    && rule_root(&self.target, context).is_some_and(|root| path.starts_with(root))
+            }),
+        }
+    }
 
-/// Expand the input without losing protected names along symbolic links.
-fn expanded_path(path: &str, context: &Context) -> PathBuf {
-    if path == "{project}" {
-        context.project.clone()
-    } else if let Some(rest) = path.strip_prefix("{project}/") {
-        context.project.join(rest)
-    } else if path == "~" {
-        context.home.clone()
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        context.home.join(rest)
-    } else {
-        context.cwd.join(path)
+    /// Whether a command rule matches `command`, word by word, however
+    /// the words are spaced.
+    ///
+    /// An Allow needs every word the same. An Ask or a Deny is a guard
+    /// rail, and catches too much sooner than too little: it matches every
+    /// command that starts with its words, wherever the program is run
+    /// from (`git push` catches `/usr/bin/git push origin main`). It is no
+    /// more than that: `git -C . push` passes it.
+    fn matches_command(&self, command: &str) -> bool {
+        let mut wanted = self.target.split_whitespace();
+        let mut given = command.split_whitespace();
+        if self.decision == Decision::Allow {
+            return wanted.eq(given);
+        }
+        let same_program = match (wanted.next(), given.next()) {
+            (Some(wanted), Some(given)) => {
+                !program(wanted).is_empty() && program(wanted) == program(given)
+            }
+            _ => false,
+        };
+        same_program && wanted.all(|word| given.next() == Some(word))
     }
 }
 
-fn protected_edit(input: &str, real: &Path, context: &Context) -> bool {
-    let sensitive = |path: &Path| {
-        path.components().any(|part| {
-        matches!(part, Component::Normal(name) if [".clackatoo", ".claude", ".codex", ".agents", ".git"].iter().any(|protected| name == *protected))
-    })
-    };
-    sensitive(real)
-        || sensitive(&expanded_path(input, context))
-        || context.protected.iter().any(|root| {
-            resolve(&root.to_string_lossy(), context).is_ok_and(|root| real.starts_with(root))
-        })
+/// The program a command's first word `word` names, without the
+/// directory it's run from.
+fn program(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Resolve existing parents, following links before interpreting `..`.
-fn resolve(path: &str, context: &Context) -> Result<PathBuf, ()> {
-    let expanded = expanded_path(path, context);
-    let mut parent = expanded.as_path();
-    let mut suffix = Vec::new();
+/// A deliberately small accepted shell language. Arguments are literal
+/// words; quotes, substitutions, redirects, pipelines, control syntax and
+/// a variable set before the program all ask.
+///
+/// Which program the words run is not judged: `sh x.sh`, `make` and
+/// `python3 x.py` are simple commands too. A rule that allows a tool to
+/// run any command allows these.
+fn simple_command(command: &str) -> bool {
+    let plain = |c: char| c == ' ' || c.is_alphanumeric() || "_./:=,@%+-".contains(c);
+    let sets_variable = command
+        .split_whitespace()
+        .next()
+        .is_some_and(|program| program.contains('='));
+    !command.trim().is_empty()
+        && command.len() <= 4096
+        && command.chars().all(plain)
+        && !sets_variable
+}
+
+/// Folders whose files instruct agents or run as a project is opened or
+/// worked in, wherever they are, in lower case.
+const GUARDED_FOLDERS: [&str; 6] = [
+    ".clackatoo",
+    ".claude",
+    ".codex",
+    ".agents",
+    ".git",
+    ".vscode",
+];
+
+/// Files that do, wherever they are, in lower case.
+const GUARDED_FILES: [&str; 5] = [
+    "claude.md",
+    "claude.local.md",
+    "agents.md",
+    ".mcp.json",
+    ".envrc",
+];
+
+/// Cargo's config, which names programs cargo runs, within `.cargo`.
+const CARGO_CONFIGS: [&str; 2] = ["config.toml", "config"];
+
+/// The user's credential stores, from their home, in lower case.
+const SECRET_FOLDERS: [&[&str]; 4] = [&[".ssh"], &[".aws"], &[".gnupg"], &[".config", "gh"]];
+
+/// Where clackatoo keeps what managed MCP servers sign in with, under
+/// whichever folder holds the user's own agent files.
+const PRIVATE_FOLDER: &str = "mcp-private";
+
+/// The names along `path`, in lower case: guarded names are compared so
+/// on every filesystem, as one that ignores case would open `.GIT` as
+/// `.git`. On one that doesn't, a file that only looks guarded asks.
+fn names(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `path` is a file that tells agents what to do, or that runs as
+/// its project is opened or worked in.
+fn instructs_or_runs(path: &Path) -> bool {
+    let names = names(path);
+    let in_folder = names
+        .iter()
+        .any(|name| GUARDED_FOLDERS.contains(&name.as_str()));
+    let is_file = names
+        .last()
+        .is_some_and(|name| GUARDED_FILES.contains(&name.as_str()));
+    let cargo_config = names
+        .windows(2)
+        .any(|pair| pair[0] == ".cargo" && CARGO_CONFIGS.contains(&pair[1].as_str()));
+    in_folder || is_file || cargo_config
+}
+
+/// Whether `path` is in one of the credential stores of the user whose
+/// home is `home`, or is a `.env` file.
+fn holds_secrets(path: &Path, home: &Path) -> bool {
+    let all = names(path);
+    let env_file = all
+        .last()
+        .is_some_and(|name| name == ".env" || name.starts_with(".env."));
+    let private = all.iter().any(|name| name == PRIVATE_FOLDER);
+    let in_store = path.strip_prefix(home).is_ok_and(|rest| {
+        let rest = names(rest);
+        SECRET_FOLDERS.iter().any(|folder| {
+            rest.len() >= folder.len() && rest.iter().zip(*folder).all(|(name, part)| name == part)
+        })
+    });
+    env_file || private || in_store
+}
+
+/// Why a rule may not allow the read or edit of the file `written`, which
+/// is really at `real`, if none may. Both are looked at, so a guarded name
+/// that is a link to an ordinary place still asks.
+fn guarded(kind: Kind, written: &Path, real: &Path, context: &Context) -> Option<&'static str> {
+    let homes = [Some(context.home.clone()), resolve(&context.home)];
+    let secret = |path: &Path| homes.iter().flatten().any(|home| holds_secrets(path, home));
+    if secret(written) || secret(real) {
+        return Some("Credential stores and .env files require your direct approval");
+    }
+    if kind != Kind::Edit {
+        return None;
+    }
+    if instructs_or_runs(written) || instructs_or_runs(real) {
+        return Some(
+            "Files that instruct agents or run code with a project require your direct approval",
+        );
+    }
+    let own = context
+        .protected
+        .iter()
+        .filter_map(|root| resolve(root))
+        .any(|root| real.starts_with(root));
+    own.then_some("Clackatoo's own config and state require your direct approval")
+}
+
+/// The directory a file rule's `target` names, with `~` and `{project}`
+/// filled in, as it really is. These stand for something only here: a
+/// path an agent gives is taken as written.
+///
+/// `{project}` names nothing when the project is the user's home, as for
+/// a chat started there outside any repository: a rule about a project
+/// must not come to cover everything the user has.
+fn rule_root(target: &str, context: &Context) -> Option<PathBuf> {
+    let below = |root: &Path, rest: &str| root.join(rest.trim_start_matches('/'));
+    let written = if let Some(rest) = target.strip_prefix("{project}") {
+        let home = resolve(&context.home);
+        if home.is_some() && resolve(&context.project) == home {
+            return None;
+        }
+        below(&context.project, rest)
+    } else if let Some(rest) = target.strip_prefix('~') {
+        below(&context.home, rest)
+    } else {
+        PathBuf::from(target)
+    };
+    resolve(&written)
+}
+
+/// Where `path` really is: its existing parents with their links
+/// followed, before any `..` is read. `None` for a path that isn't
+/// absolute, or one that can't be followed safely.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut parent = path;
+    let mut missing = Vec::new();
     loop {
         match parent.canonicalize() {
             Ok(mut real) => {
-                for component in suffix.into_iter().rev() {
-                    real.push(component);
-                }
-                return Ok(real);
+                real.extend(missing.into_iter().rev());
+                return Some(real);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let name = parent.file_name().ok_or(())?;
+                let name = parent.file_name()?;
                 // A dangling link must not be mistaken for a new file.
                 if parent.symlink_metadata().is_ok() {
-                    return Err(());
+                    return None;
                 }
-                suffix.push(name.to_os_string());
-                parent = parent.parent().ok_or(())?;
+                missing.push(name.to_os_string());
+                parent = parent.parent()?;
             }
-            Err(_) => return Err(()),
+            Err(_) => return None,
         }
     }
 }
@@ -468,94 +843,329 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
 
+    use Decision::{Allow, Ask, Deny};
+
     fn context(dir: &Path) -> Context {
         Context {
-            cwd: dir.into(),
             project: dir.into(),
             home: dir.into(),
             protected: vec![],
         }
     }
+
+    /// The rules in `text`, as a policy.
+    fn policy(text: &str) -> Config {
+        Config {
+            rules: read_rules(text).unwrap(),
+            ..Config::default()
+        }
+    }
+
+    /// Clackatoo's own tool running `command` in a terminal.
     fn action(command: &str) -> Action {
         Action {
-            tool: "clackatoo/run_in_terminal".into(),
+            tool: Identity::clackatoo("run_in_terminal"),
             arguments: json!({"command":command}),
             command: Some(command.into()),
             cwd: None,
             file: None,
-            always_ask: false,
+            consent: None,
         }
+    }
+
+    /// The agent's own tool `tool` reading or changing the file `path`.
+    fn file_action(tool: &str, kind: Kind, path: &Path) -> Action {
+        Action {
+            tool: Identity::provider("claude", Some(tool)),
+            arguments: json!({"file_path":path}),
+            command: None,
+            cwd: None,
+            file: Some((kind, path.display().to_string())),
+            consent: None,
+        }
+    }
+
+    /// The approval request `wire`, as the agent `agent`'s adapter sent it.
+    fn asked(agent: &str, wire: Value) -> Action {
+        let tool = serde_json::from_value::<agent_client_protocol_schema::v1::ToolCallUpdate>(wire)
+            .unwrap();
+        Action::provider(agent, &tool)
     }
 
     #[test]
     fn precedence_arguments_and_unmatched_requests() {
-        let rules = read_rules(
+        let rules = policy(
             r#"[
             {"decision":"allow","kind":"tool","target":"clackatoo/run_in_terminal"},
             {"decision":"ask","kind":"command","target":"git push"},
             {"decision":"deny","kind":"command","target":"git push"}
         ]"#,
-        )
-        .unwrap();
-        let policy = Config {
-            rules,
-            ..Config::default()
-        };
+        );
         let context = context(Path::new("/tmp"));
-        assert_eq!(
-            policy.decide(&action("git status"), &context).decision,
-            Decision::Allow
-        );
-        assert_eq!(
-            policy.decide(&action("git push"), &context).decision,
-            Decision::Deny
-        );
-        assert_eq!(
-            policy
-                .decide(&action("git status; git push"), &context)
-                .decision,
-            Decision::Ask
-        );
+        for (command, wanted) in [
+            ("git status", Allow),
+            ("git push", Deny),
+            ("git status; git push", Ask),
+        ] {
+            assert_eq!(
+                rules.decide(&action(command), &context).decision,
+                wanted,
+                "{command}"
+            );
+        }
         let mut exact = action("git status");
-        exact.tool = "managed_docs/search".into();
+        exact.tool = Identity::managed("docs", "tools/call", Some("search"));
         exact.command = None;
-        let policy = Config { rules: read_rules(r#"[{"decision":"allow","kind":"tool","target":"managed_docs/search","arguments":{"q":"Rust"}}]"#).unwrap(), ..Config::default() };
-        assert_eq!(policy.decide(&exact, &context).decision, Decision::Ask);
+        let rules = policy(
+            r#"[{"decision":"allow","kind":"tool","target":"managed_docs/search","arguments":{"q":"Rust"}}]"#,
+        );
+        assert_eq!(rules.decide(&exact, &context).decision, Ask);
         exact.arguments = json!({"q":"Rust"});
-        assert_eq!(policy.decide(&exact, &context).decision, Decision::Allow);
-        exact.always_ask = true;
-        assert_eq!(policy.decide(&exact, &context).decision, Decision::Ask);
+        assert_eq!(rules.decide(&exact, &context).decision, Allow);
+        exact.consent = Some("consent");
+        assert_eq!(rules.decide(&exact, &context).decision, Ask);
+    }
+
+    #[test]
+    fn an_allow_matches_a_commands_words_exactly_and_an_ask_or_deny_what_starts_with_them() {
+        let narrow = policy(
+            r#"[
+            {"decision":"allow","kind":"command","target":"git status"},
+            {"decision":"ask","kind":"command","target":"git commit"},
+            {"decision":"deny","kind":"command","target":"git push"}
+        ]"#,
+        );
+        let context = context(Path::new("/tmp"));
+        for (command, wanted) in [
+            ("git status", Allow),
+            ("git   status", Allow),
+            (" git status ", Allow),
+            // An Allow is never widened: more words, or another program
+            // of the same name, are not what was allowed.
+            ("git status --short", Ask),
+            ("/usr/bin/git status", Ask),
+            ("git push", Deny),
+            ("git  push", Deny),
+            ("git push origin main", Deny),
+            ("/usr/bin/git push", Deny),
+            ("git push && echo done", Deny),
+            ("git commit -m x", Ask),
+            ("gitx push", Ask),
+            ("git pushx", Ask),
+            ("git", Ask),
+        ] {
+            assert_eq!(
+                narrow.decide(&action(command), &context).decision,
+                wanted,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_wide_allow_on_a_command_tool_allows_any_simple_command() {
+        let wide = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"clackatoo/run_in_terminal"},
+            {"decision":"ask","kind":"command","target":"git commit"},
+            {"decision":"deny","kind":"command","target":"git push"}
+        ]"#,
+        );
+        let context = context(Path::new("/tmp"));
+        for (command, wanted) in [
+            ("cargo test", Allow),
+            // No list of wrappers is kept: these run other code, and are
+            // allowed as any command is.
+            ("sh x.sh", Allow),
+            ("env make", Allow),
+            ("python3 x.py", Allow),
+            (
+                "cp r.lua /home/u/.config/clackatoo/daemon/settings.lua",
+                Allow,
+            ),
+            // A Deny is a guard rail: this is not what it names.
+            ("git -C . push", Allow),
+            ("git push origin main", Deny),
+            ("git commit -a", Ask),
+            // What isn't a simple command asks, whatever allows the tool.
+            ("git status; git push", Ask),
+            ("echo $(id)", Ask),
+            ("A=x git status", Ask),
+            ("git status > out", Ask),
+            ("git status\ngit log", Ask),
+        ] {
+            assert_eq!(
+                wide.decide(&action(command), &context).decision,
+                wanted,
+                "{command}"
+            );
+        }
     }
 
     #[test]
     fn command_rules_do_not_accept_shell_languages() {
+        let saved = |command: &str| {
+            read_rules(&json!([{"decision":"allow","kind":"command","target":command}]).to_string())
+        };
         for command in [
             "git status && git push",
             "echo $(id)",
-            "bash -c id",
-            "env git status",
+            "bash -c 'id'",
             "A=x git status",
             "git status > out",
             "echo `id`",
             "git status\ngit push",
         ] {
-            assert!(
-                read_rules(
-                    &json!([{"decision":"allow","kind":"command","target":command}]).to_string()
-                )
-                .is_err(),
-                "{command}"
-            );
+            assert!(saved(command).is_err(), "{command}");
         }
-        assert!(
-            read_rules(r#"[{"decision":"allow","kind":"command","target":"git status --short"}]"#)
-                .is_ok()
-        );
+        for command in ["git status --short", "bash x.sh", "env make"] {
+            assert!(saved(command).is_ok(), "{command}");
+        }
         assert!(
             read_rules(
                 r#"[{"decision":"allow","kind":"tool","target":"docs/search","unknown":true}]"#
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_rule_allows_a_command_only_when_its_input_holds_nothing_else_that_matters() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = context(dir.path());
+        let here = dir.path().display().to_string();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"command","target":"cargo test"},
+            {"decision":"allow","kind":"tool","target":"claude/Bash"}
+        ]"#,
+        );
+        let claude = |input: Value| {
+            asked(
+                "claude",
+                json!({"toolCallId":"1","name":"Bash","kind":"execute","rawInput":input}),
+            )
+        };
+        // Codex's ordinary commands come with no tool name.
+        let codex = |input: Value| {
+            asked(
+                "codex",
+                json!({"toolCallId":"1","kind":"execute","rawInput":input}),
+            )
+        };
+        for (request, wanted) in [
+            (claude(json!({"command":"cargo test"})), Allow),
+            (
+                claude(
+                    json!({"command":"cargo test","description":"Run tests","timeout":1000,"run_in_background":true}),
+                ),
+                Allow,
+            ),
+            (claude(json!({"command":"ls","description":"List"})), Allow),
+            (
+                claude(json!({"command":"cargo test","dangerouslyDisableSandbox":true})),
+                Ask,
+            ),
+            (claude(json!({"command":"cargo test","newer":1})), Ask),
+            (codex(json!({"command":"cargo test"})), Allow),
+            (codex(json!({"command":"cargo test","cwd":here})), Allow),
+            (codex(json!({"command":"cargo test","cwd":"/"})), Ask),
+            (codex(json!({"command":"cargo test","cwd":"."})), Ask),
+            (
+                codex(json!({"command":"cargo test","additionalPermissions":{"network":true}})),
+                Ask,
+            ),
+            (
+                codex(json!({"command":"cargo test","url":"https://example.com"})),
+                Ask,
+            ),
+            (codex(json!({"command":"cargo test","sandbox":"none"})), Ask),
+            // Unnamed, so the rule for Claude's Bash is not about it.
+            (codex(json!({"command":"ls"})), Ask),
+        ] {
+            assert_eq!(
+                rules.decide(&request, &context).decision,
+                wanted,
+                "{:?}",
+                request.arguments
+            );
+        }
+    }
+
+    #[test]
+    fn tool_identity_is_what_the_daemon_knows_and_never_what_the_input_says() {
+        let context = context(Path::new("/tmp"));
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"clackatoo/list_panes"},
+            {"decision":"allow","kind":"tool","target":"managed_docs/search"},
+            {"decision":"allow","kind":"tool","target":"managed_docs/resources/read"},
+            {"decision":"allow","kind":"tool","target":"claude/Bash"}
+        ]"#,
+        );
+        let managed =
+            |method: &str, input: Value| Action::managed("docs", method, &input, json!({}));
+        let provider = |agent: &str, name: Option<&str>| Action {
+            tool: Identity::provider(agent, name),
+            ..action("ls")
+        };
+        for (what, request, wanted) in [
+            (
+                "an unnamed command whose input names an allowed tool",
+                asked(
+                    "codex",
+                    json!({"toolCallId":"1","kind":"execute","rawInput":{"command":"ls","server":"clackatoo","tool":"list_panes"}}),
+                ),
+                Ask,
+            ),
+            (
+                "a managed tool",
+                managed("tools/call", json!({"name":"search"})),
+                Allow,
+            ),
+            (
+                "another server's tool of that name",
+                Action::managed("other", "tools/call", &json!({"name":"search"}), json!({})),
+                Ask,
+            ),
+            (
+                "a managed tool call that names no tool",
+                managed("tools/call", json!({})),
+                Ask,
+            ),
+            (
+                "a managed method",
+                managed("resources/read", json!({"uri":"x"})),
+                Allow,
+            ),
+            (
+                "a managed tool named as a method is",
+                managed("tools/call", json!({"name":"resources/read"})),
+                Ask,
+            ),
+            ("the agent's tool", provider("claude", Some("Bash")), Allow),
+            ("another agent's", provider("codex", Some("Bash")), Ask),
+            (
+                "an agent named as clackatoo is",
+                provider("clackatoo", Some("list_panes")),
+                Ask,
+            ),
+            (
+                "an agent named as a managed server is",
+                provider("managed_docs", Some("search")),
+                Ask,
+            ),
+            ("an unnamed tool", provider("claude", None), Ask),
+        ] {
+            assert_eq!(rules.decide(&request, &context).decision, wanted, "{what}");
+        }
+        assert_eq!(
+            Identity::managed("docs", "tools/call", Some("search")).to_string(),
+            "managed_docs/search"
+        );
+        assert_eq!(
+            Identity::provider("codex", None).to_string(),
+            "codex/(unnamed)"
         );
     }
 
@@ -568,23 +1178,171 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         symlink(&outside, root.join("link")).unwrap();
-        let policy = Config {
-            rules: read_rules(r#"[{"decision":"allow","kind":"edit","target":"{project}"}]"#)
-                .unwrap(),
-            ..Config::default()
-        };
-        let mut action = action("ignored");
-        action.command = None;
-        action.file = Some((Kind::Edit, "new/deep/file.rs".into()));
+        symlink(root.join("nowhere"), root.join("dangling")).unwrap();
+        let rules = policy(r#"[{"decision":"allow","kind":"edit","target":"{project}"}]"#);
         let mut context = context(&root);
-        assert_eq!(policy.decide(&action, &context).decision, Decision::Allow);
-        action.file = Some((Kind::Edit, "link/file.rs".into()));
-        assert_eq!(policy.decide(&action, &context).decision, Decision::Ask);
-        action.file = Some((Kind::Edit, ".git/hooks/pre-commit".into()));
-        assert_eq!(policy.decide(&action, &context).decision, Decision::Ask);
+        context.home = dir.path().join("home");
         context.protected.push(root.join("policy"));
-        action.file = Some((Kind::Edit, "policy/rules".into()));
-        assert_eq!(policy.decide(&action, &context).decision, Decision::Ask);
+        for (path, wanted) in [
+            ("new/deep/file.rs", Allow),
+            ("link/file.rs", Ask),
+            ("dangling", Ask),
+            ("new/../../outside/file.rs", Ask),
+            (".git/hooks/pre-commit", Ask),
+            ("policy/rules", Ask),
+        ] {
+            let request = file_action("Write", Kind::Edit, &root.join(path));
+            assert_eq!(rules.decide(&request, &context).decision, wanted, "{path}");
+        }
+    }
+
+    #[test]
+    fn files_that_instruct_agents_or_run_code_always_ask_before_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut context = context(&root);
+        context.home = dir.path().join("home");
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"edit","target":"{project}"},
+            {"decision":"allow","kind":"read","target":"{project}"},
+            {"decision":"deny","kind":"edit","target":"{project}/vendor"}
+        ]"#,
+        );
+        for (path, wanted) in [
+            ("src/main.rs", Allow),
+            ("CLAUDE.md", Ask),
+            ("docs/AGENTS.md", Ask),
+            ("CLAUDE.local.md", Ask),
+            (".mcp.json", Ask),
+            (".envrc", Ask),
+            (".cargo/config.toml", Ask),
+            (".cargo/config", Ask),
+            (".vscode/tasks.json", Ask),
+            (".agents/skills/review/SKILL.md", Ask),
+            (".agents/specialists/reviewer.md", Ask),
+            (".claude/settings.json", Ask),
+            (".codex/config.toml", Ask),
+            (".clackatoo/x", Ask),
+            (".git/hooks/pre-commit", Ask),
+            // Compared in any letter case, as some filesystems open them.
+            (".GIT/hooks/pre-commit", Ask),
+            ("claude.MD", Ask),
+            (".Cargo/Config.toml", Ask),
+            // Names that only resemble guarded ones are ordinary files.
+            ("notes/CLAUDE.md.txt", Allow),
+            ("cargo/config.toml", Allow),
+            // A Deny still refuses, guarded or not.
+            ("vendor/.git/config", Deny),
+        ] {
+            let request = file_action("Write", Kind::Edit, &root.join(path));
+            assert_eq!(rules.decide(&request, &context).decision, wanted, "{path}");
+        }
+        // Reading them is no more than reading the project.
+        let request = file_action("Read", Kind::Read, &root.join("CLAUDE.md"));
+        assert_eq!(rules.decide(&request, &context).decision, Allow);
+    }
+
+    #[test]
+    fn credential_stores_always_ask_before_a_read_or_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("src/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut context = context(&project);
+        context.home = home.clone();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"read","target":"~"},
+            {"decision":"allow","kind":"edit","target":"~"}
+        ]"#,
+        );
+        for (path, wanted) in [
+            ("notes.txt", Allow),
+            (".ssh/id_ed25519", Ask),
+            (".SSH/config", Ask),
+            (".aws/credentials", Ask),
+            (".gnupg/private-keys-v1.d/key", Ask),
+            (".config/gh/hosts.yml", Ask),
+            (".config/other/hosts.yml", Allow),
+            ("src/project/.env", Ask),
+            ("src/project/.env.production", Ask),
+            ("src/project/env.rs", Allow),
+            (".agents/mcp-private/docs.json", Ask),
+            ("elsewhere/mcp-private/docs.json", Ask),
+        ] {
+            for (tool, kind) in [("Read", Kind::Read), ("Write", Kind::Edit)] {
+                let request = file_action(tool, kind, &home.join(path));
+                assert_eq!(
+                    rules.decide(&request, &context).decision,
+                    wanted,
+                    "{tool} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_project_rule_matches_nothing_when_the_project_is_the_home_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"edit","target":"{project}"},
+            {"decision":"allow","kind":"edit","target":"{project}/notes"}
+        ]"#,
+        );
+        let mut context = context(&project);
+        context.home = home.clone();
+        let inside = file_action("Write", Kind::Edit, &project.join("notes/a.txt"));
+        assert_eq!(rules.decide(&inside, &context).decision, Allow);
+        // A chat started in the home directory, outside any repository.
+        context.project = home.clone();
+        for path in ["notes/a.txt", ".bashrc", "project/notes/a.txt"] {
+            let request = file_action("Write", Kind::Edit, &home.join(path));
+            assert_eq!(rules.decide(&request, &context).decision, Ask, "{path}");
+        }
+    }
+
+    #[test]
+    fn placeholders_stand_for_something_in_rule_targets_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(home.join("notes")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let mut context = context(&project);
+        context.home = home.clone();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"edit","target":"~/notes"},
+            {"decision":"allow","kind":"edit","target":"{project}"}
+        ]"#,
+        );
+        let claude = |path: &str| {
+            asked(
+                "claude",
+                json!({"toolCallId":"1","name":"Write","kind":"edit","rawInput":{"file_path":path}}),
+            )
+        };
+        let absolute = home.join("notes/a").display().to_string();
+        for (path, wanted) in [
+            (absolute.as_str(), Allow),
+            // The tool would write these below its own directory.
+            ("~/notes/a", Ask),
+            ("{project}/a", Ask),
+            ("notes/a", Ask),
+            ("a", Ask),
+        ] {
+            assert_eq!(
+                rules.decide(&claude(path), &context).decision,
+                wanted,
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -594,139 +1352,108 @@ mod tests {
         let actual = dir.path().join("ordinary");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&actual).unwrap();
-        let policy = Config {
-            rules: read_rules(r#"[{"decision":"allow","kind":"tool","target":"claude/Write"}]"#)
-                .unwrap(),
-            ..Config::default()
-        };
+        let rules = policy(r#"[{"decision":"allow","kind":"tool","target":"claude/Write"}]"#);
         let context = context(&home);
-        let mut request = action("ignored");
-        request.tool = "claude/Write".into();
-        request.command = None;
-        for folder in [".claude", ".codex", ".agents", ".git", ".clackatoo"] {
+        for folder in [".claude", ".codex", ".agents", ".git", ".clackatoo", ".ssh"] {
             std::os::unix::fs::symlink(&actual, home.join(folder)).unwrap();
-            for path in [
-                format!("~/{folder}/settings.json"),
-                format!("{folder}/settings.json"),
-            ] {
-                request.file = Some((Kind::Edit, path.clone()));
-                assert_eq!(
-                    policy.decide(&request, &context).decision,
-                    Decision::Ask,
-                    "{path}"
-                );
-            }
+            let path = home.join(folder).join("settings.json");
+            let request = file_action("Write", Kind::Edit, &path);
+            assert_eq!(rules.decide(&request, &context).decision, Ask, "{folder}");
         }
-        request.file = Some((
-            Kind::Edit,
-            actual.join("ordinary.json").display().to_string(),
-        ));
-        assert_eq!(policy.decide(&request, &context).decision, Decision::Allow);
+        let request = file_action("Write", Kind::Edit, &actual.join("ordinary.json"));
+        assert_eq!(rules.decide(&request, &context).decision, Allow);
     }
 
     #[test]
     fn codex_network_consent_cannot_reuse_a_command_allow() {
-        let policy = Config {
-            rules: read_rules(r#"[{"decision":"allow","kind":"command","target":"git status"}]"#)
-                .unwrap(),
-            ..Config::default()
-        };
+        let rules = policy(r#"[{"decision":"allow","kind":"command","target":"git status"}]"#);
         let context = context(Path::new("/var/tmp"));
         let mut wire = json!({"toolCallId":"net", "name":"shell_command", "kind":"execute", "rawInput":{"command":"git status"}});
-        let parse = |wire: Value| {
-            serde_json::from_value::<agent_client_protocol_schema::v1::ToolCallUpdate>(wire)
-                .unwrap()
-        };
         assert_eq!(
-            policy
-                .decide(&Action::provider("codex", &parse(wire.clone())), &context)
+            rules
+                .decide(&asked("codex", wire.clone()), &context)
                 .decision,
-            Decision::Allow
+            Allow
         );
         // The installed adapter only retains non-HTTP network context here.
         wire["content"] = json!([{"type":"content","content":{"type":"text","text":"tcp access to private.example"}}]);
-        assert_eq!(
-            policy
-                .decide(&Action::provider("codex", &parse(wire)), &context)
-                .decision,
-            Decision::Ask
-        );
+        assert_eq!(rules.decide(&asked("codex", wire), &context).decision, Ask);
     }
 
     #[test]
     fn exact_null_arguments_do_not_turn_into_an_unrestricted_tool_rule() {
         let rules = read_rules(
-            r#"[{"decision":"allow","kind":"tool","target":"docs/search","arguments":null}]"#,
+            r#"[{"decision":"allow","kind":"tool","target":"managed_docs/search","arguments":null}]"#,
         )
         .unwrap();
         assert_eq!(rules[0].arguments, Some(Value::Null));
         let again = read_rules(&serde_json::to_string(&rules).unwrap()).unwrap();
         assert_eq!(rules, again);
-        let policy = Config {
+        let rules = Config {
             rules,
             ..Config::default()
         };
-        let mut request = action("ignored");
-        request.tool = "docs/search".into();
-        request.command = None;
-        request.arguments = json!({"q":"private"});
+        let request = Action::managed(
+            "docs",
+            "tools/call",
+            &json!({"name":"search"}),
+            json!({"q":"private"}),
+        );
         assert_eq!(
-            policy
-                .decide(&request, &context(Path::new("/tmp")))
-                .decision,
-            Decision::Ask
+            rules.decide(&request, &context(Path::new("/tmp"))).decision,
+            Ask
         );
     }
 
     #[test]
     fn deny_rules_still_win_for_actions_that_require_direct_consent() {
-        let policy = Config {
-            rules: read_rules(
-                r#"[{"decision":"deny","kind":"tool","target":"clackatoo/run_in_terminal"}]"#,
-            )
-            .unwrap(),
-            ..Config::default()
-        };
+        let rules =
+            policy(r#"[{"decision":"deny","kind":"tool","target":"clackatoo/run_in_terminal"}]"#);
         let mut request = action("git status");
-        request.always_ask = true;
+        request.consent = Some("consent");
         assert_eq!(
-            policy
-                .decide(&request, &context(Path::new("/tmp")))
-                .decision,
-            Decision::Deny
+            rules.decide(&request, &context(Path::new("/tmp"))).decision,
+            Deny
         );
     }
 
     #[test]
     fn provider_inputs_are_authoritative_bounded_and_never_taken_from_titles() {
-        let parse = |json: Value| {
-            serde_json::from_value::<agent_client_protocol_schema::v1::ToolCallUpdate>(json)
-                .unwrap()
-        };
-        let tool = parse(
+        let request = asked(
+            "codex",
             json!({"toolCallId":"1","title":"git status","kind":"execute","rawInput":{"command":"git push","cwd":"/tmp"}}),
         );
-        let request = Action::provider("codex", &tool);
         assert_eq!(request.command.as_deref(), Some("git push"));
-        let tool = parse(json!({"toolCallId":"2","title":"git status","kind":"execute"}));
-        assert!(Action::provider("codex", &tool).always_ask);
-        let tool = parse(
-            json!({"toolCallId":"named-execute","name":"Bash","kind":"execute","rawInput":{}}),
-        );
-        assert!(Action::provider("claude", &tool).always_ask);
-        let tool = parse(
-            json!({"toolCallId":"multi-edit","name":"apply_patch","kind":"edit","rawInput":{"changes":{"a":"one","b":"two"}}}),
-        );
-        assert!(Action::provider("codex", &tool).always_ask);
-        let tool = parse(
-            json!({"toolCallId":"3","name":"request_permissions","rawInput":{"permissions":{"network":{"enabled":true}}}}),
-        );
-        assert!(Action::provider("codex", &tool).always_ask);
-        let tool = parse(
+        assert_eq!(request.consent, None);
+        for (agent, wire) in [
+            (
+                "codex",
+                json!({"toolCallId":"2","title":"git status","kind":"execute"}),
+            ),
+            (
+                "claude",
+                json!({"toolCallId":"named-execute","name":"Bash","kind":"execute","rawInput":{}}),
+            ),
+            (
+                "codex",
+                json!({"toolCallId":"multi-edit","name":"apply_patch","kind":"edit","rawInput":{"changes":{"a":"one","b":"two"}}}),
+            ),
+            (
+                "codex",
+                json!({"toolCallId":"3","name":"request_permissions","rawInput":{"permissions":{"network":{"enabled":true}}}}),
+            ),
+            (
+                "codex",
+                json!({"toolCallId":"4","title":"mcp.docs.search","rawInput":{"server":"docs","tool":"search"}}),
+            ),
+        ] {
+            assert!(asked(agent, wire.clone()).consent.is_some(), "{wire}");
+        }
+        let request = asked(
+            "claude",
             json!({"toolCallId":"4","name":"Bash","kind":"execute","rawInput":{"command":"git status","payload":"x".repeat(MAX_BYTES+1)}}),
         );
-        let request = Action::provider("claude", &tool);
-        assert!(request.always_ask);
+        assert!(request.consent.is_some());
         assert_eq!(request.arguments, Value::Null);
     }
 

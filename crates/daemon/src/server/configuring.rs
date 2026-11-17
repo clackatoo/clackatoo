@@ -277,14 +277,12 @@ impl Daemon {
             .copied()
             .filter(|id| self.chat_ref(*id).is_some())
             .collect();
+        // Nothing waiting is cancelled: checks and open questions are
+        // looked at again under the new rules.
+        if rules_changed {
+            self.permission_rules_changed();
+        }
         for id in chats {
-            if rules_changed {
-                let actions = self
-                    .chat(id)
-                    .map(crate::chat::HostedChat::cancel_rule_questions)
-                    .unwrap_or_default();
-                self.act(id, actions);
-            }
             let specialists = self.specialists_for(id);
             if let Some(chat) = self.chat(id) {
                 chat.offer_specialists(&specialists);

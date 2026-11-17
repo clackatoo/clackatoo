@@ -962,37 +962,55 @@ impl Daemon {
         self.call_tool_checked(token, chat, id, tool, raw, None);
     }
 
-    fn native_permission_action(
+    /// What `tool` asks to do, for the rules: its command and where it
+    /// runs, or the file it shows, with their paths as the daemon itself
+    /// would resolve them for the chat `chat`. `offered` is what its
+    /// question offers.
+    ///
+    /// Only a question about running a command offers "always", and only
+    /// such a call may a rule allow. The others ask for the user's own
+    /// consent: typing into a terminal, a file outside the project, the
+    /// browser's first page. A Deny still refuses them.
+    fn rules_action(
+        &mut self,
+        chat: TerminalId,
         tool: &Tool,
         raw: &mcp::Raw,
-        question: Option<&(String, Option<String>, Choices)>,
+        offered: Choices,
     ) -> crate::permissions::Action {
-        use crate::permissions::{Action, Kind};
-        let command = match tool {
-            Tool::RunInTerminal { command, .. }
-            | Tool::RunInBackground { command, .. }
-            | Tool::StartActivity { command, .. } => Some(command.clone()),
+        use crate::permissions::{Action, Identity, Kind};
+        let (command, cwd) = match tool {
+            Tool::RunInTerminal { command, cwd, .. }
+            | Tool::RunInBackground { command, cwd, .. }
+            | Tool::StartActivity { command, cwd, .. } => (Some(command.clone()), cwd.clone()),
             // Arbitrary input can target a shell or a running program.
-            Tool::SendToTerminal { text, .. } => Some(text.clone()),
-            _ => None,
-        };
-        let cwd = match tool {
-            Tool::RunInTerminal { cwd, .. }
-            | Tool::RunInBackground { cwd, .. }
-            | Tool::StartActivity { cwd, .. } => cwd.clone(),
-            _ => None,
+            Tool::SendToTerminal { text, .. } => (Some(text.clone()), None),
+            _ => (None, None),
         };
         let file = match tool {
-            Tool::OpenFile { path, .. } | Tool::Explore { path: Some(path) } => {
-                Some((Kind::Read, path.clone()))
-            }
+            Tool::OpenFile { path, .. } | Tool::Explore { path: Some(path) } => Some(path.clone()),
             _ => None,
         };
-        let always_ask = matches!(tool, Tool::SendToTerminal { .. })
-            || question.is_some_and(|(_, _, offered)| !matches!(offered, Choices::Tool));
+        // A path the daemon can't place is left as the agent wrote it,
+        // which the rules ask about unless it's absolute.
+        let mut placed = |path: String| {
+            self.resolve_for(chat, &path)
+                .map_or(path, |real| real.display().to_string())
+        };
+        let cwd = cwd.map(&mut placed);
+        let file = file.map(&mut placed).map(|path| (Kind::Read, path));
         let bounded = crate::permissions::bounded_json(&raw.arguments);
+        let consent = if !bounded {
+            Some("Its input is too large to check")
+        } else if matches!(tool, Tool::SendToTerminal { .. }) {
+            Some("Typing into a terminal requires your direct approval")
+        } else if offered != Choices::Tool {
+            Some("This requires your direct approval, whatever the rules allow")
+        } else {
+            None
+        };
         Action {
-            tool: format!("clackatoo/{}", raw.name),
+            tool: Identity::clackatoo(&raw.name),
             arguments: if bounded {
                 raw.arguments.clone()
             } else {
@@ -1001,10 +1019,19 @@ impl Daemon {
             command,
             cwd,
             file,
-            always_ask: always_ask || !bounded,
+            consent,
         }
     }
 
+    /// Carries out the call, as [`Self::call_tool`] says. `checked` is
+    /// the rules' verdict on it, once they have been asked, for a chat
+    /// that uses them.
+    ///
+    /// Rules decide only the calls the user would be asked about anyway:
+    /// commands, typing, files outside the project, the browser's first
+    /// page. A tool that never asks, as `list_panes`, never waits on them
+    /// either, so an agent working where nobody looks isn't left with a
+    /// question nobody sees.
     fn call_tool_checked(
         &mut self,
         token: Token,
@@ -1014,6 +1041,7 @@ impl Daemon {
         raw: mcp::Raw,
         checked: Option<&crate::permissions::Verdict>,
     ) {
+        use crate::permissions::Decision;
         let Some(tools) = self.chat(chat).map(|chat| chat.tools()) else {
             self.answer_tool(token, &id, Err("the chat has closed".to_owned()));
             return;
@@ -1051,63 +1079,52 @@ impl Daemon {
             self.answer_tool(token, &id, Err(why));
             return;
         }
+        // Under rules, the Tools setting's Allow doesn't answer for
+        // commands: the rules do.
         let rules = self.uses_permission_rules(chat);
-        let question = self.question_for(chat, &tool, if rules { AgentTools::Ask } else { tools });
+        let asking = if rules { AgentTools::Ask } else { tools };
+        let Some((what, whole, offered)) = self.question_for(chat, &tool, asking) else {
+            self.carry_out(token, chat, id, tool, raw);
+            return;
+        };
         if rules && checked.is_none() {
-            let action = Self::native_permission_action(&tool, &raw, question.as_ref());
-            let secret = match self.sources.get(token.0) {
-                Some(Source::Tools(connection)) => connection.token.clone(),
-                _ => None,
-            };
-            self.check_permission(chat, action, move |daemon, verdict| {
-                if !matches!(daemon.sources.get(token.0), Some(Source::Tools(connection)) if connection.chat == chat && connection.token == secret && !connection.finished) { return; }
-                daemon.call_tool_checked(token, chat, id, tool, raw, Some(&verdict));
-            });
+            let action = self.rules_action(chat, &tool, &raw, offered);
+            self.check_tool_rules(token, chat, id, tool, raw, action);
             return;
         }
         if let Some(verdict) = checked {
             match verdict.decision {
-                crate::permissions::Decision::Allow => {
-                    if question
-                        .as_ref()
-                        .is_none_or(|(_, _, choices)| matches!(choices, Choices::Tool))
-                    {
-                        self.carry_out(token, chat, id, tool, raw);
-                        return;
-                    }
-                }
-                crate::permissions::Decision::Deny => {
-                    self.answer_tool(token, &id, Err(format!("Clackatoo permissions denied this action: {}. Do not try another route.", verdict.reason)));
+                Decision::Allow => {
+                    self.carry_out(token, chat, id, tool, raw);
                     return;
                 }
-                crate::permissions::Decision::Ask => {}
+                Decision::Deny => {
+                    self.answer_tool(token, &id, Err(rule_refusal(verdict)));
+                    return;
+                }
+                Decision::Ask => {}
             }
         }
-        let question = if rules {
-            question
-                .map(|(what, whole, _)| (what, whole, Choices::Once))
-                .or_else(|| {
-                    Some((
-                        format!("use clackatoo tool {}", code_span(&raw.name)),
-                        Some(visible(&raw.arguments.to_string())),
-                        Choices::Once,
-                    ))
-                })
-        } else {
-            question
-        };
-        let Some((what, whole, offered)) = question else {
-            self.carry_out(token, chat, id, tool, raw);
-            return;
+        // "Always allow commands" would set Tools to Allow, which the
+        // rules don't go by. The browser's consent keeps its own answer:
+        // nothing else lets the agent browse on.
+        let shown = match offered {
+            Choices::Tool if rules => Choices::Once,
+            offered => offered,
         };
         let call = self.tools.next_call;
         self.tools.next_call += 1;
         let asked = (self.chat(chat))
-            .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref(), offered));
+            .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref(), shown));
         if !asked {
             let refused = "too many questions are waiting for the user: wait for their answers";
             self.answer_tool(token, &id, Err(refused.to_owned()));
             return;
+        }
+        if rules {
+            let action = self.rules_action(chat, &tool, &raw, offered);
+            let question = super::permissions::Question::Tool(call);
+            self.asked_under_rules(chat, question, action);
         }
         self.tools.waiting.push(Waiting {
             token,
@@ -1116,6 +1133,61 @@ impl Daemon {
             what: Wait::Permission { call, tool, raw },
         });
         self.collect_damage(chat);
+    }
+
+    /// Checks `action`, what the call `id` of `tool` asks to do, against
+    /// the rules, then goes on with the call by their verdict, if the
+    /// connection at `token` still waits for its answer.
+    fn check_tool_rules(
+        &mut self,
+        token: Token,
+        chat: TerminalId,
+        id: Value,
+        tool: Tool,
+        raw: mcp::Raw,
+        action: crate::permissions::Action,
+    ) {
+        use crate::permissions::Checked;
+        let secret = match self.sources.get(token.0) {
+            Some(Source::Tools(connection)) => connection.token.clone(),
+            _ => None,
+        };
+        self.check_permission(chat, action, move |daemon, checked| {
+            // The connection that asked has gone: nothing waits for an
+            // answer, and nothing is done.
+            let waits = match daemon.sources.get(token.0) {
+                Some(Source::Tools(connection)) => {
+                    connection.chat == chat && connection.token == secret && !connection.finished
+                }
+                _ => false,
+            };
+            if !waits {
+                return;
+            }
+            match checked {
+                Checked::Decided(verdict) => {
+                    daemon.call_tool_checked(token, chat, id, tool, raw, Some(&verdict));
+                }
+                Checked::Cancelled(cancelled) => {
+                    daemon.answer_tool(token, &id, Err(cancelled.told().to_owned()));
+                }
+            }
+        });
+    }
+
+    /// The rules, as they are now, refuse the call `call`, which the user
+    /// was being asked about: its agent is told a rule did, not the user.
+    pub(super) fn refused_by_rule(&mut self, call: u64, verdict: &crate::permissions::Verdict) {
+        if self.permitted_mcp(call, false) {
+            return;
+        }
+        let Some(at) = (self.tools.waiting.iter()).position(
+            |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
+        ) else {
+            return;
+        };
+        let waiting = self.tools.waiting.remove(at);
+        self.answer_tool(waiting.token, &waiting.id, Err(rule_refusal(verdict)));
     }
 
     /// What the user is asked before `tool` is used by the chat `chat`'s
@@ -2817,6 +2889,15 @@ impl Daemon {
         }
         text
     }
+}
+
+/// What an agent is told when a permission rule refuses its call: that a
+/// rule did, which no other way of doing the same gets round.
+fn rule_refusal(verdict: &crate::permissions::Verdict) -> String {
+    format!(
+        "Clackatoo permissions denied this action: {}. Do not try another route.",
+        verdict.reason
+    )
 }
 
 /// The question, finishing "Allow the agent to …?", for doing `verb`

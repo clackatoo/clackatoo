@@ -6,21 +6,24 @@ pub(crate) const SETTING: &str = Setting::PERMISSION_ENGINE;
 const PREVIOUS: &str = "clackatoo.permissions.previous";
 
 impl HostedChat {
-    pub(crate) fn cancel_rule_questions(&mut self) -> Vec<Action> {
-        if self.permission_engine() != Engine::Clackatoo {
-            return Vec::new();
-        }
-        let mut actions = Vec::new();
-        for (asker, question) in std::mem::take(&mut self.asking) {
-            if matches!(asker, super::Asker::Agent(_) | super::Asker::Tool(_)) {
-                actions.extend(self.answer(asker, None));
-            } else {
-                self.asking.push_back((asker, question));
-            }
-        }
-        self.show_question();
-        actions
+    /// Whether the user is still asked the question the agent asked in
+    /// its request `request`.
+    pub(crate) fn asks_agent(&self, request: &serde_json::Value) -> bool {
+        self.asking
+            .iter()
+            .any(|(asker, _)| matches!(asker, super::Asker::Agent(asked) if asked == request))
     }
+
+    /// Whether the user is still asked about the tool call the server
+    /// numbered `call`.
+    pub(crate) fn asks_tool(&self, call: u64) -> bool {
+        self.asking
+            .iter()
+            .any(|(asker, _)| *asker == super::Asker::Tool(call))
+    }
+
+    /// Which engine answers its approval requests: the user's choice for
+    /// the chat.
     pub(crate) fn permission_engine(&self) -> Engine {
         if self
             .chosen
@@ -64,9 +67,6 @@ impl HostedChat {
 
     pub(crate) fn permissions_ready(&self) -> bool {
         self.permission_engine() == Engine::Provider || self.permission_confirmed
-    }
-    pub(crate) fn permission_turn(&self) -> Option<u32> {
-        self.last_uid().map(|uid| uid.0)
     }
 
     /// Whether the user stopped the turn the agent works in, so nothing
@@ -376,22 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_user_questions_are_cancelled_when_rules_change() {
-        let mut chat = chat();
-        chat.default_permission_engine(Engine::Clackatoo);
-        chat.ask_for_tool(17, "do this", None, super::super::Choices::Once);
-        let actions = chat.cancel_rule_questions();
-        assert_eq!(
-            actions,
-            vec![Action::Permit {
-                call: 17,
-                allow: false
-            }]
-        );
-        assert!(chat.node.question.is_none());
-    }
-
-    #[test]
     fn a_stop_is_of_the_turn_it_stopped_and_not_of_one_begun_since() {
         let mut chat = chat();
         open(&mut chat, "default");
@@ -408,5 +392,15 @@ mod tests {
         assert!(chat.wake(None));
         assert!(chat.held_by_stop());
         assert!(!chat.permission_stopped());
+    }
+
+    #[test]
+    fn open_questions_are_known_by_who_asked_them() {
+        let mut chat = chat();
+        chat.ask_for_tool(17, "do this", None, super::super::Choices::Once);
+        assert!(chat.asks_tool(17));
+        assert!(!chat.asks_tool(18));
+        chat.withdraw(17);
+        assert!(!chat.asks_tool(17));
     }
 }
