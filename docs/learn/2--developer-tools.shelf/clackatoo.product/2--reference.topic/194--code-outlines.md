@@ -12,8 +12,13 @@ Clackatoo builds a shared index of source definitions when an editor outline,
 project symbol finder or agent first asks for it. Windows and chats in the
 same project use the same index.
 Indexing runs in the background and appears in the bottom bar's
-[work indicator](~clackatoo/reference/background-work). Queries can return
-useful partial results while the rest of the project is being indexed.
+[work indicator](~clackatoo/reference/background-work). The queries
+themselves don't. Queries can return useful partial results while the rest
+of the project is being indexed.
+
+The home directory, and any folder above it, is never indexed: it's no
+project, and far too much to walk. A chat or file there with no project of
+its own gets no outline, and says why.
 
 ## Editor outline
 
@@ -81,23 +86,44 @@ version does not use PageRank.
 
 ## Freshness and unsaved files
 
-Changed source files are reindexed individually. New or moved directories,
-changes to ignore rules, and missed filesystem events request a background
-reconciliation. Metadata reconciliation also runs every two minutes while a
-project remains in use. Unchanged files reuse their persistent records.
-Changing the installed grammar or extraction version invalidates those
-records on the next reconciliation.
+Changed source files are reindexed individually. A directory that's
+created, deleted or moved has what's under it walked again, and nothing
+else. A change to ignore rules, or filesystem events the daemon missed,
+asks for the whole project to be walked again.
+
+While every directory is watched, that's all: the project isn't walked on
+a timer. If some couldn't be watched (there are more than 8,192, or the
+system has no watches left), the whole project is checked every two
+minutes while it remains in use. Unchanged files reuse their persistent
+records, and a walk writes to the index in batches. Changing the installed
+grammar or extraction version invalidates those records the next time the
+file is met.
 
 Unsaved editor text replaces disk records in a query's results and is marked
-`unsaved`. It is never written into the persistent source index. If editor
-text changes while a query runs, the agent is asked to retry rather than
-being given an outline of the earlier editor version.
+`unsaved`. It is never written into the persistent source index. Each
+unsaved file is parsed once for each version of its text, however many
+queries read it. One that can't be parsed is left out, and the answer says
+there is more than it gives. So is anything past 32 unsaved files or 16 MiB
+of them.
+
+If the unsaved text a query read changes while it runs, or the file it was
+asked about does, the agent is asked to retry rather than being given an
+outline of the earlier text. An edit anywhere else in the project doesn't
+make an answer stale.
 
 Coverage reports whether reconciliation is complete, which work is in
 progress, how many files were indexed or unsupported, cache hits, skipped
-files and errors. Complete reconciliation means the configured source set
-has been visited; it does not mean every language or generated file was
-indexed. Filesystem contents can change after any query's snapshot.
+files and errors. It also counts the indexed files that aren't whole:
+`truncated` ones, which have more than 4,096 definitions and keep the
+first, and `failed` ones, which couldn't be parsed or took longer than the
+parsing budget.
+
+Complete reconciliation means the configured source set has been visited;
+it does not mean every language or generated file was indexed. A file that
+fails doesn't leave the index incomplete: it's recorded as failed, counted
+each time, and not parsed again until it or its grammar changes. A folder
+that couldn't be read does, as something in it may be missing.
+Filesystem contents can change after any query's snapshot.
 
 Cancelling indexing leaves its existing cache available as partial data.
 Another query can restart indexing after cancellation completes. A daemon
@@ -118,6 +144,8 @@ and skips `.git`, `node_modules`, `target`, `vendor`, `dist`, `build`,
 Extraction has a 500 ms parsing budget and at most 4,096 definitions per
 file. Traversal stops at one million eligible files. Errors and truncated
 coverage are reported rather than silently presented as a complete map.
+In C, a struct or enum counts where it's defined with a body, not where
+its name is used.
 
 Up to four projects retain live index state; unused projects release it
 after ten minutes. Syntax trees are discarded after extraction, and symbol
@@ -126,4 +154,11 @@ worker reuses at most four grammars, avoiding repeated compilation for
 warm file updates without retaining whole-project syntax trees. Directory watches
 are bounded at 8,192 per project; coverage says when watches are incomplete,
 and metadata reconciliation still checks for changes. A database is capped
-at 512 MiB. Cached databases remain available for later sessions.
+at 512 MiB.
+
+Cached databases remain available for later sessions, but not for ever.
+Each time a project's index is loaded, the daemon clears out the indexes
+whose project folder no longer exists, those not written to for 30 days,
+and then the least recently used until all of them together take no more
+than 2 GiB. An index in use is never removed. Indexes from before this
+layout are built again and the old ones removed.

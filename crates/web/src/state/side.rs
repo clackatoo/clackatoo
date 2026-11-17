@@ -53,6 +53,10 @@ impl Control {
         })
     }
 }
+/// How soon, in milliseconds, the sheet asks again while the side agent
+/// is at work.
+const POLL: f64 = 500.0;
+
 #[derive(Debug, Default)]
 pub(crate) struct Side {
     pub open: bool,
@@ -64,6 +68,8 @@ pub(crate) struct Side {
     queued: Option<SideAction>,
     command: Option<String>,
     pub serial: u64,
+    /// When to ask for the conversation again: only while its agent is at
+    /// work, and never otherwise, so an idle sheet asks nothing.
     due: f64,
 }
 impl State {
@@ -160,7 +166,15 @@ impl State {
             return;
         }
         let action = self.side.pending.take();
-        self.side.due = self.now + 500.0;
+        // A conversation that waits for a question changes only when the
+        // user does something, and each such request is answered with it
+        // whole.
+        self.side.due = match &response {
+            Response::Side(reply) if reply.node.as_ref().is_some_and(|node| super::busy(node)) => {
+                self.now + POLL
+            }
+            _ => f64::INFINITY,
+        };
         match response {
             Response::Side(reply) => {
                 let lost = reply.node.is_none()
@@ -182,9 +196,6 @@ impl State {
                 } else {
                     reply.notice
                 };
-                if lost {
-                    self.side.due = f64::INFINITY;
-                }
                 if let Some(SideAction::Send { text }) = &action
                     && self.side.drafts.get(&parent) == Some(text)
                 {
@@ -227,7 +238,6 @@ impl State {
             Response::Error(error) => {
                 self.side.status = error.to_string();
                 self.side.command = None;
-                self.side.due = f64::INFINITY;
             }
             _ => {}
         }
@@ -422,6 +432,40 @@ mod tests {
             assert_eq!(Control::decode(&c.encode()), Some(c));
         }
     }
+    #[test]
+    fn an_idle_side_conversation_is_not_asked_for_again_but_one_at_work_is() {
+        let reply = |state: clackatoo_protocol::ChatState| {
+            clackatoo_protocol::ServerMessage::Response(Response::Side(SideReply {
+                node: Some(Box::new(ChatNode {
+                    state,
+                    ..ChatNode::default()
+                })),
+                notice: "Captured".into(),
+            }))
+        };
+        let mut state = state();
+        state.side_open("Why?".into(), None);
+        state.take_outbox();
+        state.receive(reply(clackatoo_protocol::ChatState::Answering));
+        state.now += 2.0 * POLL;
+        state.side_poll();
+        assert!(matches!(
+            &state.take_outbox()[..],
+            [ClientMessage::Request(Request::Side {
+                action: SideAction::Read,
+                ..
+            })]
+        ));
+        // The answer finished: the open sheet asks nothing more.
+        state.receive(reply(clackatoo_protocol::ChatState::Ready));
+        assert!(state.side.open);
+        for _ in 0..3 {
+            state.now += 10.0 * POLL;
+            state.side_poll();
+        }
+        assert!(state.take_outbox().is_empty());
+    }
+
     #[test]
     fn controls_wait_for_a_poll_and_a_lost_session_keeps_the_unsent_followup() {
         let mut state = state();

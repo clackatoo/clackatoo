@@ -19,10 +19,10 @@ Images remain beside the message box and count towards the attachment limit.
 | File | The current editor buffer, including unsaved text, or the file on disk. A line range includes only those lines. |
 | Symbol | A named definition, validated against its current syntax outline. |
 | Diagnostics | The latest language-server results for a file or the project. The preview warns that analysis may lag source changes. |
-| Command | A retained shell block with its command, working directory, exit status and output. Running commands are labelled as still running. |
-| Terminal selection | The selected retained document lines. Private regions are excluded. |
+| Command | A retained shell block with its command, working directory, exit status and output. Running commands are labelled as still running. Secret lines are left out. |
+| Terminal selection | The selected retained document lines. Secret lines are left out. |
 | Change | One already-loaded review hunk, with its before and after text and comparison scope. |
-| Chat | Up to twenty explicitly selected conversation turns. Answers are included; requests are optional. Tools and hidden reasoning are excluded. |
+| Chat | Up to twenty explicitly selected conversation turns. Answers are included; requests are optional. Tools and hidden reasoning are excluded. A side question isn't offered as a chat. |
 | Board | One entry visible in the destination chat's workspace. |
 | Folder | A directory outline, bounded to three levels and 1,000 entries, without file contents. |
 
@@ -36,9 +36,29 @@ The mouse wheel scrolls the preview. **Copy snapshot** copies the captured text.
 symbol or terminal excerpt. **Contents / ref** chooses between supplying text
 and supplying an explicitly labelled reference.
 
+Opening the browser never starts indexing a project. **All** shows symbols
+only from an outline index that's already loaded; choosing **Symbols**
+starts one. The home directory is never indexed, so a chat started there
+has no symbols to offer.
+
 `:Ask` and `<Space>a` attach an editor selection. In a terminal, review,
 board or chat, they attach that pane's selected object to a recently used
 chat in the same tab. Dragging a file from the explorer onto a chat attaches it.
+
+## Secret lines
+
+What's captured from a terminal goes further than the screen: an agent
+reads it, it's kept on disk, and its preview shows in the window and on
+the phone. So a line marked `hide`, `nosave` or `noagent` (see [secret
+regions](~clackatoo/reference/secret-regions)) is left out of it,
+whichever of the three it's marked with. Each run of such lines reads as
+one line, `[secret]`.
+
+A selection or a command's output that is nothing but secret lines can't
+be attached: the browser says so, rather than attach a placeholder. A
+command whose own command line is secret is listed as `[private command]`,
+without its text or its directory, and a search doesn't match what it
+hides.
 
 ## Capturing and sending
 
@@ -55,7 +75,15 @@ An ordinary unknown `@word` remains text.
 A message can contain at most 32 objects including images, 64 KiB of text per
 object and 256 KiB of attachment text in total. Choose a smaller range or
 Reference only for a larger file. Searches and folder outlines are bounded;
-symbol search coverage depends on the shared project index.
+symbol search coverage depends on the shared project index. A search that
+stopped short says so above its results: the file search walks at most
+50,000 entries for half a second, and the lists of chats and commands
+hold the newest 2,000 matches.
+
+A search or a preview is given three seconds, and a message's attachments
+ten. Past that, the browser says the search or preview took too long, or
+the message is held with its draft intact and says its context took too
+long: nothing is ever sent with part of what you chose.
 
 Once accepted, each attachment is an immutable snapshot. Queuing, steering,
 taking a queued message back for editing, retrying and branching preserve that
@@ -72,9 +100,10 @@ Reference-only attachments contain no captured source body.
 
 Source reads happen on the owning daemon. File reads stay inside the destination
 project, validate the opened file handle, reject devices and pipes, and detect
-concurrent disk changes. Search and capture use the shared bounded background
-scheduler. Stop cancels pending message capture; a timeout never accepts a
-partially captured selected attachment.
+concurrent disk changes. Searching and listing folders leave out what the
+project's ignore files do. Search and capture run on the daemon's background
+workers, out of the [work list](~clackatoo/reference/background-work). Stop
+cancels a message still waiting for its attachments.
 
 Remote picker results carry their source daemon's identity. Terminal and chat
 identifiers remain in that daemon's namespace. Attaching an object to a chat on
@@ -83,11 +112,23 @@ remote path.
 
 Captured bodies and replay metadata live in a private SQLite store under the
 daemon's state directory, namespaced by its socket. Repeated captures reuse
-identical stored snapshots. The database has a 512 MiB page limit and fails a
-new capture explicitly if it cannot retain it. It does not silently expire
-snapshots that an older provider conversation may still reference. Provider
-replay is matched against the exact captured message before attachment metadata
-is restored. Removing the store loses that recovery data.
+identical stored snapshots.
+
+The store is a convenience, and never stands between you and sending. If
+it's full, busy or read-only, the message goes with its attachments all the
+same; each snapshot's note then says that no copy was kept outside the
+conversation, and the daemon's log says why. Such a snapshot can still be
+inspected in its conversation, but can't be reattached, and isn't restored
+if the agent later tells the conversation again.
+
+The store keeps to 256 MiB. Past that, it lets go of the snapshots used
+longest ago, with the messages they went with. A snapshot that a
+conversation or draft in memory refers to is never let go.
+
+When an agent tells a conversation again, as it loads or after a branch
+switch, each message is matched against the exact captured message before
+its attachments are restored. That's looked up once, when the turns
+arrive. Removing the store loses that recovery data.
 
 Protocol 159 is required. Older windows retain their existing file-mention
 behavior; new attachment submissions are refused by older daemons instead of

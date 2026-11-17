@@ -3206,6 +3206,7 @@ impl Daemon {
             .remove(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         self.tools_closed(id);
+        self.context_closed(id);
         self.forget_terminal_images(id);
         self.graced.remove(&id);
         self.unread.retain(|&unread| unread != Flood::Terminal(id));

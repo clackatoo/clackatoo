@@ -57,7 +57,14 @@ has not started. The no-tools policy is separate from a security sandbox.
 - **Discard** clears the temporary conversation. Already attached snapshots
   remain available in their destination drafts and messages.
 
-Temporary conversations stay out of ordinary chat lists. There is one per
+While the side agent is starting or answering, an open sheet asks the
+daemon for the conversation a few times a second. Once the answer has
+finished it asks nothing more until you do something in it. A change made
+to the same side conversation from another window or the phone shows when
+you next act in the sheet or reopen it.
+
+Temporary conversations stay out of ordinary chat lists, and out of the
+[context browser](~clackatoo/reference/workspace-context)'s chats. There is one per
 parent, up to 32 per daemon, with at most 20 exchanges and 64 KiB per question.
 Keep a longer conversation as a normal chat. Closing the parent permanently
 also closes its temporary conversation. Live daemon upgrades retain the link;

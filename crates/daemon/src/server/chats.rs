@@ -516,6 +516,8 @@ impl Daemon {
                 fit: None,
             },
         );
+        // Its turns may be of messages that went with context.
+        self.context_history_changed(id);
     }
 
     /// The chat in terminal `id`.
@@ -1343,6 +1345,7 @@ impl Daemon {
         // telling isn't slow to open: it's waited for as long again.
         if chat.loading() {
             chat.replay(update);
+            self.context_history_changed(id);
             let wait = self.config.session_wait;
             if let Some(asked) = self.agents.opening.get_mut(&id) {
                 let wait = if asked.fetching {

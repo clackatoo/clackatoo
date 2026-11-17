@@ -105,6 +105,19 @@ impl crate::Terminal {
         Some(start..end)
     }
 
+    /// How many of the document's lines from `first` to `last`, both
+    /// included, have any of `hints`.
+    #[must_use]
+    pub fn lines_hinted(&self, first: u64, last: u64, hints: Hints) -> u64 {
+        let hinted = self
+            .document_hints(first)
+            .into_iter()
+            .take_while(|&(line, _)| line <= last)
+            .filter(|&(_, had)| had.intersects(hints))
+            .count();
+        hinted as u64
+    }
+
     /// The document's lines from `first` on with hints, in order, as
     /// [`hints`](Self::hints) gives them.
     pub(crate) fn document_hints(&self, first: u64) -> Vec<(u64, Hints)> {
@@ -166,6 +179,35 @@ mod tests {
                 (4, Hints::NOAGENT),
             ]
         );
+    }
+
+    #[test]
+    fn text_can_leave_out_every_kind_of_private_line_and_they_can_be_counted() {
+        let mut t = terminal(10, "ls\r\nhid\r\nnot\r\nkey\r\nok\r\nend");
+        t.add_hints(1..2, Hints::HIDE);
+        t.add_hints(2..3, Hints::NOSAVE);
+        t.add_hints(3..4, Hints::NOAGENT);
+        let secret = Hints::HIDE | Hints::NOSAVE | Hints::NOAGENT;
+        let (first, last) = t.document_bounds();
+        let (from, to) = (
+            Position {
+                line: first,
+                col: 0,
+            },
+            Position { line: last, col: 0 },
+        );
+        // An agent's read leaves out only what's kept from agents.
+        assert_eq!(all(&t, true), "ls\nhid\nnot\n[secret]\nok\nend");
+        assert_eq!(
+            t.text_without(from, to, true, secret),
+            "ls\n[secret]\nok\nend"
+        );
+        assert_eq!(t.lines_hinted(first, last, secret), 3);
+        assert_eq!(t.lines_hinted(2, 3, Hints::NOSAVE), 1);
+        assert_eq!(t.lines_hinted(4, last, secret), 0);
+        // Lines on the screen count as those in history do.
+        assert!(t.primary().scrollback_end() > 1);
+        assert_eq!(t.lines_hinted(3, 3, secret), 1);
     }
 
     #[test]

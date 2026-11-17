@@ -43,9 +43,9 @@ impl ChatView {
             place.in_pane([left, top, width, height]),
         ));
         let label = format!(
-            "Context · {} attached · {:?}",
+            "Context · {} attached · {}",
             self.context.attached.len(),
-            self.context.kind
+            self.context.kind.label()
         );
         self.usage_text(
             &mut canvas,
@@ -208,10 +208,10 @@ impl ChatView {
                 ));
             }
             let meta = format!(
-                "{}\n{}\n{:?} · {} bytes · ~{} tokens\n{}\n\n{}",
+                "{}\n{}\n{} · {} bytes · ~{} tokens\n{}\n\n{}",
                 preview.label,
                 preview.location,
-                preview.mode,
+                preview.mode.label(),
                 preview.bytes,
                 preview.bytes / 4,
                 preview.note,

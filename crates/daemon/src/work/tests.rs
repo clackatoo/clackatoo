@@ -255,6 +255,7 @@ fn aging_and_scope_rotation_prevent_queue_starvation() {
             id,
             Entry {
                 key: id.to_string(),
+                show: Show::Listed,
                 priority,
                 ready: Instant::now().checked_sub(AGE).unwrap(),
                 item: WorkItem {
@@ -355,4 +356,166 @@ fn queued_cancellation_closes_resources_on_a_worker_without_running_the_task() {
     release.send(()).unwrap();
     assert_ne!(until(&rx), std::thread::current().id());
     assert_eq!(settle(&scheduler, id), WorkState::Cancelled);
+}
+
+/// A scheduler whose wakes can be counted.
+fn woken() -> (Scheduler, Receiver<()>) {
+    let (tell, woke) = mpsc::channel();
+    let tell = Mutex::new(tell);
+    let scheduler = Scheduler::new(move || {
+        let _ = tell.lock().unwrap().send(());
+    });
+    (scheduler, woke)
+}
+
+#[test]
+fn a_hidden_job_is_in_no_list_and_leaves_no_outcome_even_when_it_fails() {
+    let (mut scheduler, woke) = woken();
+    let before = scheduler.revision();
+    let (ran, rx) = mpsc::channel();
+    let (release, wait) = mpsc::channel::<()>();
+    let hidden = scheduler
+        .submit_hidden(
+            "ask:1".into(),
+            None,
+            Priority::Interactive,
+            move |context| {
+                context.progress("never shown", 1, None);
+                ran.send(()).unwrap();
+                until(&wait);
+                Err("already told to whoever asked".into())
+            },
+        )
+        .unwrap();
+    until(&rx);
+    assert_eq!(scheduler.state(hidden), Some(WorkState::Running));
+    assert!(scheduler.snapshot().1.is_empty());
+    // It isn't the user's to stop or dismiss.
+    assert!(scheduler.cancel_listed(hidden).is_err());
+    scheduler.dismiss(hidden).unwrap();
+    assert_eq!(scheduler.state(hidden), Some(WorkState::Running));
+    release.send(()).unwrap();
+    // Its end wakes the loop, which finds it gone: no failure to badge.
+    let until_gone = Instant::now() + Duration::from_secs(5);
+    while scheduler.state(hidden).is_some() {
+        assert!(Instant::now() < until_gone, "the hidden job never ended");
+        until(&woke);
+        scheduler.revision();
+    }
+    assert!(scheduler.snapshot().1.is_empty());
+    assert_eq!(scheduler.revision(), before, "the list never changed");
+}
+
+#[test]
+fn a_change_after_the_loop_looked_wakes_it_though_the_list_was_not_sent() {
+    let (mut scheduler, woke) = woken();
+    let (release, wait) = mpsc::channel::<()>();
+    let (started, start) = mpsc::channel();
+    scheduler
+        .submit_hidden("ask:1".into(), None, Priority::Interactive, move |_| {
+            started.send(()).unwrap();
+            until(&wait);
+            Ok(Step::Done)
+        })
+        .unwrap();
+    until(&start);
+    // The loop looks, as it does each turn, without taking the list.
+    while woke.try_recv().is_ok() {}
+    scheduler.revision();
+    release.send(()).unwrap();
+    until(&woke);
+}
+
+#[test]
+fn questions_are_answered_time_out_or_are_lost_and_each_is_told_once() {
+    let (mut scheduler, woke) = woken();
+    let mut asked: Asked<&str, u32> = Asked::default();
+    let question = |wait| Question {
+        name: "test",
+        scope: None,
+        wait,
+    };
+    let hour = Duration::from_hours(1);
+    asked
+        .ask(&mut scheduler, question(hour), "answered", |_| 7)
+        .unwrap();
+    asked
+        .ask(&mut scheduler, question(hour), "lost", |_| {
+            panic!("a bad job")
+        })
+        .unwrap();
+    let mut told = Vec::new();
+    let until_told = Instant::now() + Duration::from_secs(5);
+    while told.len() < 2 {
+        assert!(Instant::now() < until_told, "the questions never settled");
+        until(&woke);
+        scheduler.revision();
+        told.extend(asked.take(&scheduler, Instant::now()));
+    }
+    told.sort_by_key(|(kept, _)| *kept);
+    assert_eq!(
+        told,
+        [("answered", Outcome::Answered(7)), ("lost", Outcome::Lost)]
+    );
+    // One that outlives its deadline is told so, its job stopped, and its
+    // late answer dropped.
+    let (release, wait) = mpsc::channel::<()>();
+    let (started, start) = mpsc::channel();
+    asked
+        .ask(
+            &mut scheduler,
+            question(Duration::ZERO),
+            "slow",
+            move |_| {
+                started.send(()).unwrap();
+                until(&wait);
+                9
+            },
+        )
+        .unwrap();
+    until(&start);
+    assert_eq!(
+        asked.next_due().map(|due| due <= Instant::now()),
+        Some(true)
+    );
+    assert_eq!(
+        asked.take(&scheduler, Instant::now()),
+        [("slow", Outcome::TimedOut)]
+    );
+    release.send(()).unwrap();
+    // A withdrawn question's answer is dropped too.
+    let (release, wait) = mpsc::channel::<()>();
+    asked
+        .ask(&mut scheduler, question(hour), "withdrawn", move |_| {
+            until(&wait);
+            1
+        })
+        .unwrap();
+    assert_eq!(
+        asked.withdraw(&scheduler, |kept| *kept == "withdrawn"),
+        ["withdrawn"]
+    );
+    // Stopped before a worker reached it, it never ran to hear this.
+    let _ = release.send(());
+    let (done, finished) = mpsc::channel();
+    asked
+        .ask(&mut scheduler, question(hour), "last", move |_| {
+            done.send(()).unwrap();
+            2
+        })
+        .unwrap();
+    until(&finished);
+    let until_told = Instant::now() + Duration::from_secs(5);
+    let mut told = Vec::new();
+    while told.is_empty() {
+        assert!(
+            Instant::now() < until_told,
+            "the last question never settled"
+        );
+        until(&woke);
+        scheduler.revision();
+        told = asked.take(&scheduler, Instant::now());
+    }
+    assert_eq!(told, [("last", Outcome::Answered(2))]);
+    assert_eq!(asked.len(), 0);
 }

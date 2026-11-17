@@ -16996,10 +16996,13 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
         );
     });
+    // A project of its own: the daemon's home is never indexed.
+    let project = daemon.dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
     let disk = "fn authenticate(user) { user; }\n";
-    std::fs::write(daemon.dir.path().join("auth.curly"), disk).unwrap();
+    std::fs::write(project.join("auth.curly"), disk).unwrap();
     let mut client = daemon.client();
-    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let chat = start_tooled_chat_in(&mut client, AgentTools::Allow, &project);
     let outline = board_calls(
         &mut client,
         chat,
@@ -17025,7 +17028,7 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
         "{map}"
     );
     let mut editor = daemon.client();
-    let buffer = open_attached(&mut editor, daemon.dir.path(), "auth.curly");
+    let buffer = open_attached(&mut editor, &project, "auth.curly");
     let snapshot = attach_buffer(&mut editor, buffer);
     send_change(
         &mut editor,
@@ -17048,7 +17051,7 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
         "{live}"
     );
     assert_eq!(
-        std::fs::read_to_string(daemon.dir.path().join("auth.curly")).unwrap(),
+        std::fs::read_to_string(project.join("auth.curly")).unwrap(),
         disk
     );
     let refused = board_calls(
@@ -17063,10 +17066,25 @@ fn project_outline_tools_share_the_index_and_overlay_unsaved_source() {
     let work = editor
         .request(&Request::Work(clackatoo_protocol::WorkAction::List))
         .unwrap();
+    // The index being built is the user's to watch and cancel; the
+    // agent's questions of it are not, and leave nothing in the list.
+    let Response::Work(items) = work else {
+        panic!("{work:?}");
+    };
     assert!(
-        matches!(work, Response::Work(ref items) if items.iter().any(|item| item.title.contains("outline"))),
-        "{work:?}"
+        items.iter().any(|item| item.title == "Indexing outline"),
+        "{items:?}"
     );
+    assert!(
+        !items
+            .iter()
+            .any(|item| item.title.is_empty() || item.title.contains("code outline")),
+        "{items:?}"
+    );
+    // A chat in the home directory is refused an index of it, and says why.
+    let home = start_tooled_chat(&mut client, AgentTools::Allow);
+    let refused = board_calls(&mut client, home, &[r#"search_symbols {"query":"a"}"#]);
+    assert!(refused.contains("home directory"), "{refused}");
 }
 
 #[test]
@@ -27956,7 +27974,9 @@ fn native_code_outline_and_project_search_share_unsaved_source_without_a_languag
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
         );
     });
-    let dir = daemon.dir.path();
+    // A project of its own: the daemon's home is never indexed.
+    let dir = &daemon.dir.path().join("project");
+    std::fs::create_dir(dir).unwrap();
     let disk = "fn outer() {\n fn inner() {}\n}\n";
     std::fs::write(dir.join("main.curly"), disk).unwrap();
     std::fs::write(dir.join("other.curly"), "fn project_only() {}\n").unwrap();
@@ -28059,7 +28079,9 @@ fn native_code_outline_refresh_preserves_cancellation_and_explicit_search_retrie
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"),
         );
     });
-    let dir = daemon.dir.path();
+    // A project of its own: the daemon's home is never indexed.
+    let dir = &daemon.dir.path().join("project");
+    std::fs::create_dir(dir).unwrap();
     std::fs::write(dir.join("main.curly"), "fn entry() {}\n").unwrap();
     for file in 0..1000 {
         std::fs::write(

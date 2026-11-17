@@ -26,6 +26,24 @@ pub enum ContextKind {
     Project,
 }
 
+impl ContextKind {
+    /// What the kind is called where a person chooses one.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::File => "Files",
+            Self::Symbol => "Symbols",
+            Self::Diagnostics => "Diagnostics",
+            Self::Command => "Commands",
+            Self::Change => "Changes",
+            Self::Chat => "Chats",
+            Self::Board => "Boards",
+            Self::Project => "Folders",
+        }
+    }
+}
+
 /// A source selector. It grants no access beyond the destination chat's scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextRef {
@@ -126,7 +144,51 @@ pub enum ContextMode {
     Reference,
 }
 
+impl ContextMode {
+    /// What the mode is called, for a person and in what an agent is sent.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Contents => "Contents included",
+            Self::Reference => "Reference only",
+        }
+    }
+}
+
 impl ContextRef {
+    /// What the source is called where a person sees it before it has
+    /// been captured: on a draft's attachment, in the window and on the
+    /// phone alike. A captured snapshot has a fuller label of its own.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Owned { source, .. } => source.label(),
+            Self::File { path, lines } => format!("{path}{}", crate::lines_suffix(*lines)),
+            Self::Symbol { path, name, .. } => format!("{name} · {path}"),
+            Self::Diagnostics { path: None } => "Project diagnostics".into(),
+            Self::Diagnostics { path: Some(path) } => format!("Diagnostics · {path}"),
+            Self::Command { terminal, .. } => format!("Command · terminal {}", terminal.0),
+            Self::Terminal {
+                terminal,
+                first,
+                last,
+            } => format!("Terminal {} · lines {first}–{last}", terminal.0),
+            Self::Change { path, .. } => format!("Change · {path}"),
+            Self::Chat {
+                chat, first, last, ..
+            } if first == last => format!("Chat {} · turn {first}", chat.0),
+            Self::Chat {
+                chat, first, last, ..
+            } => format!("Chat {} · turns {first}–{last}", chat.0),
+            Self::Board { board, entry } => format!("{board} · #{entry}"),
+            Self::Project { path } => format!("Folder · {path}"),
+            Self::Retained { id, .. } => {
+                let short: String = id.chars().take(12).collect();
+                format!("Captured context · {short}")
+            }
+        }
+    }
+
     /// Stable review locator shared by the UI and daemon, not an access grant.
     #[must_use]
     pub fn hunk_id(path: &str, line: u32, before: &str, after: &str) -> u64 {
@@ -198,11 +260,7 @@ impl ContextSnapshot {
     /// Renders a snapshot for providers without structured resource support.
     #[must_use]
     pub fn quoted(&self) -> String {
-        let kind = if self.mode == ContextMode::Reference {
-            "Reference only"
-        } else {
-            "Contents included"
-        };
+        let kind = self.mode.label();
         let header = format!(
             "Context {} · {} · {kind}\nSource: {}\nRevision: {}\n{}",
             self.id, self.label, self.location, self.revision, self.note
@@ -280,4 +338,91 @@ pub enum ContextReply {
     },
     /// Captured preview or historical snapshot.
     Snapshot(ContextSnapshot),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MachineId;
+
+    #[test]
+    fn every_source_has_a_label_a_person_can_read_whoever_owns_it() {
+        let terminal = TerminalId(3);
+        let sources = [
+            (
+                ContextRef::File {
+                    path: "src/main.rs".into(),
+                    lines: Some((2, 5)),
+                },
+                "src/main.rs#L2-L5",
+            ),
+            (
+                ContextRef::Symbol {
+                    path: "src/auth.rs".into(),
+                    name: "login".into(),
+                    lines: (1, 9),
+                    signature: false,
+                },
+                "login · src/auth.rs",
+            ),
+            (
+                ContextRef::Diagnostics { path: None },
+                "Project diagnostics",
+            ),
+            (
+                ContextRef::Command { terminal, line: 40 },
+                "Command · terminal 3",
+            ),
+            (
+                ContextRef::Terminal {
+                    terminal,
+                    first: 4,
+                    last: 9,
+                },
+                "Terminal 3 · lines 4–9",
+            ),
+            (
+                ContextRef::Change {
+                    chat: terminal,
+                    path: "a.rs".into(),
+                    hunk: 7,
+                },
+                "Change · a.rs",
+            ),
+            (
+                ContextRef::Chat {
+                    chat: terminal,
+                    first: 2,
+                    last: 2,
+                    requests: false,
+                },
+                "Chat 3 · turn 2",
+            ),
+            (
+                ContextRef::Board {
+                    board: "plan".into(),
+                    entry: 4,
+                },
+                "plan · #4",
+            ),
+            (ContextRef::Project { path: "src".into() }, "Folder · src"),
+            (
+                ContextRef::Retained {
+                    id: "0123456789abcdef".into(),
+                    grant: "secret".into(),
+                },
+                "Captured context · 0123456789ab",
+            ),
+        ];
+        for (source, label) in sources {
+            assert_eq!(source.label(), label);
+            // A search result names the machine it's from: the label is
+            // of what it is, never of how it's wrapped.
+            let owned = ContextRef::Owned {
+                machine: MachineId([9; 16]),
+                source: Box::new(source),
+            };
+            assert_eq!(owned.label(), label);
+        }
+    }
 }

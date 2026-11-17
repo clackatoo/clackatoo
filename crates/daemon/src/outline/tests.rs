@@ -57,31 +57,45 @@ fn scan_on(project: &Arc<Project>, scheduler: &mut Scheduler) -> Status {
     result
 }
 
-fn ask(project: &Arc<Project>, request: Query, overlays: Vec<Overlay>) -> Result<String, String> {
-    let project = Arc::clone(project);
-    let mut scheduler = Scheduler::new(|| {});
-    let (tx, rx) = mpsc::channel();
-    scheduler
-        .submit(
-            "query".into(),
-            "Reading outline",
-            None,
-            Priority::Interactive,
-            move |context| {
-                tx.send(query(&project, &request, &overlays, context))
-                    .unwrap();
-                Ok(Step::Done)
-            },
-        )
-        .unwrap();
-    rx.recv_timeout(Duration::from_secs(15)).unwrap()
+fn ask(project: &Arc<Project>, request: &Query, overlays: Vec<Overlay>) -> Result<String, String> {
+    let overlays = Overlays {
+        list: overlays,
+        left_out: false,
+    };
+    query(project, request, &overlays, Duration::from_secs(3), &|| {
+        false
+    })
+}
+
+/// An unsaved buffer on the file `path` holding `text`.
+fn unsaved(path: &str, text: &str, version: u64) -> Overlay {
+    Overlay {
+        path: path.into(),
+        text: clackatoo_text::Rope::from_str(text),
+        buffer: clackatoo_protocol::BufferId(1),
+        version,
+    }
+}
+
+/// Language packs whose only grammar can't be loaded, so every file of
+/// its language fails to parse.
+fn broken_languages(dir: &tempfile::TempDir) -> PathBuf {
+    let languages = dir.path().join("languages");
+    let pack = languages.join("curly");
+    std::fs::create_dir_all(&pack).unwrap();
+    for entry in std::fs::read_dir(fixtures().join("curly")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), pack.join(entry.file_name())).unwrap();
+    }
+    std::fs::write(pack.join("grammar.wasm"), b"not a grammar").unwrap();
+    languages
 }
 
 fn search(project: &Arc<Project>, query: &str) -> Value {
     serde_json::from_str(
         &ask(
             project,
-            Query::Symbols {
+            &Query::Symbols {
                 query: query.into(),
                 limit: 20,
             },
@@ -195,20 +209,198 @@ fn a_burst_of_filesystem_events_is_drained_in_bounded_turns_and_requests_reconci
 }
 
 #[test]
+fn a_folder_that_comes_or_goes_is_walked_alone_not_the_whole_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(&dir);
+    for number in 0..20 {
+        std::fs::write(
+            project.root.join(format!("old{number}.curly")),
+            "fn old() {}\n",
+        )
+        .unwrap();
+    }
+    let whole = scan(&project);
+    assert_eq!(whole.discovered, 20);
+    std::fs::create_dir(project.root.join("new")).unwrap();
+    std::fs::write(project.root.join("new/a.curly"), "fn arrived() {}\n").unwrap();
+    project.notifications();
+    {
+        let dirty = project.dirty.lock().unwrap();
+        assert!(!dirty.all, "a new folder isn't a reason to walk everything");
+        assert!(dirty.dirs.contains(Path::new("new")), "{dirty:?}");
+    }
+    let partial = scan(&project);
+    assert!(partial.complete, "{partial:?}");
+    assert!(
+        partial.discovered - whole.discovered <= 2,
+        "only the new folder's file was read: {partial:?}"
+    );
+    assert_eq!(
+        search(&project, "arrived")["symbols"][0]["path"],
+        "new/a.curly"
+    );
+    assert_eq!(
+        search(&project, "old")["symbols"].as_array().unwrap().len(),
+        20
+    );
+    // Its files are watched now, and go with it when it does.
+    std::fs::remove_dir_all(project.root.join("new")).unwrap();
+    project.notifications();
+    assert!(!project.dirty.lock().unwrap().all);
+    scan(&project);
+    assert!(
+        search(&project, "arrived")["symbols"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        search(&project, "old")["symbols"].as_array().unwrap().len(),
+        20
+    );
+}
+
+#[test]
+fn a_project_whose_every_folder_is_watched_is_not_walked_again_on_a_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(&dir);
+    std::fs::write(project.root.join("a.curly"), "fn a() {}\n").unwrap();
+    // The loop listens to the watch.
+    project.watching(true);
+    let status = scan(&project);
+    assert!(status.watched, "{status:?}");
+    project.reconcile();
+    assert!(!project.needs_work(), "every change would have been heard");
+    // With nobody listening, only another walk finds changes.
+    project.watching(false);
+    project.reconcile();
+    assert!(project.needs_work());
+}
+
+#[test]
+fn a_file_cut_short_is_counted_so_each_time_and_does_not_make_the_index_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(&dir);
+    let mut big = String::new();
+    for number in 0..5000 {
+        writeln!(big, "fn f{number}() {{}}").unwrap();
+    }
+    std::fs::write(project.root.join("big.curly"), big).unwrap();
+    std::fs::write(project.root.join("small.curly"), "fn small() {}\n").unwrap();
+    let first = scan(&project);
+    assert_eq!((first.truncated, first.failed), (1, 0), "{first:?}");
+    assert!(first.complete, "everything was visited: {first:?}");
+    // Unchanged, it isn't read again, and is still counted as cut short.
+    project.changed(None);
+    let second = scan(&project);
+    assert_eq!((second.parsed, second.cache_hits), (0, 2), "{second:?}");
+    assert_eq!(second.truncated, 1, "{second:?}");
+    assert!(second.complete);
+    assert_eq!(search(&project, "small")["coverage"]["truncated"], 1);
+}
+
+#[test]
+fn a_file_that_cannot_be_parsed_is_kept_as_failed_and_not_tried_again_until_it_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let project = Arc::new(Project::new(
+        root,
+        &dir.path().join("cache"),
+        broken_languages(&dir),
+    ));
+    std::fs::write(project.root.join("a.curly"), "fn a() {}\n").unwrap();
+    let first = scan(&project);
+    assert_eq!((first.failed, first.parsed), (1, 1), "{first:?}");
+    assert!(first.complete, "{first:?}");
+    project.changed(None);
+    let second = scan(&project);
+    assert_eq!((second.parsed, second.cache_hits), (0, 1), "{second:?}");
+    assert_eq!(second.failed, 1);
+    let outline = ask(
+        &project,
+        &Query::File {
+            path: "a.curly".into(),
+            limit: 10,
+        },
+        Vec::new(),
+    );
+    assert!(outline.is_err_and(|why| why.contains("couldn't be parsed")));
+    // A search still answers, and says the buffer it couldn't read is
+    // missing from the answer.
+    let found: Value = serde_json::from_str(
+        &ask(
+            &project,
+            &Query::Symbols {
+                query: String::new(),
+                limit: 10,
+            },
+            vec![unsaved("b.curly", "fn b() {}", 1)],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(found["more"], true);
+    assert_eq!(found["coverage"]["failed"], 1);
+}
+
+#[test]
+fn an_unsaved_buffer_is_parsed_once_for_each_version_and_a_huge_one_gives_what_it_can() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(&dir);
+    scan(&project);
+    let symbols = |overlay: Overlay| -> Value {
+        let request = Query::Symbols {
+            query: "live".into(),
+            limit: 10,
+        };
+        serde_json::from_str(&ask(&project, &request, vec![overlay]).unwrap()).unwrap()
+    };
+    let kept = || project.overlays.lock().unwrap().versions();
+    assert_eq!(
+        symbols(unsaved("a.curly", "fn live() {}", 7))["symbols"][0]["name"],
+        "live"
+    );
+    assert_eq!(kept(), [7]);
+    // The same version again is answered from what was kept: were it
+    // parsed, this other text would be what's found.
+    let again = symbols(unsaved("a.curly", "fn other() {}", 7));
+    assert_eq!(again["symbols"][0]["name"], "live");
+    // A new version takes its place.
+    let edited = symbols(unsaved("a.curly", "fn live_again() {}", 8));
+    assert_eq!(edited["symbols"][0]["name"], "live_again");
+    assert_eq!(kept(), [8]);
+    // More definitions than a file may have: the first are given, and
+    // the answer says there are more. It used to fail every query.
+    let mut huge = String::new();
+    for number in 0..5000 {
+        writeln!(huge, "fn live{number}() {{}}").unwrap();
+    }
+    let cut = symbols(unsaved("a.curly", &huge, 9));
+    assert_eq!(cut["symbols"].as_array().unwrap().len(), 10);
+    assert_eq!(cut["more"], true);
+}
+
+#[test]
+fn a_search_that_ran_out_of_time_does_not_stop_what_its_connection_does_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::open(&dir.path().join("index.sqlite")).unwrap();
+    // No time at all: the stop is armed, whether or not it fires.
+    let _ = store.query("", None, 10, &[], Duration::ZERO);
+    assert_eq!(store.count_to(200_000), Ok(200_000));
+}
+
+#[test]
 fn unsaved_text_overrides_disk_results_without_polluting_the_persistent_index() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(&dir);
     std::fs::write(project.root.join("a.curly"), "fn disk() {}\n").unwrap();
     scan(&project);
-    let overlay = Overlay {
-        path: "a.curly".into(),
-        text: clackatoo_text::Rope::from_str("fn live() {}\n"),
-        version: 7,
-    };
+    let overlay = unsaved("a.curly", "fn live() {}\n", 7);
     let found: Value = serde_json::from_str(
         &ask(
             &project,
-            Query::Symbols {
+            &Query::Symbols {
                 query: "live".into(),
                 limit: 10,
             },
@@ -222,7 +414,7 @@ fn unsaved_text_overrides_disk_results_without_polluting_the_persistent_index() 
     let absent: Value = serde_json::from_str(
         &ask(
             &project,
-            Query::Symbols {
+            &Query::Symbols {
                 query: "disk".into(),
                 limit: 10,
             },
@@ -255,15 +447,11 @@ fn stale_overlay_rows_cannot_crowd_current_results_out_of_a_bounded_query() {
     let result: Value = serde_json::from_str(
         &ask(
             &project,
-            Query::Symbols {
+            &Query::Symbols {
                 query: "matching".into(),
                 limit: 1,
             },
-            vec![Overlay {
-                path: "a.curly".into(),
-                text: clackatoo_text::Rope::from_str("fn other() {}\n"),
-                version: 1,
-            }],
+            vec![unsaved("a.curly", "fn other() {}\n", 1)],
         )
         .unwrap(),
     )
@@ -307,7 +495,7 @@ fn ignores_generated_and_excluded_files_and_never_follows_source_symlinks() {
         assert!(
             ask(
                 &project,
-                Query::File {
+                &Query::File {
                     path: path.into(),
                     limit: 20
                 },
@@ -317,15 +505,11 @@ fn ignores_generated_and_excluded_files_and_never_follows_source_symlinks() {
             "{path}"
         );
     }
-    let overlay = Overlay {
-        path: "ignored.curly".into(),
-        text: clackatoo_text::Rope::from_str("fn hidden() {}"),
-        version: 1,
-    };
+    let overlay = unsaved("ignored.curly", "fn hidden() {}", 1);
     assert!(
         ask(
             &project,
-            Query::File {
+            &Query::File {
                 path: "ignored.curly".into(),
                 limit: 20
             },
@@ -347,7 +531,7 @@ fn targeted_outlines_work_before_the_background_scan_and_maps_have_a_hard_byte_b
     let found: Value = serde_json::from_str(
         &ask(
             &project,
-            Query::File {
+            &Query::File {
                 path: "a.curly".into(),
                 limit: 10,
             },
@@ -360,7 +544,7 @@ fn targeted_outlines_work_before_the_background_scan_and_maps_have_a_hard_byte_b
     assert_eq!(found["more"], true);
     let map = ask(
         &project,
-        Query::Map {
+        &Query::Map {
             query: String::new(),
             focus: vec!["a.curly".into()],
             max_bytes: 1024,
@@ -415,7 +599,7 @@ fn qualifies_three_million_lines() {
     let map_at = Instant::now();
     let map = ask(
         &project,
-        Query::Map {
+        &Query::Map {
             query: String::new(),
             focus: Vec::new(),
             max_bytes: 12000,
