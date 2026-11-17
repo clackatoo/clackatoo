@@ -7,6 +7,19 @@ use clackatoo_protocol::{
 use std::time::{Duration, Instant};
 use winit::keyboard::{Key, NamedKey};
 
+/// How soon the sheet asks again while the side agent is at work.
+const POLL: Duration = Duration::from_millis(350);
+
+/// Whether the side conversation `node` is changing by itself: its agent
+/// is starting or answering. Only then is it worth asking again unasked:
+/// one that waits for a question changes when the user does something,
+/// and every such request is answered with it whole.
+fn busy(node: &clackatoo_protocol::ChatNode) -> bool {
+    use clackatoo_protocol::ChatState;
+    matches!(node.state, ChatState::Starting | ChatState::Answering)
+        || node.turns.last().is_some_and(|turn| turn.end.is_none())
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Control {
     Hide,
@@ -22,6 +35,8 @@ pub(super) struct SideUi {
     pub status: String,
     pub body: [f32; 4],
     pub controls: Vec<(Control, [f32; 4])>,
+    /// When to ask for the conversation again: set only while its agent
+    /// is at work, so an idle sheet asks nothing.
     pub due: Option<Instant>,
     requests: std::collections::VecDeque<SideAction>,
     pending: Option<(u64, SideAction)>,
@@ -147,82 +162,18 @@ impl ChatView {
         self.side.pending = Some((self.side.next, action.clone()));
         vec![(self.side.next, action)]
     }
+    /// Takes the daemon's answer to the request numbered `serial`: the
+    /// side conversation as it is now, an answer of it captured for the
+    /// main draft, or why the request failed.
     pub(crate) fn side_answer(&mut self, serial: u64, response: Response) {
         if self.side.pending.as_ref().is_none_or(|(n, _)| *n != serial) {
             return;
         }
         let (_, action) = self.side.pending.take().expect("checked");
-        self.side.due = Some(Instant::now() + Duration::from_millis(350));
+        self.side.due = None;
         match response {
-            Response::Side(reply) => {
-                if let Some(node) = reply.node {
-                    if let Some(child) = &mut self.side.child {
-                        let changed = child.node != *node;
-                        child.node = *node;
-                        if changed {
-                            child.came_whole();
-                            for index in 0..child.cache.turns.len() {
-                                child.restyled(index);
-                            }
-                        }
-                    } else {
-                        let mut child = ChatView::new("Side question".into(), *node);
-                        child.side_child = true;
-                        child.resend_supported = false;
-                        self.side.child = Some(Box::new(child));
-                    }
-                    self.side.status = reply.notice;
-                } else if matches!(action, SideAction::Read)
-                    && self
-                        .side
-                        .child
-                        .as_ref()
-                        .is_some_and(|c| !c.editor.raw_text().is_empty())
-                {
-                    if let Some(child) = &mut self.side.child {
-                        child.node = clackatoo_protocol::ChatNode {
-                            state: clackatoo_protocol::ChatState::Ready,
-                            ..Default::default()
-                        };
-                        child.came_whole();
-                    }
-                    self.side.status="The temporary session ended. Your draft is kept; sending starts a fresh side conversation.".into();
-                    self.side.due = None;
-                } else {
-                    self.side.child = None;
-                    self.side.open = false;
-                    self.side.requests.clear();
-                    if !reply.notice.is_empty() {
-                        self.say(reply.notice);
-                    }
-                }
-            }
-            Response::Context(ContextReply::Snapshot(snapshot)) => {
-                if self.context.attached.len() + self.images.len()
-                    < clackatoo_protocol::ContextSnapshot::MAX_COUNT
-                {
-                    self.context.attached.push(super::context::Attached {
-                        selection: ContextSelection {
-                            source: ContextRef::Retained {
-                                id: snapshot.id.clone(),
-                                grant: snapshot.grant.clone(),
-                            },
-                            mode: snapshot.mode,
-                            expected: Some(snapshot.revision.clone()),
-                        },
-                        ready: true,
-                        preview: snapshot,
-                    });
-                    self.context.dirty = true;
-                    self.side.open = false;
-                    self.say(
-                        "Side answer attached to this draft. Add a message and send when ready."
-                            .into(),
-                    );
-                } else {
-                    self.side.status = "The parent draft already has 32 attachments.".into();
-                }
-            }
+            Response::Side(reply) => self.side_came(&action, reply),
+            Response::Context(ContextReply::Snapshot(snapshot)) => self.side_attached(snapshot),
             Response::Error(error) => {
                 self.side.status = error.to_string();
                 let restore = match action {
@@ -243,11 +194,84 @@ impl ChatView {
                         child.put_recalled(text);
                     }
                 }
-                // An unavailable side stays visible with the error, without polling forever.
-                self.side.due = None;
             }
             _ => {}
         }
+    }
+
+    /// Shows the side conversation as `reply` has it, in answer to
+    /// `action`: asked for again soon only if its agent is at work.
+    fn side_came(&mut self, action: &SideAction, reply: clackatoo_protocol::SideReply) {
+        if let Some(node) = reply.node {
+            if busy(&node) {
+                self.side.due = Some(Instant::now() + POLL);
+            }
+            if let Some(child) = &mut self.side.child {
+                let changed = child.node != *node;
+                child.node = *node;
+                if changed {
+                    child.came_whole();
+                    for index in 0..child.cache.turns.len() {
+                        child.restyled(index);
+                    }
+                }
+            } else {
+                let mut child = ChatView::new("Side question".into(), *node);
+                child.side_child = true;
+                child.resend_supported = false;
+                self.side.child = Some(Box::new(child));
+            }
+            self.side.status = reply.notice;
+        } else if matches!(action, SideAction::Read)
+            && self
+                .side
+                .child
+                .as_ref()
+                .is_some_and(|c| !c.editor.raw_text().is_empty())
+        {
+            if let Some(child) = &mut self.side.child {
+                child.node = clackatoo_protocol::ChatNode {
+                    state: clackatoo_protocol::ChatState::Ready,
+                    ..Default::default()
+                };
+                child.came_whole();
+            }
+            self.side.status = "The temporary session ended. Your draft is kept; sending \
+                                starts a fresh side conversation."
+                .into();
+        } else {
+            self.side.child = None;
+            self.side.open = false;
+            self.side.requests.clear();
+            if !reply.notice.is_empty() {
+                self.say(reply.notice);
+            }
+        }
+    }
+
+    /// Attaches a side answer, captured as `snapshot`, to the main draft.
+    fn side_attached(&mut self, snapshot: clackatoo_protocol::ContextSnapshot) {
+        if self.context.attached.len() + self.images.len()
+            >= clackatoo_protocol::ContextSnapshot::MAX_COUNT
+        {
+            self.side.status = "The parent draft already has 32 attachments.".into();
+            return;
+        }
+        self.context.attached.push(super::context::Attached {
+            selection: ContextSelection {
+                source: ContextRef::Retained {
+                    id: snapshot.id.clone(),
+                    grant: snapshot.grant.clone(),
+                },
+                mode: snapshot.mode,
+                expected: Some(snapshot.revision.clone()),
+            },
+            ready: true,
+            preview: snapshot,
+        });
+        self.context.dirty = true;
+        self.side.open = false;
+        self.say("Side answer attached to this draft. Add a message and send when ready.".into());
     }
     pub(super) fn side_local(&self, at: [f32; 2]) -> [f32; 2] {
         [at[0] - self.side.body[0], at[1] - self.side.body[1]]
@@ -325,6 +349,39 @@ mod tests {
         view.open_side(String::new());
         assert_eq!(view.side.child.as_ref().unwrap().node.turns.len(), 1);
     }
+    #[test]
+    fn an_idle_side_conversation_is_not_asked_for_again_but_one_at_work_is() {
+        let mut view = ChatView::new("Parent".into(), talk(&[("Main task", "Working")]));
+        view.side_supported = true;
+        let answer = |view: &mut ChatView, node: clackatoo_protocol::ChatNode| {
+            let serial = view.take_side_requests()[0].0;
+            view.side_answer(
+                serial,
+                Response::Side(SideReply {
+                    node: Some(Box::new(node)),
+                    notice: "Captured".into(),
+                }),
+            );
+        };
+        // Its agent is still answering: the sheet asks again shortly.
+        view.open_side("Why cookies?".into());
+        let mut answering = talk(&[("Why cookies?", "For")]);
+        answering.state = clackatoo_protocol::ChatState::Answering;
+        answer(&mut view, answering);
+        assert!(view.side_due().is_some());
+        // The answer finished: nothing more will change by itself, so
+        // nothing more is asked, however long the sheet stays open.
+        view.side.request(SideAction::Read);
+        answer(
+            &mut view,
+            talk(&[("Why cookies?", "For browser sessions.")]),
+        );
+        assert!(view.side.open);
+        assert_eq!(view.side_due(), None);
+        assert!(view.take_side_requests().is_empty());
+        assert!(!view.side_unsettled());
+    }
+
     #[test]
     fn sheet_keeps_main_draft_and_uses_the_regular_composer_and_layout() {
         let mut fonts = fonts();
