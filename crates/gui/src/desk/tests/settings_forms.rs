@@ -683,7 +683,16 @@ fn rules_the_daemons_config_sets_are_locked_and_an_agents_input_changes_none() {
     let (row, rule) = easy_row(&mut desk, "Allow the command `cargo test`");
     assert_eq!(rule.lock.as_deref(), Some("init.lua:7"));
     assert_eq!(rule.control, ControlView::None);
-    // Its place opens the line that sets them, on the daemon's machine.
+    // The page says whose they are, as every locked thing is said.
+    let rules = (view.sections.iter()).find(|section| section.heading == "Rules");
+    let said = rules
+        .and_then(|rules| rules.note.clone())
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("Your init.lua sets these, and it wins over what's saved here"),
+        "{said}"
+    );
+    // Its lock opens the line that sets them, on the daemon's machine.
     desk.settings_pointer(SettingsHit::Lock(row));
     assert!(!desk.settings_open());
     let asked = sent(&mut desk);
@@ -1363,7 +1372,7 @@ fn a_skill_is_switched_off_by_its_switch_and_what_is_not_loaded_says_why() {
         view.sections[1]
             .note
             .as_deref()
-            .is_some_and(|said| said.contains(":trust"))
+            .is_some_and(|said| said.contains("each says why"))
     );
     // What can be used has a switch, on, and a button for its file.
     let (_, deploy) = easy_row(&mut desk, "/deploy");
@@ -1514,7 +1523,7 @@ fn a_projects_unreviewed_server_is_listed_beside_yours_of_its_name_and_only_show
     // The project's is only shown, with its one action.
     desk.settings_pointer(SettingsHit::Control(1, Part::Segment(0)));
     let view = easy(&mut desk);
-    assert_eq!(view.title, "search, as this project has it");
+    assert_eq!(view.title, "This project's search");
     assert!(
         view.subtitle.contains("your own server called search"),
         "{}",
@@ -1565,7 +1574,7 @@ fn the_keys_and_a_search_tell_two_servers_of_one_name_apart() {
     );
     assert_eq!(easy(&mut desk).focus, Some(2));
     named(&mut desk, NamedKey::Enter);
-    assert_eq!(easy(&mut desk).title, "search, as this project has it");
+    assert_eq!(easy(&mut desk).title, "This project's search");
     named(&mut desk, NamedKey::Escape);
 
     // A search finds both, and each opens its own.
@@ -1588,7 +1597,7 @@ fn the_keys_and_a_search_tell_two_servers_of_one_name_apart() {
             })
     );
     desk.settings_pointer(SettingsHit::Control(found[1], Part::Whole));
-    assert_eq!(easy(&mut desk).title, "search, as this project has it");
+    assert_eq!(easy(&mut desk).title, "This project's search");
 
     // Enabled, the daemon lists the project's alone: its form is one to
     // change, as any other.
@@ -1610,4 +1619,683 @@ fn the_keys_and_a_search_tell_two_servers_of_one_name_apart() {
         easy_row(&mut desk, "Command").1.control,
         ControlView::Field(_)
     ));
+}
+
+/// The daemon's settings, its option `name` being `value`: set by its
+/// own init.lua, if `locked`.
+fn with_option(name: &str, value: &str, locked: bool) -> clackatoo_protocol::DaemonSettings {
+    let mut settings = daemon_said("desk");
+    for option in &mut settings.options {
+        if option.name != name {
+            continue;
+        }
+        option.value = value.into();
+        if locked {
+            option.by = clackatoo_protocol::OptionSetBy {
+                source: clackatoo_protocol::OptionSource::Config,
+                at: Some(clackatoo_protocol::OptionPlace {
+                    file: "/home/u/.config/clackatoo/daemon/init.lua".into(),
+                    line: 12,
+                }),
+                inner: None,
+            };
+        }
+    }
+    settings
+}
+
+/// What a save of `skills.disabled`, alone in `asked`, saves it as.
+fn skills_off(asked: &[Request]) -> String {
+    match asked {
+        [Request::SetDaemonOption { name, value }] if name == "skills.disabled" => {
+            value.clone().unwrap_or_default()
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_skill_keeps_its_row_and_the_keys_however_the_daemon_lists_it_next() {
+    let (mut desk, _dir) = on_page(Page::Skills);
+    let at = |name: &str| format!("/p/.agents/skills/{name}/SKILL.md");
+    // Listed in no order, they're shown by name.
+    desk.settings_skills(Response::Skills(vec![
+        skill("zeta", &at("zeta"), None),
+        skill("deploy", &at("deploy"), None),
+        skill("migrate", &at("migrate"), None),
+    ]));
+    assert_eq!(labels(&easy(&mut desk)), ["/deploy", "/migrate", "/zeta"]);
+    named(&mut desk, NamedKey::Enter);
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(skills_off(&sent(&mut desk)), "deploy");
+    // The daemon lists one switched off after the rest: it stays where
+    // it was, and so do the keys, so Enter again undoes it.
+    let off = "switched off by the skills.disabled option";
+    let listed_off = vec![
+        skill("migrate", &at("migrate"), None),
+        skill("zeta", &at("zeta"), None),
+        skill("deploy", &at("deploy"), Some(off)),
+    ];
+    desk.settings_skills(Response::Skills(listed_off.clone()));
+    let view = easy(&mut desk);
+    assert_eq!(labels(&view), ["/deploy", "/migrate", "/zeta"]);
+    assert_eq!(view.focus, Some(0));
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(skills_off(&sent(&mut desk)), "");
+    // Switched on, it's usable at once, whatever a list asked for before
+    // says: no red reason, and no move to what isn't loaded.
+    desk.settings_skills(Response::Skills(listed_off));
+    let view = easy(&mut desk);
+    assert_eq!(view.sections.len(), 1, "{view:?}");
+    let (_, deploy) = easy_row(&mut desk, "/deploy");
+    assert!(
+        matches!(&deploy.control, ControlView::Switched { on: true, .. }),
+        "{deploy:?}"
+    );
+    assert!(
+        (deploy.notes.iter()).any(|(note, _)| note.starts_with("Switched on")),
+        "{deploy:?}"
+    );
+    // The daemon says it's saved, in the page's words, and the list is
+    // asked for again: that one is believed.
+    desk.daemon_settings_came(
+        &with_option("skills.disabled", "", false),
+        Some(OptionSaved {
+            name: "skills.disabled".into(),
+            value: Some(String::new()),
+            refused: None,
+        }),
+    );
+    let view = easy(&mut desk);
+    assert!(
+        view.footer
+            .starts_with("Switched deploy on, in every project"),
+        "{}",
+        view.footer
+    );
+    assert!(!view.footer.contains("daemon."), "{}", view.footer);
+    desk.tick_settings(std::time::Instant::now());
+    let asked = sent(&mut desk);
+    assert!(matches!(&asked[..], [Request::Skills { .. }]), "{asked:?}");
+    desk.settings_skills(Response::Skills(vec![
+        skill("migrate", &at("migrate"), None),
+        skill("zeta", &at("zeta"), None),
+        skill("deploy", &at("deploy"), None),
+    ]));
+    let (_, deploy) = easy_row(&mut desk, "/deploy");
+    assert!(
+        (deploy.notes.iter()).any(|(note, _)| note.starts_with("You start it")),
+        "{deploy:?}"
+    );
+
+    // Two switches flipped before anything's drawn both count.
+    let (deploy, _) = easy_row(&mut desk, "/deploy");
+    let (zeta, _) = easy_row(&mut desk, "/zeta");
+    desk.settings_pointer(SettingsHit::Control(deploy, Part::Whole));
+    desk.settings_pointer(SettingsHit::Control(zeta, Part::Whole));
+    let asked = sent(&mut desk);
+    assert!(
+        matches!(&asked[..], [_, Request::SetDaemonOption { value, .. }]
+            if value.as_deref() == Some("deploy, zeta")),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn only_the_skill_a_switch_is_of_has_one_and_it_says_it_is_for_every_project() {
+    let (mut desk, _dir) = easy_configured("");
+    desk.daemon_settings_came(&with_option("skills.disabled", "deploy", false), None);
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    go_to(&mut desk, Page::Skills);
+    let untrusted = "not loaded: this folder isn't trusted (clackatoo trust, or :trust, trusts it)";
+    // The one switched off, and a copy in a folder that isn't trusted.
+    desk.settings_skills(Response::Skills(vec![
+        skill(
+            "deploy",
+            "/home/u/.agents/skills/deploy/SKILL.md",
+            Some("switched off by the skills.disabled option"),
+        ),
+        skill(
+            "deploy",
+            "/p/.agents/skills/deploy/SKILL.md",
+            Some(untrusted),
+        ),
+    ]));
+    let view = easy(&mut desk);
+    assert_eq!(view.sections.len(), 2, "{view:?}");
+    let switched = &view.sections[0].rows;
+    assert_eq!(switched.len(), 1);
+    assert!(
+        matches!(
+            &switched[0].control,
+            ControlView::Switched { on: false, .. }
+        ),
+        "{switched:?}"
+    );
+    assert!(
+        (switched[0].notes.iter())
+            .any(|(note, _)| note.starts_with("Switched off, in every project")),
+        "{switched:?}"
+    );
+    // The copy says its own reason, and has no switch.
+    let copy = &view.sections[1].rows[0];
+    assert!(matches!(&copy.control, ControlView::Button(_)), "{copy:?}");
+    assert!((copy.notes.iter()).any(|(note, _)| note.contains("isn't trusted")));
+    let note = view.sections[1].note.as_deref().unwrap_or_default();
+    assert!(
+        !note.contains("trust"),
+        "it's said only where it's so: {note}"
+    );
+    assert!(
+        view.note
+            .is_some_and(|(note, _)| note.contains("for every project")),
+        "{:?}",
+        view.note
+    );
+}
+
+#[test]
+fn skills_the_daemons_config_switches_off_are_locked_and_enter_opens_its_line() {
+    let (mut desk, _dir) = easy_configured("");
+    desk.daemon_settings_came(&with_option("skills.disabled", "deploy", true), None);
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    go_to(&mut desk, Page::Skills);
+    desk.settings_skills(Response::Skills(vec![
+        skill(
+            "deploy",
+            "/p/.agents/skills/deploy/SKILL.md",
+            Some("switched off by the skills.disabled option"),
+        ),
+        skill("migrate", "/p/.agents/skills/migrate/SKILL.md", None),
+    ]));
+    let view = easy(&mut desk);
+    // Every switch has the lock's chip, and the page says whose they are.
+    for row in &view.sections[0].rows {
+        assert_eq!(row.lock.as_deref(), Some("init.lua:12"), "{row:?}");
+    }
+    let said = view.sections[0].note.as_deref().unwrap_or_default();
+    assert!(
+        said.starts_with("Your init.lua sets which skills are switched off, and it wins over"),
+        "{said}"
+    );
+    // The foot names what Enter does, and `l` changes nothing.
+    named(&mut desk, NamedKey::Enter);
+    assert_eq!(easy(&mut desk).hints[0], ("Enter", "open where it's set"));
+    type_keys(&mut desk, "l");
+    assert!(sent(&mut desk).is_empty());
+    let view = easy(&mut desk);
+    assert!(
+        view.warning
+            && view
+                .footer
+                .contains("wins over what's saved here: Enter opens it"),
+        "{}",
+        view.footer
+    );
+    // Enter opens the line, as the foot says; and so does the chip.
+    let opened = |desk: &mut Desk| {
+        assert!(!desk.settings_open());
+        let asked = sent(desk);
+        assert!(
+            asked
+                .iter()
+                .any(|request| matches!(request, Request::Split {
+                terminal: PaneTerminal::File(OpenFile { path, .. }), ..
+            } if path.ends_with("daemon/init.lua"))),
+            "{asked:?}"
+        );
+    };
+    named(&mut desk, NamedKey::Enter);
+    opened(&mut desk);
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    go_to(&mut desk, Page::Skills);
+    desk.settings_skills(Response::Skills(vec![skill(
+        "migrate",
+        "/p/.agents/skills/migrate/SKILL.md",
+        None,
+    )]));
+    desk.settings_pointer(SettingsHit::Lock(0));
+    opened(&mut desk);
+}
+
+#[test]
+fn the_question_ends_typing_so_the_next_esc_is_its_answer() {
+    let (mut desk, _dir) = specialists_page(Vec::new());
+    let closes: [fn(&mut Desk); 4] = [
+        |desk| desk.settings_pointer(SettingsHit::Close),
+        |desk| desk.settings_pointer(SettingsHit::Backdrop),
+        |desk| desk.toggle_settings(),
+        |desk| go_to(desk, Page::Appearance),
+    ];
+    for close in closes {
+        desk.settings_pointer(SettingsHit::Primary);
+        // Still typing in the box as it's asked.
+        type_keys(&mut desk, "reviewer");
+        close(&mut desk);
+        let view = easy(&mut desk);
+        assert!(view.footer.starts_with("Discard"), "{}", view.footer);
+        assert_eq!(view.title, "New specialist");
+        let (_, name) = easy_row(&mut desk, "Name");
+        assert!(
+            matches!(&name.control, ControlView::Field(field)
+                if field.text == "reviewer" && field.caret.is_none()),
+            "{name:?}"
+        );
+        // One Esc, as the foot promises.
+        named(&mut desk, NamedKey::Escape);
+        assert_eq!(easy(&mut desk).title, "Specialists");
+    }
+}
+
+#[test]
+fn a_late_answer_never_replaces_or_closes_a_form_begun_since() {
+    let (mut desk, _dir) = mcp_page(vec![server("search")]);
+    // The servers to copy are asked for, and a server begun meanwhile.
+    click(&mut desk, "Copy servers from Claude Code");
+    let number = mcp_asked(&desk);
+    sent(&mut desk);
+    type_keys(&mut desk, "a");
+    type_keys(&mut desk, "docs");
+    desk.settings_mcp(
+        number,
+        Response::Mcp(McpReply {
+            imports: vec![clackatoo_protocol::McpImport {
+                name: "theirs".into(),
+                description: "a command".into(),
+            }],
+            ..McpReply::default()
+        }),
+    );
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "New server", "{view:?}");
+    let (_, name) = easy_row(&mut desk, "Name");
+    assert!(matches!(&name.control, ControlView::Field(field) if field.text == "docs"));
+    // Asked for from the list again, they're shown.
+    named(&mut desk, NamedKey::Escape);
+    named(&mut desk, NamedKey::Escape);
+    named(&mut desk, NamedKey::Escape);
+    assert_eq!(easy(&mut desk).title, "MCP Servers");
+    click(&mut desk, "Copy servers from Claude Code");
+    let number = mcp_asked(&desk);
+    desk.settings_mcp(number, Response::Mcp(McpReply::default()));
+    assert_eq!(easy(&mut desk).title, "Copy from Claude Code");
+    named(&mut desk, NamedKey::Escape);
+
+    // A specialist saved to have its file opened, and a rule begun on
+    // another page before the list says where the file is.
+    go_to(&mut desk, Page::Specialists);
+    desk.settings_specialists(Response::SpecialistFiles(Vec::new()));
+    type_keys(&mut desk, "a");
+    type_keys(&mut desk, "reviewer");
+    named(&mut desk, NamedKey::Enter);
+    named(&mut desk, NamedKey::Tab);
+    type_keys(&mut desk, "Reviews changes");
+    named(&mut desk, NamedKey::Enter);
+    click(&mut desk, "Instructions");
+    let asked = sent(&mut desk);
+    let [
+        Request::SaveSpecialistFile {
+            specialist: saved, ..
+        },
+    ] = &asked[..]
+    else {
+        panic!("{asked:?}")
+    };
+    desk.settings_specialist_saved(&saved.clone(), Response::SpecialistSaved);
+    go_to(&mut desk, Page::Permissions);
+    type_keys(&mut desk, "a");
+    named(&mut desk, NamedKey::Tab);
+    named(&mut desk, NamedKey::Tab);
+    type_keys(&mut desk, "docs/search");
+    let mut file = specialist("reviewer");
+    file.path = "/home/u/.agents/specialists/reviewer/SPECIALIST.md".into();
+    desk.settings_specialists(Response::SpecialistFiles(vec![file]));
+    assert!(desk.settings_open(), "it closed over a rule being typed");
+    assert_eq!(easy(&mut desk).title, "New rule");
+}
+
+/// A server at an address, which needs a sign in.
+fn signs_in(name: &str) -> McpServerInfo {
+    McpServerInfo {
+        settings: r#"{"url":"https://docs.example/mcp","enabled":true}"#.into(),
+        state: McpState::NeedsLogin,
+        ..server(name)
+    }
+}
+
+#[test]
+fn a_sign_in_begun_opens_in_the_browser_though_settings_closed_first() {
+    let (mut desk, _dir) = mcp_page(vec![signs_in("docs")]);
+    let (row, _) = easy_row(&mut desk, "docs");
+    desk.settings_pointer(SettingsHit::Control(row, Part::Segment(0)));
+    let number = mcp_asked(&desk);
+    let asked = sent(&mut desk);
+    assert!(
+        matches!(&asked[..], [Request::Mcp {
+            action: McpAction::Authenticate { name },
+            ..
+        }] if name == "docs"),
+        "{asked:?}"
+    );
+    // Closed before the daemon answers with the address.
+    named(&mut desk, NamedKey::Escape);
+    assert!(!desk.settings_open());
+    let url = "https://docs.example/authorize?state=1";
+    desk.settings_mcp(
+        number,
+        Response::Mcp(McpReply {
+            login_url: Some(url.into()),
+            ..McpReply::default()
+        }),
+    );
+    assert_eq!(desk.opened, [url]);
+}
+
+#[test]
+fn rules_never_look_in_force_while_new_chats_go_by_the_agents_own_settings() {
+    let one = r#"[{"decision":"allow","kind":"command","target":"cargo test"}]"#;
+    let page = |engine: &str, rules: &str| {
+        let (mut desk, dir) = easy_configured("");
+        let mut settings = with_rules(rules);
+        for option in &mut settings.options {
+            if option.name == "permissions.engine" {
+                option.value = engine.into();
+            }
+        }
+        desk.daemon_settings_came(&settings, None);
+        command(&mut desk, "Settings");
+        answer_all(&mut desk);
+        go_to(&mut desk, Page::Permissions);
+        (desk, dir, settings)
+    };
+    let under_rules = |desk: &mut Desk| {
+        let view = easy(desk);
+        let rules = (view.sections.iter()).find(|section| section.heading == "Rules");
+        rules.and_then(|rules| rules.note.clone())
+    };
+    // The agent's own settings, the default: the rules say they're kept,
+    // and who uses them; with none, that too.
+    let (mut desk, _dir, mut settings) = page("provider", one);
+    let said = under_rules(&mut desk).expect("it says so");
+    assert!(said.starts_with("Not used by new chats"), "{said}");
+    assert!(
+        said.contains("used by chats set to clackatoo's rules"),
+        "{said}"
+    );
+    let (_, who) = easy_row(&mut desk, "Who answers agents' requests");
+    assert!(
+        who.help
+            .contains("Only Claude Code and Codex chats can go by rules"),
+        "{}",
+        who.help
+    );
+    // Saved, a rule is said to be kept, not to be in force.
+    click(&mut desk, "Allow the command `cargo test`");
+    type_keys(&mut desk, "l");
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    let asked = sent(&mut desk);
+    let [Request::SetPermissionRules { rules, .. }] = &asked[..] else {
+        panic!("{asked:?}")
+    };
+    for option in &mut settings.options {
+        if option.name == "permissions.rules" {
+            option.value.clone_from(rules);
+        }
+    }
+    desk.daemon_settings_came(
+        &settings,
+        Some(OptionSaved {
+            name: "permissions.rules".into(),
+            value: Some(rules.clone()),
+            refused: None,
+        }),
+    );
+    let footer = easy(&mut desk).footer;
+    assert!(
+        footer.starts_with("Saved. The rules are kept, and used by chats set to clackatoo's rules"),
+        "{footer}"
+    );
+    let (mut desk, _dir, _) = page("provider", "[]");
+    let said = under_rules(&mut desk).expect("it says so");
+    assert!(said.starts_with("No rules yet. New chats go by"), "{said}");
+
+    // clackatoo's rules: they're in force, and nothing need be said.
+    let (mut desk, _dir, _) = page("clackatoo", one);
+    assert_eq!(under_rules(&mut desk), None);
+    let (mut desk, _dir, _) = page("clackatoo", "[]");
+    let said = under_rules(&mut desk).expect("it says there are none");
+    assert!(said.contains("is asked of you"), "{said}");
+}
+
+#[test]
+fn a_save_put_away_unanswered_holds_up_no_later_one() {
+    // A server's save, cancelled before the daemon answers.
+    let (mut desk, _dir) = mcp_page(vec![server("search")]);
+    click(&mut desk, "search");
+    click(&mut desk, "Enabled");
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    assert_eq!(sent(&mut desk).len(), 1);
+    assert_eq!(easy(&mut desk).buttons[1].label, "Saving…");
+    // The form's own save again is said to be waiting, not ignored.
+    desk.settings_pointer(SettingsHit::Foot(Foot::Save));
+    assert!(sent(&mut desk).is_empty());
+    assert!(easy(&mut desk).footer.starts_with("Still saving"));
+    desk.settings_pointer(SettingsHit::Foot(Foot::Cancel));
+    desk.settings_pointer(SettingsHit::Foot(Foot::Cancel));
+    assert_eq!(easy(&mut desk).title, "MCP Servers");
+    // A credential saved after it goes to the daemon all the same.
+    click(&mut desk, "Private credential");
+    type_keys(&mut desk, "token");
+    named(&mut desk, NamedKey::Enter);
+    type_keys(&mut desk, "secret");
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    let asked = sent(&mut desk);
+    assert!(
+        matches!(&asked[..], [Request::Mcp {
+            action: McpAction::Secret { name, .. },
+            ..
+        }] if name == "token"),
+        "{asked:?}"
+    );
+
+    // A rule's, likewise: the next is saved over the list as it'll be.
+    let (mut desk, _dir) = easy_configured("");
+    let one = r#"[{"decision":"allow","kind":"command","target":"cargo test"}]"#;
+    desk.daemon_settings_came(&with_rules(one), None);
+    command(&mut desk, "Settings");
+    answer_all(&mut desk);
+    go_to(&mut desk, Page::Permissions);
+    click(&mut desk, "Allow the command `cargo test`");
+    type_keys(&mut desk, "l");
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    let asked = sent(&mut desk);
+    let [Request::SetPermissionRules { rules: first, .. }] = &asked[..] else {
+        panic!("{asked:?}")
+    };
+    named(&mut desk, NamedKey::Escape);
+    named(&mut desk, NamedKey::Escape);
+    assert_eq!(easy(&mut desk).within, None);
+    type_keys(&mut desk, "a");
+    named(&mut desk, NamedKey::Tab);
+    named(&mut desk, NamedKey::Tab);
+    type_keys(&mut desk, "docs/search");
+    assert_eq!(easy(&mut desk).buttons[1].label, "Save");
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    let asked = sent(&mut desk);
+    let [
+        Request::SetPermissionRules {
+            rules: second,
+            expected,
+        },
+    ] = &asked[..]
+    else {
+        panic!("{asked:?}")
+    };
+    assert_eq!(expected, first);
+    assert_eq!(easy(&mut desk).buttons[1].label, "Saving…");
+    // The first's answer closes nothing; the second's closes its form.
+    let answered = |desk: &mut Desk, rules: &String| {
+        desk.daemon_settings_came(
+            &with_rules(rules),
+            Some(OptionSaved {
+                name: "permissions.rules".into(),
+                value: Some(rules.clone()),
+                refused: None,
+            }),
+        );
+    };
+    answered(&mut desk, first);
+    assert_eq!(easy(&mut desk).title, "New rule");
+    answered(&mut desk, second);
+    let view = easy(&mut desk);
+    assert_eq!(view.within, None);
+    assert!(view.footer.starts_with("Saved."), "{}", view.footer);
+
+    // And a specialist's.
+    let (mut desk, _dir) = specialists_page(vec![specialist("reviewer"), specialist("tester")]);
+    click(&mut desk, "reviewer");
+    click(&mut desk, "You can start it");
+    desk.settings_pointer(SettingsHit::Foot(Foot::Save));
+    assert_eq!(sent(&mut desk).len(), 1);
+    desk.settings_pointer(SettingsHit::Foot(Foot::Cancel));
+    desk.settings_pointer(SettingsHit::Foot(Foot::Cancel));
+    click(&mut desk, "tester");
+    click(&mut desk, "You can start it");
+    assert_eq!(easy(&mut desk).buttons[1].label, "Save");
+    desk.settings_pointer(SettingsHit::Foot(Foot::Save));
+    let asked = sent(&mut desk);
+    assert!(
+        matches!(&asked[..], [Request::SaveSpecialistFile { specialist, .. }]
+            if specialist.name == "tester"),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn finishing_a_sign_in_counts_its_servers_form_and_what_went_wrong_goes_with_its_form() {
+    let signing_in = McpServerInfo {
+        signing_in: true,
+        ..signs_in("docs")
+    };
+    let (mut desk, _dir) = mcp_page(vec![signing_in]);
+    click(&mut desk, "docs");
+    click(&mut desk, "Enabled");
+    click(&mut desk, "Finish a sign in from another machine");
+    assert_eq!(easy(&mut desk).title, "Finish signing in to docs");
+    // Nothing pasted, yet closing would lose the server's changes: it
+    // asks.
+    desk.settings_pointer(SettingsHit::Close);
+    assert!(desk.settings_open());
+    assert!(easy(&mut desk).footer.starts_with("Discard"));
+    named(&mut desk, NamedKey::Tab);
+    // Finished with nothing pasted, it says what's wanted.
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    assert!(
+        easy(&mut desk)
+            .banner
+            .is_some_and(|said| said.starts_with("Paste the address"))
+    );
+    // Back goes to the server's form, unasked, its changes kept, and
+    // what went wrong stays behind.
+    named(&mut desk, NamedKey::Escape);
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "docs");
+    assert_eq!((view.banner, view.footer.as_str()), (None, ""));
+    assert_eq!(view.buttons[0].label, "Cancel", "its changes are kept");
+    // Another page asks, and then leaves neither form open behind it.
+    click(&mut desk, "Finish a sign in from another machine");
+    go_to(&mut desk, Page::Appearance);
+    assert!(easy(&mut desk).footer.starts_with("Discard"));
+    go_to(&mut desk, Page::Appearance);
+    assert_eq!(easy(&mut desk).title, "Appearance");
+    go_to(&mut desk, Page::Mcp);
+    assert_eq!(easy(&mut desk).title, "MCP Servers");
+
+    // A credential with no name: said on its form, and gone with it.
+    click(&mut desk, "Private credential");
+    press(&mut desk, Key::Character("s".into()), None, CTRL);
+    assert!(
+        easy(&mut desk)
+            .banner
+            .is_some_and(|said| said.contains("a name"))
+    );
+    named(&mut desk, NamedKey::Escape);
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "MCP Servers");
+    assert_eq!((view.banner, view.footer.as_str()), (None, ""));
+}
+
+#[test]
+fn a_pair_of_one_name_says_which_chats_use_and_signs_in_to_that_one() {
+    let (yours, projects) = pair();
+    // Yours needs a sign in: only its row has the button.
+    let yours = McpServerInfo {
+        settings: r#"{"url":"https://docs.example/mcp","enabled":true}"#.into(),
+        state: McpState::NeedsLogin,
+        ..yours
+    };
+    let projects = McpServerInfo {
+        settings: r#"{"url":"https://other.example/mcp","enabled":true}"#.into(),
+        ..projects
+    };
+    let (mut desk, _dir) = mcp_page(vec![projects.clone(), yours.clone()]);
+    let buttons = |desk: &mut Desk, row: usize| -> Vec<String> {
+        match &easy(desk).sections[0].rows[row].control {
+            ControlView::Buttons { buttons, .. } => {
+                buttons.iter().map(|each| each.label.clone()).collect()
+            }
+            ControlView::Button(button) => vec![button.label.clone()],
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(buttons(&mut desk, 0), ["Sign in", "Open"]);
+    assert_eq!(buttons(&mut desk, 1), ["Open"]);
+    desk.settings_pointer(SettingsHit::Control(0, Part::Segment(0)));
+    sent(&mut desk);
+    assert_eq!(buttons(&mut desk, 0), ["Signing in…", "Open"]);
+    assert_eq!(buttons(&mut desk, 1), ["Open"], "not the project's too");
+
+    // Enabled, the project's takes the place of yours, and it says so.
+    desk.settings_pointer(SettingsHit::Control(1, Part::Segment(0)));
+    named(&mut desk, NamedKey::Enter);
+    let enabled = McpServerInfo {
+        trusted: true,
+        ..projects.clone()
+    };
+    let number = mcp_asked(&desk);
+    desk.settings_mcp(
+        number,
+        Response::Mcp(McpReply {
+            servers: vec![enabled],
+            ..McpReply::default()
+        }),
+    );
+    let footer = easy(&mut desk).footer;
+    assert!(
+        footer.ends_with("Chats started from now on use it in place of your own search."),
+        "{footer}"
+    );
+
+    // Yours removed, the project's still listed: it says which that is.
+    let (mut desk, _dir) = mcp_page(vec![projects.clone(), yours]);
+    desk.settings_pointer(SettingsHit::Control(0, Part::Segment(1)));
+    click(&mut desk, "Remove search");
+    click(&mut desk, "Remove search");
+    let number = mcp_asked(&desk);
+    desk.settings_mcp(
+        number,
+        Response::Mcp(McpReply {
+            servers: vec![projects],
+            ..McpReply::default()
+        }),
+    );
+    let view = easy(&mut desk);
+    assert_eq!(view.title, "MCP Servers");
+    assert_eq!(
+        view.footer,
+        "Removed your search. No chat uses this project's search until you review and enable it."
+    );
 }

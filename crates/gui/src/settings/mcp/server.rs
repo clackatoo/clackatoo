@@ -620,14 +620,10 @@ impl ServerForm {
             Field::Scopes => under("Scopes", &held.scopes),
             Field::Enabled => said("Enabled", yes_or_no(held.enabled)),
             Field::ReadOnly => said("Read-only server", yes_or_no(held.read_only)),
-            Field::Timeout => said(
-                "Give up connecting after",
-                &format!("{} seconds", held.timeout),
-            ),
-            Field::CallTimeout => said(
-                "Give up on a tool call after",
-                &format!("{} seconds", held.call_timeout),
-            ),
+            Field::Timeout => said("Give up connecting after", &seconds(&held.timeout)),
+            Field::CallTimeout => {
+                said("Give up on a tool call after", &seconds(&held.call_timeout))
+            }
         }
     }
 
@@ -652,12 +648,33 @@ impl ServerForm {
     }
 }
 
+/// `count` seconds, as a sentence says it: `1 second`, `30 seconds`.
+fn seconds(count: &str) -> String {
+    let count = count.trim();
+    if count == "1" {
+        "1 second".into()
+    } else {
+        format!("{count} seconds")
+    }
+}
+
 /// Where `server` comes from, in a word or two.
 pub(super) fn source_said(server: &McpServerInfo) -> String {
     match (server.editable, server.scope) {
         (true, McpScope::Personal) => "Personal".into(),
         (true, McpScope::Project) => "This project".into(),
         (false, _) => server.source.clone(),
+    }
+}
+
+/// Whose `server` is, as a sentence names one of two of a name: `this
+/// project's search`.
+pub(super) fn whose(server: &McpServerInfo) -> String {
+    let name = &server.name;
+    match (server.editable, server.scope) {
+        (true, McpScope::Personal) => format!("your personal {name}"),
+        (true, McpScope::Project) => format!("this project's {name}"),
+        (false, _) => format!("the {name} from {}", server.source),
     }
 }
 

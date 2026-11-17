@@ -21,6 +21,10 @@ use crate::render::Ink;
 /// The daemon's option the rules are.
 const RULES: &str = "permissions.rules";
 
+/// The daemon's option that says who answers in a new chat: the rules, or
+/// the agent's own settings.
+const ENGINE: &str = "permissions.engine";
+
 /// The decisions a rule can make, as its form lists them.
 const DECISIONS: [Decision; 3] = [Decision::Allow, Decision::Ask, Decision::Deny];
 
@@ -92,16 +96,21 @@ pub(super) struct Permissions {
     history: Vec<PermissionRecord>,
     /// The daemon has said its rules.
     ready: bool,
-    /// What in the user's own config sets the rules, which outdoes what
-    /// the menu would save.
+    /// What in the user's own config sets the rules, which wins over
+    /// what the menu would save.
     locked: Option<SetBy>,
+    /// New chats go by the agent's own settings, not by the rules: the
+    /// page says so, lest rules look in force that aren't.
+    unused: bool,
     /// The keys are an agent's, which can't change rules.
     automating: bool,
     draft: Option<Draft>,
     typing: Option<Typing>,
-    /// A save's been asked of the daemon; and the form that asked is
-    /// still the one shown.
-    saving: bool,
+    /// How many saves have been asked of the daemon and not answered,
+    /// which it answers in the order they were asked; and whether the
+    /// form that asked for the last is still the one shown. Those before
+    /// it were asked from forms since put away.
+    saving: usize,
     from_form: bool,
     /// Where the rule being saved goes in the list.
     landing: usize,
@@ -241,6 +250,8 @@ impl Permissions {
         let info = super::find(RULES).expect("an option");
         self.ready = facts.daemon.is_some_and(|daemon| daemon.knows(info));
         self.locked = facts.locked(info);
+        self.unused = super::find(ENGINE)
+            .is_ok_and(|engine| facts.configured_value(engine) == Value::Choice("provider"));
         self.automating = facts.automating;
         if let Value::Text(text) = facts.get(info) {
             match read_rules(&text) {
@@ -316,7 +327,7 @@ impl Permissions {
     /// A save asked for will never be answered, and `why`: the connection
     /// was lost, or there was none to ask on.
     pub(super) fn lost(&mut self, why: &str) {
-        if std::mem::take(&mut self.saving) {
+        if std::mem::take(&mut self.saving) > 0 {
             self.notice = Some(Notice::Failed(why.to_owned()));
         }
     }
@@ -325,22 +336,72 @@ impl Permissions {
     /// wouldn't, if it wouldn't. Returns the row the keys go to, if the
     /// form closed.
     pub(super) fn saved(&mut self, refused: Option<&str>) -> Option<usize> {
-        if !std::mem::take(&mut self.saving) {
+        if self.saving == 0 {
             return None;
         }
+        self.saving -= 1;
+        // One asked from a form since put away, with another still to be
+        // answered: only its going wrong is worth saying.
+        let last = self.saving == 0;
         if let Some(why) = refused {
             self.notice = Some(Notice::Failed(why.to_owned()));
             return None;
         }
-        self.notice = Some(Notice::Done(
-            "Saved. What agents ask from now on goes by the rules as they are now.".into(),
-        ));
+        if !last {
+            return None;
+        }
+        self.notice = Some(Notice::Done(self.saved_said().into()));
         if !self.from_form {
             return None;
         }
         self.draft.take()?;
         self.typing = None;
         Some(self.landing)
+    }
+
+    /// What's said once the rules are saved: who goes by them from now
+    /// on, which isn't new chats while those go by the agent's own
+    /// settings.
+    fn saved_said(&self) -> &'static str {
+        if self.unused {
+            "Saved. The rules are kept, and used by chats set to clackatoo's rules: new chats \
+             go by the agent's own settings."
+        } else {
+            "Saved. What agents ask from now on goes by the rules as they are now."
+        }
+    }
+
+    /// What's said under the Rules heading, if anything is: that they're
+    /// set elsewhere, that new chats don't go by them, or that there are
+    /// none.
+    fn rules_said(&self) -> Option<String> {
+        let locked = self.locked.as_ref().map(|by| {
+            format!(
+                "{} sets these, and it wins over what's saved here: Enter on a rule, or a \
+                 click on its lock, opens it there.",
+                super::your_file(by)
+            )
+        });
+        let unused = match (self.unused, self.rules.is_empty()) {
+            (true, true) => Some(
+                "No rules yet. New chats go by the agent's own settings: rules are kept, and \
+                 used by chats set to clackatoo's rules.",
+            ),
+            (true, false) => Some(
+                "Not used by new chats, which go by the agent's own settings. The rules are \
+                 kept, and used by chats set to clackatoo's rules.",
+            ),
+            (false, true) => Some(
+                "No rules yet: whatever an agent asks, in a chat set to clackatoo's rules, is \
+                 asked of you.",
+            ),
+            (false, false) => None,
+        };
+        match (locked, unused) {
+            (Some(locked), Some(unused)) => Some(format!("{locked} {unused}")),
+            (Some(locked), None) => Some(locked),
+            (None, unused) => unused.map(str::to_owned),
+        }
     }
 
     /// The sections shown, each its heading, a sentence under it, and its
@@ -356,22 +417,10 @@ impl Permissions {
         if !self.ready || self.unreadable.is_some() {
             return Vec::new();
         }
-        let said = match (&self.locked, self.rules.is_empty()) {
-            (Some(_), _) => Some(
-                "The daemon's own config sets these, so they're changed there: a rule's place \
-                 opens it."
-                    .to_owned(),
-            ),
-            (None, true) => Some(
-                "No rules yet: whatever an agent asks is asked of you. New rule adds one."
-                    .to_owned(),
-            ),
-            (None, false) => None,
-        };
         vec![
             (
                 "Rules",
-                said,
+                self.rules_said(),
                 (0..self.rules.len()).map(Row::Rule).collect(),
             ),
             (
@@ -395,7 +444,7 @@ impl Permissions {
             return Did::Nothing;
         };
         if let Some(why) = self.refusal() {
-            self.notice = Some(Notice::Failed(why.to_owned()));
+            self.notice = Some(Notice::Failed(why));
             return Did::Changed;
         }
         self.draft = Some(Draft::new(Some(rule)));
@@ -413,14 +462,16 @@ impl Permissions {
     }
 
     /// Why the rules can't be changed from here now, if they can't.
-    fn refusal(&self) -> Option<&'static str> {
+    fn refusal(&self) -> Option<String> {
         if self.automating {
-            Some("An agent's input can't change permission rules: they're yours.")
-        } else if self.locked.is_some() {
-            Some("The daemon's own config sets the rules: change them there.")
-        } else {
-            None
+            return Some("An agent's input can't change permission rules: they're yours.".into());
         }
+        self.locked.as_ref().map(|by| {
+            format!(
+                "{} sets the rules, and it wins over what's saved here.",
+                super::your_file(by)
+            )
+        })
     }
 
     /// A row of the list, as it's drawn.
@@ -575,11 +626,14 @@ impl Permissions {
     /// Saves the list with the form's rule in it, or with `delete`,
     /// without the rule the form is of.
     fn commit(&mut self, delete: bool) -> Did {
-        if self.saving {
+        // The form's own save is on its way: its button says so, and
+        // nothing in it changes meanwhile. One asked from a form since
+        // put away holds nothing up, as the list already counts on it.
+        if self.saving > 0 && self.from_form {
             return Did::Nothing;
         }
         if let Some(why) = self.refusal() {
-            self.notice = Some(Notice::Failed(why.to_owned()));
+            self.notice = Some(Notice::Failed(why));
             return Did::Changed;
         }
         // A list that can't be read now, though it could when the form
@@ -642,7 +696,7 @@ impl Permissions {
             self.notice = Some(Notice::Failed(why));
             return Did::Changed;
         }
-        self.saving = true;
+        self.saving += 1;
         self.from_form = true;
         self.notice = Some(Notice::Working("Saving the rules…".into()));
         let value = Value::Text(text);
@@ -754,8 +808,14 @@ impl Catalogue for Permissions {
             },
             subtitle: "A rule answers for you when what an agent asks matches it.".into(),
             changed: draft.held != draft.opened,
-            save: if self.saving { "Saving…" } else { "Save" }.into(),
-            saving: self.saving && self.from_form,
+            beneath: false,
+            save: if self.saving > 0 && self.from_form {
+                "Saving…"
+            } else {
+                "Save"
+            }
+            .into(),
+            saving: self.saving > 0 && self.from_form,
         })
     }
 
@@ -816,7 +876,7 @@ impl Catalogue for Permissions {
             return Did::Nothing;
         }
         if let Some(why) = self.refusal() {
-            self.notice = Some(Notice::Failed(why.to_owned()));
+            self.notice = Some(Notice::Failed(why));
             return Did::Changed;
         }
         self.draft = Some(Draft::new(None));

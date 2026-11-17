@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{McpAction, McpImport, McpReply, McpServerInfo, McpState};
+use clackatoo_protocol::{McpAction, McpImport, McpReply, McpScope, McpServerInfo, McpState};
 
 use self::server::{Field, ServerForm};
 use super::form::{self, Catalogue, Did, FormView, Listing, MOST_TEXT, Notice, Text, Typing};
@@ -315,14 +315,19 @@ impl Mcp {
     }
 
     /// Asks the daemon for `action`, saying `working` meanwhile. The same
-    /// thing isn't asked twice at once, nor a second save while one
-    /// waits: the foot says it's still waiting.
+    /// thing isn't asked twice at once, nor a second save from a form
+    /// whose first still waits: the foot says what it's waiting for. A
+    /// save asked from a form since put away holds no other up.
     fn ask(&mut self, action: McpAction, working: &str) -> Did {
-        let waiting = self.asking(|asked| *asked == action || saves(asked) && saves(&action));
-        if waiting {
-            self.notice = Some(Notice::Working(
-                "Still waiting for the daemon to answer the last one…".into(),
-            ));
+        let same = self.asking(|asked| *asked == action);
+        let saving = (self.asked.iter())
+            .any(|asked| asked.from_form && saves(&asked.action) && saves(&action));
+        if same || saving {
+            self.notice = Some(Notice::Working(if saving {
+                "Still saving: the daemon hasn't answered yet…".into()
+            } else {
+                "Still waiting for the daemon to answer that…".into()
+            }));
             return Did::Changed;
         }
         if let McpAction::Authenticate { name } = &action {
@@ -433,16 +438,14 @@ impl Mcp {
         let mut went = None;
         match action {
             McpAction::List => {}
-            McpAction::Save { name, .. } => {
+            McpAction::Save { name, scope, .. } => {
                 self.listed(reply.servers);
-                self.notice = Some(Notice::Done(format!(
-                    "Saved {name}. Chats started from now on use it as it is now."
-                )));
+                self.notice = Some(Notice::Done(self.saved_said(&name, scope)));
                 went = self.back_to_list(from_form, Some(&name));
             }
             McpAction::Remove { name, .. } => {
                 self.listed(reply.servers);
-                self.notice = Some(Notice::Done(format!("Removed {name}.")));
+                self.notice = Some(Notice::Done(self.removed_said(&name)));
                 went = self.back_to_list(from_form, None);
             }
             McpAction::Secret { name, value } => {
@@ -456,7 +459,11 @@ impl Mcp {
             }
             McpAction::Import { provider, names } if names.is_empty() => {
                 self.notice = None;
-                if let Some(provider) = Provider::named(&provider) {
+                // Over the list it was asked from, and never over a form
+                // begun since.
+                if matches!(self.view, View::List)
+                    && let Some(provider) = Provider::named(&provider)
+                {
                     self.view = View::Import {
                         provider,
                         picked: vec![false; reply.imports.len()],
@@ -485,10 +492,18 @@ impl Mcp {
                 )));
             }
             McpAction::Trust { name, .. } => {
+                // It may take the place of the user's own of its name.
+                let replaces =
+                    (self.servers.iter()).any(|server| server.name == name && self.waiting(server));
                 self.listed(reply.servers);
-                self.notice = Some(Notice::Done(format!(
-                    "{name} is enabled on this machine, as it is now."
-                )));
+                self.notice = Some(Notice::Done(if replaces {
+                    format!(
+                        "{name} is enabled on this machine, as it is now. Chats started from \
+                         now on use it in place of your own {name}."
+                    )
+                } else {
+                    format!("{name} is enabled on this machine, as it is now.")
+                }));
             }
             McpAction::ForgetAuth { name } => {
                 self.listed(reply.servers);
@@ -521,6 +536,39 @@ impl Mcp {
             }
         }
         (None, went)
+    }
+
+    /// What's said once the user's server called `name` is saved, in
+    /// `scope`: that chats use it, or another of its name that's enabled
+    /// in its place.
+    fn saved_said(&self, name: &str, scope: McpScope) -> String {
+        let other = (self.server(name))
+            .filter(|used| used.scope != scope)
+            .map(server::whose);
+        match other {
+            Some(other) => format!(
+                "Saved your {name}. Chats use {other} instead, which is enabled in its place."
+            ),
+            None => format!("Saved {name}. Chats started from now on use it as it is now."),
+        }
+    }
+
+    /// What's said once the user's server called `name` is removed: with
+    /// another of its name still listed, which that is, and whether
+    /// chats use it.
+    fn removed_said(&self, name: &str) -> String {
+        let other = (self.servers.iter())
+            .find(|server| server.name == name)
+            .map(|server| (server::whose(server), server.trusted));
+        match other {
+            Some((other, true)) => {
+                format!("Removed your {name}. Chats started from now on use {other}.")
+            }
+            Some((other, false)) => {
+                format!("Removed your {name}. No chat uses {other} until you review and enable it.")
+            }
+            None => format!("Removed {name}."),
+        }
     }
 
     /// Takes in `servers` as an answer has them, which may be all there
@@ -673,6 +721,11 @@ impl Mcp {
     /// What server `server`'s Sign in button says, and whether it acts:
     /// none unless it needs a sign in, or one from here is going or done.
     fn sign_in_button(&self, server: &McpServerInfo) -> Option<ButtonView> {
+        // A sign in is to the server chats use: one waiting to take its
+        // place has none until it's enabled.
+        if self.waiting(server) {
+            return None;
+        }
         let asked = self.asking(
             |action| matches!(action, McpAction::Authenticate { name } if *name == server.name),
         );
@@ -692,7 +745,7 @@ impl Mcp {
     /// Why signing in to `server` from here failed, if it did and it
     /// still needs a sign in.
     fn sign_in_failed(&self, server: &McpServerInfo) -> Option<String> {
-        if server.signing_in || server.state != McpState::NeedsLogin {
+        if self.waiting(server) || server.signing_in || server.state != McpState::NeedsLogin {
             return None;
         }
         match self.sign_ins.get(&server.name)? {
@@ -1206,13 +1259,16 @@ impl Catalogue for Mcp {
         Some(match &self.view {
             View::List => return None,
             View::Server(form) if form.shown_only => FormView {
-                title: format!("{}, as this project has it", form.name()),
+                // What tells it from the user's own comes first, where a
+                // narrow window still shows it.
+                title: format!("This project's {}", form.name()),
                 subtitle: format!(
                     "Chats use your own server called {} until you review and enable this one, \
                      which then takes its place. It's shown here as the project has it.",
                     form.name()
                 ),
                 changed: false,
+                beneath: false,
                 // Nothing of it is changed here, so there's nothing to save.
                 save: String::new(),
                 saving: false,
@@ -1231,6 +1287,7 @@ impl Catalogue for Mcp {
                         .into(),
                 },
                 changed: form.changed(),
+                beneath: false,
                 save: save("Save", "Saving…"),
                 saving,
             },
@@ -1238,6 +1295,7 @@ impl Catalogue for Mcp {
                 title: "Private credential".into(),
                 subtitle: format!("Kept {}, where only you can read it.", self.kept_where()),
                 changed: !name.is_empty() || !value.is_empty(),
+                beneath: false,
                 save: save("Save", "Saving…"),
                 saving,
             },
@@ -1247,6 +1305,8 @@ impl Catalogue for Mcp {
                            get back to."
                     .into(),
                 changed: !url.is_empty(),
+                // Its server's form is under it, and may have changes.
+                beneath: form.changed(),
                 save: save("Finish", "Finishing…"),
                 saving,
             },
@@ -1259,6 +1319,7 @@ impl Catalogue for Mcp {
                            copied."
                     .into(),
                 changed: picked.contains(&true),
+                beneath: false,
                 save: save("Copy", "Copying…"),
                 saving,
             },

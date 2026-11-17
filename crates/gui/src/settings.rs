@@ -671,6 +671,20 @@ pub(crate) struct SettingsMenu {
     skills: Vec<clackatoo_protocol::Skill>,
     /// The skills the daemon's `skills.disabled` switches off, by name.
     skills_off: Vec<String>,
+    /// What in the user's own config sets `skills.disabled`, if something
+    /// does: the switches are locked then.
+    skills_lock: Option<SetBy>,
+    /// The skills switched on here that the list shown may still say are
+    /// off: they're shown as on until a list that knows comes.
+    skills_on: Vec<String>,
+    /// The daemon has said its settings since a skill was last switched,
+    /// so a list asked for now knows of it; and the list being read was
+    /// asked for when that was so.
+    skills_settled: bool,
+    skills_fresh: bool,
+    /// The skill switched last, and whether on, for the foot to say once
+    /// it's saved.
+    skill_switching: Option<(String, bool)>,
     skills_listing: form::Listing,
     skills_feed: form::Feed,
     specialists: specialists::Specialists,
@@ -731,6 +745,11 @@ impl SettingsMenu {
             agents: Vec::new(),
             skills: Vec::new(),
             skills_off: Vec::new(),
+            skills_lock: None,
+            skills_on: Vec::new(),
+            skills_settled: true,
+            skills_fresh: true,
+            skill_switching: None,
             skills_listing: form::Listing::Reading,
             skills_feed: form::Feed::due_now(),
             specialists: specialists::Specialists::new(),
@@ -1279,7 +1298,7 @@ impl SettingsMenu {
             (sets.iter()).find_map(|set| Some((set.info, facts.locked(set.info)?)))
         {
             let said = format!(
-                "{} sets {}, which outdoes what the menu saves: Enter opens it",
+                "{} sets {}, which wins over what's saved here: Enter opens it",
                 facts.place(info, &by),
                 info.name
             );
@@ -1505,7 +1524,7 @@ impl SettingsMenu {
         }
         if let Some(by) = facts.keys_locked(&bound.modes, &keys) {
             let said = format!(
-                "{} binds {}, which outdoes what the menu saves",
+                "{} binds {}, which wins over what's saved here",
                 by.place(facts.dir).unwrap_or_else(|| "your config".into()),
                 display(&keys)
             );
@@ -1682,7 +1701,10 @@ impl SettingsMenu {
         match read {
             Read::Agents => self.agents_feed.asked(),
             Read::Settings => self.settings_feed.asked(),
-            Read::Skills => self.skills_feed.asked(),
+            Read::Skills => {
+                self.skills_fresh = self.skills_settled;
+                self.skills_feed.asked();
+            }
             Read::Specialists => self.specialists.reading(),
             // Its answer is known by a number: see `mcp_reading`.
             Read::McpServers => {}
@@ -1693,8 +1715,12 @@ impl SettingsMenu {
     /// page says so.
     pub(crate) fn unavailable(&mut self, read: Read, why: String) {
         match read {
-            Read::Agents => self.agents_feed.came(None),
-            Read::Settings => self.settings_feed.came(None),
+            Read::Agents => {
+                self.agents_feed.came(None);
+            }
+            Read::Settings => {
+                self.settings_feed.came(None);
+            }
             Read::Skills => self.skills_came(Err(why)),
             Read::Specialists => self.specialists.unavailable(why),
             Read::McpServers => self.mcp.unavailable(why),
@@ -1706,9 +1732,11 @@ impl SettingsMenu {
     pub(crate) fn settings_came(&mut self) {
         let shown = self.catalogue_shown() == Some(Catalogued::Rules);
         self.settings_feed.came(shown.then_some(DECISIONS_EVERY));
-        // A skill switched off or on is listed with what came of it.
+        // A skill switched off or on is listed with what came of it: by
+        // a list asked for now, not one asked for before it was.
+        self.skills_settled = true;
         if self.mode == Mode::Easy && self.easy.page() == crate::options::easy::Page::Skills {
-            self.skills_feed.read_now();
+            self.skills_feed.read_afresh();
         }
     }
 
@@ -1743,6 +1771,7 @@ impl SettingsMenu {
         self.agents_feed.lost();
         self.settings_feed.lost();
         self.skills_feed.lost();
+        self.skills_on.clear();
         self.mcp.lost(why);
         self.specialists.lost(why);
         self.permissions.lost(why);
@@ -2437,7 +2466,7 @@ fn option_detail(info: &Info, facts: &Facts) -> Vec<Said> {
     said.push(Vec::new());
     if let Some(by) = facts.locked(info) {
         let locked = format!(
-            "Locked: {}, which outdoes what the menu saves",
+            "Locked: {}, which wins over what's saved here",
             by.said(facts.dir_of(info))
         );
         said.push(vec![(locked, Ink::Caution)]);
@@ -2486,7 +2515,7 @@ fn keys_detail(bound: &Bound, facts: &Facts) -> Vec<Said> {
     ];
     if by.config_loading() {
         let locked = format!(
-            "Locked: {}, which outdoes what the menu saves",
+            "Locked: {}, which wins over what's saved here",
             facts.said(&by)
         );
         said.push(vec![(locked, Ink::Caution)]);
@@ -2635,6 +2664,18 @@ fn takes(info: &Info) -> String {
         Kind::Choice(words) => words.join(", "),
         Kind::Text if info.name == "font" => "a font family, as fc-list lists them".into(),
         Kind::Text => "text".into(),
+    }
+}
+
+/// The file of the user's own config that `by` set it in, as a sentence
+/// starts with it: `Your init.lua`.
+fn your_file(by: &SetBy) -> String {
+    let file = (by.at.as_ref())
+        .and_then(|at| Path::new(&*at.file).file_name())
+        .map(|name| name.to_string_lossy().into_owned());
+    match file {
+        Some(file) => format!("Your {file}"),
+        None => "Your config".into(),
     }
 }
 
