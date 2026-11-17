@@ -332,6 +332,13 @@ pub(crate) enum Pane {
         /// pass this over, and give it the default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagents: Option<u8>,
+        /// Who answers its agent's approval requests: `provider`, the
+        /// agent's own permissions, or `clackatoo`, the user's rules
+        /// (CLACKA-253). Builds before then pass this over, and give it
+        /// the default for new chats, as does this one for a value it
+        /// doesn't know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<String>,
     },
     /// An editor, editing a file, or a buffer with no file yet, by an
     /// empty path.
@@ -939,6 +946,7 @@ mod tests {
                                         started: None,
                                         branches: None,
                                         subagents: None,
+                                        permissions: None,
                                     }),
                                     Layout::Pane(Pane::Review {
                                         chat: Some(7),
@@ -1104,6 +1112,7 @@ mod tests {
             started: Some(started),
             branches: None,
             subagents: None,
+            permissions: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);
@@ -1129,6 +1138,7 @@ mod tests {
             }),
             branches: None,
             subagents: None,
+            permissions: None,
         });
         let text = String::from_utf8(state.encode()).unwrap();
         for absent in ["parent", "turn", "specialist", "limits", "kept", "mode"] {
@@ -1154,6 +1164,7 @@ mod tests {
             started: None,
             branches: None,
             subagents,
+            permissions: None,
         };
         for subagents in [Some(0), Some(4)] {
             state.workspaces[1].tabs[0].layout = Layout::Pane(chat(subagents));
@@ -1219,6 +1230,7 @@ mod tests {
             started: None,
             branches: Some(Box::new(branches.clone())),
             subagents: None,
+            permissions: None,
         });
         let encoded = state.encode();
         let text = String::from_utf8_lossy(&encoded);

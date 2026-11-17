@@ -481,6 +481,7 @@ fn reopened(pane: saved::Pane, standing: bool) -> saved::Pane {
             started,
             branches,
             subagents,
+            permissions,
         } => saved::Pane::Chat {
             id,
             agent,
@@ -494,6 +495,7 @@ fn reopened(pane: saved::Pane, standing: bool) -> saved::Pane {
             started: started.filter(|_| standing),
             branches,
             subagents,
+            permissions,
         },
         other => other,
     }

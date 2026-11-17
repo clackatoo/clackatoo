@@ -33,6 +33,26 @@ impl HostedChat {
         }
     }
 
+    /// Who answers its approval requests, as the saved workspaces keep
+    /// it, once that's been chosen for it: each chat is given the default
+    /// as it's made, and keeps what it has from then on.
+    pub(crate) fn permission_engine_chosen(&self) -> Option<&'static str> {
+        (self.chosen.iter().any(|(id, _)| id == SETTING)).then(|| self.permission_engine().value())
+    }
+
+    /// Takes who answered its approval requests before a restart, as
+    /// the saved workspaces kept it in `value`. One this build doesn't
+    /// know is passed over, and the chat is given the default.
+    pub(crate) fn restore_permission_engine(&mut self, value: &str) {
+        let known = [Engine::Provider, Engine::Clackatoo]
+            .into_iter()
+            .find(|engine| engine.value() == value);
+        if let Some(engine) = known {
+            self.chosen.retain(|(id, _)| id != SETTING);
+            self.chosen.push((SETTING.into(), engine.value().into()));
+        }
+    }
+
     pub(crate) fn default_permission_engine(&mut self, engine: Engine) {
         if !self.chosen.iter().any(|(id, _)| id == SETTING) {
             let engine = if self.permission_mode().is_some() {
