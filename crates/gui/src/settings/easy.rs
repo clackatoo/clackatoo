@@ -234,7 +234,8 @@ impl SettingsMenu {
 
     /// Whether the page shows a form with changes that aren't saved.
     pub(super) fn form_changed(&self) -> bool {
-        self.form_shown().is_some_and(|form| form.changed)
+        self.form_shown()
+            .is_some_and(|form| form.changed || form.beneath)
     }
 
     /// Whether the page shown is a form, rather than a list or settings.
@@ -366,7 +367,9 @@ impl SettingsMenu {
     /// Puts the form shown away, unsaved, for its list: one with changes
     /// asks first, and goes if it's asked again.
     fn cancel_form(&mut self) -> Outcome {
-        if self.may_leave()
+        // Only what this form holds goes: one it was opened from stays.
+        let changed = self.form_shown().is_some_and(|form| form.changed);
+        if self.may_discard(changed)
             && let Some((catalogue, _)) = self.catalogue_mut()
             && catalogue.form().is_some()
         {
@@ -381,19 +384,31 @@ impl SettingsMenu {
     /// first time it's not, and the foot asks; asked again straight
     /// after, it is.
     pub(super) fn may_leave(&mut self) -> bool {
-        if self.form_changed() && !self.confirming {
-            self.discarding = true;
-            return false;
-        }
-        true
+        let changed = self.form_changed();
+        self.may_discard(changed)
     }
 
-    /// Puts away the form shown, if one is, as the page is left: the
-    /// user has agreed to, if it had changes.
+    /// Whether what a form holds may go, `changed` being whether it holds
+    /// anything that isn't saved: asked once, the foot asks, and typing
+    /// ends, so the next Esc is the answer and not the end of typing.
+    fn may_discard(&mut self, changed: bool) -> bool {
+        if !changed || self.confirming {
+            return true;
+        }
+        self.discarding = true;
+        if let Some((catalogue, _)) = self.catalogue_mut() {
+            form::finish(catalogue);
+        }
+        false
+    }
+
+    /// Puts away the form shown, if one is, and any it was opened from,
+    /// as the page is left: the user has agreed to, if it had changes.
     fn leave_form(&mut self) {
-        if let Some((catalogue, _)) = self.catalogue_mut()
-            && catalogue.form().is_some()
-        {
+        let Some((catalogue, _)) = self.catalogue_mut() else {
+            return;
+        };
+        while catalogue.form().is_some() {
             catalogue.cancel();
         }
     }
@@ -426,15 +441,40 @@ impl SettingsMenu {
         }
     }
 
-    /// The daemon listed the shared skills, or said why it can't.
+    /// The daemon listed the shared skills, or said why it can't. They're
+    /// kept by name, and the keys stay on the skill they're on, wherever
+    /// that is now, so Enter never switches another.
     pub(crate) fn skills_came(&mut self, result: Result<Vec<clackatoo_protocol::Skill>, String>) {
-        self.skills_feed.came(None);
-        match result {
-            Ok(skills) => {
-                self.skills = skills;
-                self.skills_listing = Listing::Ready;
+        // One asked for before a switch's change was taken in may not
+        // have it: what was switched on stays so until one that does.
+        let fresh = self.skills_feed.came(None) && self.skills_fresh;
+        let mut skills = match result {
+            Ok(skills) => skills,
+            Err(why) => {
+                self.skills_listing = Listing::Unavailable(why);
+                return;
             }
-            Err(why) => self.skills_listing = Listing::Unavailable(why),
+        };
+        if fresh {
+            self.skills_on.clear();
+        }
+        let on = match self.easy_focused() {
+            Some(Shown::Skill(at)) => self.skills.get(at).cloned(),
+            _ => None,
+        };
+        // Those of one name stay in the daemon's order: the one offered,
+        // or switched off, before any that couldn't be loaded.
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        self.skills = skills;
+        self.skills_listing = Listing::Ready;
+        let now = on.and_then(|on| {
+            (self.skills.iter()).position(|skill| skill.name == on.name && skill.path == on.path)
+        });
+        if let Some(now) = now
+            && let Some(row) = (self.easy_rows().iter())
+                .position(|shown| matches!(shown, Shown::Skill(at) if *at == now))
+        {
+            self.easy.focus = row;
         }
     }
 
@@ -450,27 +490,48 @@ impl SettingsMenu {
             })
     }
 
+    /// Whether the skill at `at` is one there is to use, or would be but
+    /// for its switch: it's offered; or it's the one of its name the
+    /// daemon lists first, which is the one a switch is of, and that name
+    /// is switched off, or was until just now.
+    fn skill_usable(&self, at: usize) -> bool {
+        let Some(skill) = self.skills.get(at) else {
+            return false;
+        };
+        if skill.problem.is_none() {
+            return true;
+        }
+        let first = (at.checked_sub(1))
+            .and_then(|before| self.skills.get(before))
+            .is_none_or(|before| before.name != skill.name);
+        first && (self.skills_off.contains(&skill.name) || self.skills_on.contains(&skill.name))
+    }
+
     /// The Skills page's rows: the skills there are to use, each with a
     /// switch, then what was found but can't be used, with why.
     fn skill_sections(&self) -> Vec<Section> {
-        let off = |skill: &clackatoo_protocol::Skill| self.skills_off.contains(&skill.name);
-        let usable = |skill: &clackatoo_protocol::Skill| skill.problem.is_none() || off(skill);
         let rows = |wanted: bool| -> Vec<Shown> {
-            (self.skills.iter().enumerate())
-                .filter(|(_, skill)| usable(skill) == wanted)
-                .map(|(at, _)| Shown::Skill(at))
+            (0..self.skills.len())
+                .filter(|&at| self.skill_usable(at) == wanted)
+                .map(Shown::Skill)
                 .collect()
         };
         let unused = rows(false);
-        let mut sections = vec![Section::new("", rows(true))];
+        let mut sections = vec![Section {
+            heading: String::new(),
+            note: self.skills_lock.as_ref().map(|by| {
+                format!(
+                    "{} sets which skills are switched off, and it wins over what's saved \
+                     here: Enter on a skill, or a click on its lock, opens it there.",
+                    super::your_file(by)
+                )
+            }),
+            rows: rows(true),
+        }];
         if !unused.is_empty() {
             sections.push(Section {
                 heading: "Not loaded".into(),
-                note: Some(
-                    "Found, but not offered to agents, each with why. A project's skills, \
-                     skillsets and specialists load once you trust its folder, with :trust."
-                        .into(),
-                ),
+                note: Some("Found, but not offered to agents: each says why.".into()),
                 rows: unused,
             });
         }
@@ -486,17 +547,26 @@ impl SettingsMenu {
         if !facts.daemon.is_some_and(|daemon| daemon.knows(info)) {
             return None;
         }
-        let off = self.skills_off.contains(&skill.name);
-        (skill.problem.is_none() || off).then_some(!off)
+        (self.skill_usable(at)).then(|| !self.skills_off.contains(&skill.name))
+    }
+
+    /// What in the user's own config sets which skills are switched off,
+    /// if something does: the switches are its to turn, not the menu's.
+    fn skills_locked(facts: &Facts) -> Option<(&'static Info, crate::options::SetBy)> {
+        let info = find(SKILLS_OFF).ok()?;
+        Some((info, facts.locked(info)?))
     }
 
     /// Enter on the skill at `at`, or a click on its switch: its switch
-    /// goes over, if it has one; else its file opens.
+    /// goes over, if it has one, or where it's locked opens; else its
+    /// file opens.
     fn skill_pressed(&mut self, at: usize, facts: &Facts, history: &mut History) -> Outcome {
-        if self.skill_switch(at, facts).is_some() {
-            self.skill_switched(at, facts, history)
-        } else {
-            self.open_skill(at)
+        if self.skill_switch(at, facts).is_none() {
+            return self.open_skill(at);
+        }
+        match Self::skills_locked(facts) {
+            Some((info, by)) => self.open_set_by(Some(info), by, facts),
+            None => self.skill_switched(at, facts, history),
         }
     }
 
@@ -510,27 +580,68 @@ impl SettingsMenu {
         let Ok(info) = find(SKILLS_OFF) else {
             return Outcome::Nothing;
         };
+        // As the list is now, with what was switched a moment ago.
+        self.follow_skills_off(facts);
         let mut off = self.skills_off.clone();
-        match off.iter().position(|each| *each == name) {
-            Some(listed) => {
-                off.remove(listed);
-            }
-            None => off.push(name),
+        // Off, it's switched on, by taking its name out.
+        let on = off.contains(&name);
+        if on {
+            off.retain(|each| *each != name);
+        } else {
+            off.push(name.clone());
         }
         let value = Value::Text(off.join(", "));
-        self.change(info, value.clone(), Some(value), facts, history)
+        let outcome = self.change(info, value.clone(), Some(value), facts, history);
+        if matches!(outcome, Outcome::Set(_)) {
+            // The list shown, and any being read, are from before this.
+            self.skills_off = off;
+            self.skills_settled = false;
+            self.skills_fresh = false;
+            self.skills_on.retain(|each| *each != name);
+            if on {
+                self.skills_on.push(name.clone());
+            }
+            self.skill_switching = Some((name, on));
+        }
+        outcome
     }
 
-    /// Takes in which skills the daemon's option says are switched off.
+    /// Takes in which skills the daemon's option says are switched off,
+    /// split as the daemon splits it, and what in the user's own config
+    /// sets it, if something does.
     fn follow_skills_off(&mut self, facts: &Facts) {
+        self.skills_lock = Self::skills_locked(facts).map(|(_, by)| by);
         self.skills_off = match find(SKILLS_OFF).map(|info| facts.configured_value(info)) {
             Ok(Value::Text(names)) => names
-                .split([',', ' '])
+                .split(|ch: char| ch == ',' || ch.is_whitespace())
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
                 .collect(),
             _ => Vec::new(),
         };
+    }
+
+    /// The daemon answered a change to one of its options this window
+    /// asked for. Returns whether the page it's of says how it went in
+    /// its own words, so nothing else need: the rules' page, or a skill's
+    /// switch.
+    pub(crate) fn option_saved(&mut self, saved: &clackatoo_protocol::OptionSaved) -> bool {
+        self.permission_saved(saved);
+        if saved.refused.is_some() {
+            return false;
+        }
+        if saved.name == SKILLS_OFF
+            && let Some((name, on)) = self.skill_switching.take()
+        {
+            let said = if on {
+                format!("Switched {name} on, in every project. Chats are offered it again.")
+            } else {
+                format!("Switched {name} off, in every project. No chat is offered it.")
+            };
+            self.saved(&said, false);
+            return true;
+        }
+        saved.name == "permissions.rules"
     }
 
     /// Goes to the page of `catalogue` and opens the thing at `at` in its
@@ -856,6 +967,8 @@ impl SettingsMenu {
             Some(Shown::Advanced(index)) => self.go_to_advanced(index),
             Some(Shown::Entry(entry)) => self.activate(entry, None, facts, history),
             Some(Shown::Skill(at)) => self.skill_pressed(at, facts, history),
+            // A rule the user's own config sets opens there.
+            Some(Shown::Row(at)) if self.on_locked_rule(at) => self.open_rules_lock(facts),
             Some(Shown::Row(at)) => self.catalogue_press(at, None),
             Some(Shown::Found(catalogue, at)) => self.open_found(catalogue, at),
             None => Outcome::Nothing,
@@ -969,7 +1082,7 @@ impl SettingsMenu {
                         None => by.place(facts.dir).unwrap_or_else(|| "your config".into()),
                     };
                     let said = format!(
-                        "{place} sets it, which outdoes what the menu saves: Enter opens it"
+                        "{place} sets it, which wins over what's saved here: Enter opens it"
                     );
                     return self.refuse(&said);
                 }
@@ -1350,6 +1463,13 @@ impl SettingsMenu {
                 Outcome::Nothing => Outcome::Changed,
                 outcome => outcome,
             },
+            // Where its switch is locked.
+            (Shown::Skill(_), None) if matches!(hit, SettingsHit::Lock(_)) => {
+                match Self::skills_locked(facts) {
+                    Some((info, by)) => self.open_set_by(Some(info), by, facts),
+                    None => Outcome::Changed,
+                }
+            }
             // Its switch; or its button, which opens its file.
             (Shown::Skill(at), Some(Part::Whole)) => self.skill_pressed(at, facts, history),
             (Shown::Skill(at), Some(_)) => self.open_skill(at),
@@ -1382,6 +1502,14 @@ impl SettingsMenu {
 
     /// Opens the line of the daemon's config that sets the permission
     /// rules, as a click on a locked rule's place does.
+    fn on_locked_rule(&self, at: usize) -> bool {
+        self.catalogue_shown() == Some(Catalogued::Rules)
+            && !self.form_open()
+            && self.permissions.locked_by().is_some()
+            && self.permissions.rule_at(at).is_some()
+    }
+
+    /// Opens where the user's own config sets the daemon's rules.
     fn open_rules_lock(&mut self, facts: &Facts) -> Outcome {
         let info = find("permissions.rules").ok();
         match self.permissions.locked_by().cloned() {
@@ -1554,6 +1682,7 @@ impl SettingsMenu {
                 _ => On::Nothing,
             },
             Some(Shown::Skill(at)) => match self.skill_switch(at, facts) {
+                Some(_) if self.skills_lock.is_some() => On::Locked,
                 Some(_) => On::Switch,
                 None if self.skills.get(at).is_some_and(is_skill_file) => On::Opens,
                 None => On::Nothing,
@@ -1827,6 +1956,7 @@ impl SettingsMenu {
             On::Nothing => &[],
             On::Opens => &[("Enter", "open")],
             On::Switch => &[("Enter", "on or off"), ("o", "open its file")],
+            On::Locked => &[("Enter", "open where it's set"), ("o", "open its file")],
             On::Setting => &[("u", "undo"), ("r", "default")],
         };
         if searching {
@@ -1908,16 +2038,10 @@ impl SettingsMenu {
         if let Some(by) = &lock
             && !searching
         {
-            let file = by.at.as_ref().map_or_else(
-                || "config".to_owned(),
-                |at| {
-                    std::path::Path::new(&*at.file).file_name().map_or_else(
-                        || "config".into(),
-                        |name| name.to_string_lossy().into_owned(),
-                    )
-                },
+            help = format!(
+                "{} sets this, and it wins over what's saved here.",
+                super::your_file(by)
             );
-            help = format!("Your {file} sets this, and it wins over what's saved here.");
         }
         let mut notes = Vec::new();
         // What it is now, if that's not what's configured.
@@ -2075,7 +2199,8 @@ impl SettingsMenu {
     }
 
     /// A skill's row: what it's for, where it's from, who starts it or
-    /// why it can't be used, its file, and its switch.
+    /// why it can't be used, its file, and its switch, which is for every
+    /// project.
     fn skill_row(&self, at: usize, searching: bool, facts: &Facts) -> RowView {
         let Some(skill) = self.skills.get(at) else {
             return RowView::new("", "", ControlView::None);
@@ -2084,8 +2209,15 @@ impl SettingsMenu {
         let switch = self.skill_switch(at, facts);
         let (starts, ink) = match (switch, &skill.problem) {
             (Some(false), _) => (
-                "Switched off: agents aren't offered it, and its command is gone.".to_owned(),
+                "Switched off, in every project: no agent is offered it, and its command is \
+                 gone."
+                    .to_owned(),
                 Ink::Caution,
+            ),
+            // Switched on a moment ago: the list hasn't said so yet.
+            (Some(true), Some(_)) => (
+                "Switched on: agents are offered it again.".to_owned(),
+                Ink::Muted,
             ),
             (_, Some(problem)) => (format!("It can't be used: {problem}"), Ink::Warning),
             (_, None) => match (skill.implicit, skill.user_invocable) {
@@ -2124,10 +2256,18 @@ impl SettingsMenu {
         } else {
             name.clone()
         };
-        RowView::new(label, help, control)
+        let row = RowView::new(label, help, control)
             .with_status(&skill.source, Ink::Muted)
             .noted(starts, ink)
-            .noted(form::tilde(&skill.path, &self.home), Ink::Muted)
+            .noted(form::tilde(&skill.path, &self.home), Ink::Muted);
+        // Its switch is the user's own config's to turn.
+        match (&self.skills_lock, switch) {
+            (Some(by), Some(_)) => RowView {
+                lock: Some(short_place(by)),
+                ..row
+            },
+            _ => row,
+        }
     }
 
     /// The row of something a search found in a catalogue's list: its
@@ -2268,6 +2408,8 @@ enum On {
     Opens,
     /// A skill, which Enter switches off or on, and `o` opens the file of.
     Switch,
+    /// A skill whose switch the user's own config sets: Enter opens where.
+    Locked,
     /// A setting, which `u` undoes and `r` puts back.
     Setting,
 }

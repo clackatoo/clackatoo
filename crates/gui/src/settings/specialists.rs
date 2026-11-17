@@ -201,7 +201,9 @@ pub(super) struct Specialists {
     listing: Listing,
     draft: Option<Draft>,
     typing: Option<Typing>,
-    saving: Option<Saving>,
+    /// The saves asked of the daemon and not answered: at most the last
+    /// from the form shown, those before it from forms since put away.
+    saving: Vec<Saving>,
     notice: Option<Notice>,
     /// The list is to be read; and it's been asked for.
     due: bool,
@@ -562,7 +564,7 @@ impl Specialists {
         self.reading = false;
         self.due = false;
         self.open_once_listed = None;
-        if self.saving.take().is_some() {
+        if !std::mem::take(&mut self.saving).is_empty() {
             self.notice = Some(Notice::Failed(why.to_owned()));
         }
     }
@@ -589,20 +591,23 @@ impl Specialists {
         definition: &SpecialistDefinition,
         result: Result<(), String>,
     ) -> (Option<usize>, Option<String>) {
-        let waited = self
-            .saving
-            .take_if(|saving| saving.definition == *definition);
-        let Some(saving) = waited else {
+        let waited = (self.saving.iter()).position(|saving| saving.definition == *definition);
+        let Some(waited) = waited else {
             return (None, None);
         };
+        let saving = self.saving.remove(waited);
         if let Err(why) = result {
             self.notice = Some(Notice::Failed(why));
             return (None, None);
         }
-        self.notice = Some(Notice::Done(format!(
-            "Saved {}. Chats started with it from now on use it as it is now.",
-            definition.name
-        )));
+        // One asked from a form since put away says nothing over a form
+        // that's saving now.
+        if saving.from_form || !self.saving_form() {
+            self.notice = Some(Notice::Done(format!(
+                "Saved {}. Chats started with it from now on use it as it is now.",
+                definition.name
+            )));
+        }
         // The list says where it's kept now, and what its file holds.
         self.due = true;
         let path = (self.draft.as_ref())
@@ -621,6 +626,12 @@ impl Specialists {
         self.draft = None;
         self.typing = None;
         (Some(self.place(&definition.name, true).unwrap_or(0)), open)
+    }
+
+    /// Whether the form shown has been sent to be saved, and the daemon
+    /// hasn't answered.
+    fn saving_form(&self) -> bool {
+        self.saving.iter().any(|saving| saving.from_form)
     }
 
     /// The rows of the list, under their headings: the user's own, then
@@ -642,7 +653,14 @@ impl Specialists {
         let none = yours.is_empty().then(|| {
             "None of your own yet. Make one, or copy one of those below to change it.".to_owned()
         });
-        vec![("Yours", none, yours), ("Built in", None, of(false))]
+        // The rest are built in, unless a package brought some.
+        let packaged = (self.files.iter()).any(|file| !file.editable && !file.path.is_empty());
+        let rest = if packaged {
+            "Built in, and from packages"
+        } else {
+            "Built in"
+        };
+        vec![("Yours", none, yours), (rest, None, of(false))]
     }
 
     /// The sections shown, each its heading, a sentence under it, and its
@@ -956,7 +974,7 @@ impl Specialists {
             (Some(_), lines) => format!("{}, copied", form::counted(lines, "line", "lines")),
             (None, lines) => form::counted(lines, "line", "lines"),
         };
-        let saving = self.saving.is_some();
+        let saving = self.saving_form();
         let button = match (saving, draft.path.is_some() && !draft.changed()) {
             (true, _) => ButtonView::plain("Saving…").disabled(),
             (false, true) => ButtonView::plain("Open its file"),
@@ -1035,7 +1053,10 @@ impl Specialists {
     /// Asks the daemon to save the form, its file to be opened after if
     /// `then_open`.
     fn save_form(&mut self, then_open: bool) -> Did {
-        if self.saving.is_some() {
+        // The form's own save is on its way: its button says so, and
+        // nothing in it changes meanwhile. One asked from a form since
+        // put away holds this one up no longer.
+        if self.saving_form() {
             return Did::Nothing;
         }
         let Some(draft) = &mut self.draft else {
@@ -1065,7 +1086,7 @@ impl Specialists {
         }
         let (scope, path) = (draft.held.scope, draft.path.clone());
         self.notice = Some(Notice::Working("Saving it…".into()));
-        self.saving = Some(Saving {
+        self.saving.push(Saving {
             definition: definition.clone(),
             from_form: true,
             then_open,
@@ -1213,13 +1234,14 @@ impl Catalogue for Specialists {
                        uses it as it is then."
                 .into(),
             changed: draft.changed(),
-            save: if self.saving.is_some() {
+            beneath: false,
+            save: if self.saving_form() {
                 "Saving…"
             } else {
                 "Save"
             }
             .into(),
-            saving: self.saving.as_ref().is_some_and(|saving| saving.from_form),
+            saving: self.saving_form(),
         })
     }
 
@@ -1275,7 +1297,7 @@ impl Catalogue for Specialists {
         self.notice.take_if(|notice| notice.of_form());
         // Its save, if one's on its way, closes nothing else, and opens
         // no file over what's shown by then.
-        if let Some(saving) = &mut self.saving {
+        for saving in &mut self.saving {
             saving.from_form = false;
             saving.then_open = false;
         }
@@ -1343,6 +1365,9 @@ impl SettingsMenu {
                 None
             }
         };
+        // Its file opens over the list it was saved to, which closes the
+        // menu: never over a form begun since, on any page.
+        let open = open.filter(|_| !self.form_open());
         if let Some(Some(row)) = before
             && let Some(at) = self.specialists.rows().iter().position(|each| *each == row)
         {

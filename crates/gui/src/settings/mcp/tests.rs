@@ -772,3 +772,19 @@ fn arguments_are_words_read_back_as_they_were_typed() {
         assert_eq!(words(&worded(&list)).unwrap(), list, "{}", worded(&list));
     }
 }
+
+#[test]
+fn a_server_only_shown_says_one_second_as_one() {
+    let mut info = server();
+    info.settings = json!({
+        "command": "search-server",
+        "timeout_seconds": 1,
+        "call_timeout_seconds": 30,
+    })
+    .to_string();
+    let mut form = ServerForm::new(Some(info));
+    form.shown_only = true;
+    let said = |field| form.row(field, 0, None, "").status.map(|(said, _)| said);
+    assert_eq!(said(Field::Timeout).as_deref(), Some("1 second"));
+    assert_eq!(said(Field::CallTimeout).as_deref(), Some("30 seconds"));
+}

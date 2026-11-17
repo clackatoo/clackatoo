@@ -53,7 +53,8 @@ something wrong in it says so underneath as the keys leave it. Arguments are
 written with blanks between them, and quotes round one that has a blank in
 it; environment and headers are written as JSON. With changes in the form,
 <kbd>Esc</kbd>, **Cancel**, the cog and a click off the panel ask before
-they're thrown away. Concurrent edits are refused without overwriting the
+they're thrown away, and **Finish a sign in** counts the changes in the
+server's form under it. Concurrent edits are refused without overwriting the
 newer definition.
 
 ## Configuration files
@@ -71,9 +72,16 @@ one of your own servers:
   it. Settings lists the project's beside yours as needing review, saying it
   will take yours' place once enabled. The two rows are told apart by where
   they're kept. Yours opens as any server does; the project's opens as
-  `name, as this project has it`, showing its definition without fields to
-  change, with **Review and enable** as the one thing to do.
-- **Once enabled, the project's is the one chats there get.**
+  `This project's name`, showing its definition without fields to
+  change, with **Review and enable** as the one thing to do. A sign in is
+  to the one chats use, so only your own row has the button.
+- **Once enabled, the project's is the one chats there get.** Settings says
+  so as it's enabled, and again if you save your own while the project's is
+  in its place. Removing your own says which is still listed, and whether
+  chats use it.
+
+Closing Settings while a sign in is being opened doesn't lose it: the
+browser opens on its address when the daemon answers.
 
 An invalid shadowing entry stays invalid rather than enabling a lower-priority
 server.

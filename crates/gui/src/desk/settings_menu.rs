@@ -225,17 +225,21 @@ impl Desk {
 
     /// Takes in the daemon's answer to what the menu's MCP Servers page
     /// asked under the number `id`, opening a sign in's address in the
-    /// browser. Returns whether to draw.
+    /// browser: whether or not the menu still waits for it, as the daemon
+    /// has begun the sign in, and it's finished nowhere else. Returns
+    /// whether to draw.
     pub(super) fn settings_mcp(&mut self, id: u64, response: Response) -> bool {
         let result = match response {
             Response::Mcp(reply) => Ok(reply),
             Response::Error(error) => Err(error.to_string()),
             _ => return false,
         };
+        let begun = (result.as_ref().ok()).and_then(|reply| reply.login_url.clone());
         let url = self
             .settings
             .as_mut()
-            .and_then(|menu| menu.mcp_came(id, result));
+            .and_then(|menu| menu.mcp_came(id, result))
+            .or(begun);
         if let Some(url) = url {
             self.open_url(url);
         }
@@ -380,15 +384,15 @@ impl Desk {
         let saved = saved.filter(|saved| self.daemon_saved(&saved.name));
         if let Some(menu) = &mut self.settings {
             menu.settings_came();
-            if let Some(saved) = &saved {
-                menu.permission_saved(saved);
-            }
         }
-        // The rules' page says how saving them went, in its own words: a
-        // list of rules isn't for the foot to spell out.
-        let saved = saved.filter(|saved| {
-            saved.name != "permissions.rules" || saved.refused.is_some() || self.settings.is_none()
-        });
+        // A page that says how saving went in its own words, as the
+        // rules' does, and a skill's switch, leaves nothing to say in
+        // the config's.
+        let said = match (&mut self.settings, &saved) {
+            (Some(menu), Some(saved)) => menu.option_saved(saved),
+            _ => false,
+        };
+        let saved = saved.filter(|_| !said);
         match saved {
             Some(OptionSaved {
                 name,

@@ -165,14 +165,14 @@ fn an_option_init_lua_sets_is_locked_and_enter_opens_its_line() {
     assert!(picked.ends_with("init.lua:2"), "{picked}");
     assert!(
         preview.contains(
-            &"Locked: set in client/init.lua:2, which outdoes what the menu saves".to_owned()
+            &"Locked: set in client/init.lua:2, which wins over what's saved here".to_owned()
         ),
         "{preview:#?}"
     );
     type_keys(&mut desk, "l");
     assert_eq!(
         menu(&mut desk).1,
-        "client/init.lua:2 sets numberwidth, which outdoes what the menu saves: Enter opens it"
+        "client/init.lua:2 sets numberwidth, which wins over what's saved here: Enter opens it"
     );
     type_keys(&mut desk, "r");
     assert_eq!(desk.options.numberwidth, 6, "nothing changed");
@@ -221,7 +221,7 @@ fn keys_recorded_are_saved_as_a_binding_that_a_reload_reads_back() {
     named(&mut desk, NamedKey::Enter);
     assert_eq!(
         menu(&mut desk).1,
-        "client/init.lua:1 binds <A-y>, which outdoes what the menu saves"
+        "client/init.lua:1 binds <A-y>, which wins over what's saved here"
     );
     // Others are saved, and bound at once.
     named(&mut desk, NamedKey::Enter);

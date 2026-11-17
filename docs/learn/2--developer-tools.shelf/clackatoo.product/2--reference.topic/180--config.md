@@ -564,7 +564,9 @@ click takes back, and <kbd>Enter</kbd> in the field before it never goes on
 to it. A form with changes is never thrown away without asking:
 <kbd>Esc</kbd>, **Cancel**, the cog, a click off the panel, the keys that go
 back to normal mode and a `:Settings` run over it ask first, and do it if
-asked again. A list is read when its page is shown, after anything
+asked again. Asking ends typing in a field, so one more <kbd>Esc</kbd> is
+the answer. A reply that comes late from the daemon never replaces or closes
+a form begun since. A list is read when its page is shown, after anything
 done on it, and when a lost connection comes back; a page with nothing to
 list says why. The search finds servers, specialists, skills and rules by
 name, as well as settings. The foot names the keys that work on the page

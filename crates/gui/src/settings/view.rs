@@ -912,7 +912,8 @@ impl Lay<'_> {
     }
 
     /// `text` broken onto lines no wider than `width`, in `font`, a word
-    /// too long for a line broken too.
+    /// too long for a line broken too: a path after one of its slashes,
+    /// so no file's name is cut in two if it fits a line.
     fn lines_of(&mut self, text: &str, width: f32, font: TextFont, ink: Ink) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut line = String::new();
@@ -925,7 +926,13 @@ impl Lay<'_> {
                     let mut tried = line.clone();
                     tried.push(ch);
                     if !line.is_empty() && self.width(&tried, font, ink) > width {
-                        lines.push(std::mem::take(&mut line));
+                        // What follows the line's last slash goes down
+                        // with what's to come.
+                        let rest = match line.rfind('/') {
+                            Some(slash) if slash + 1 < line.len() => line.split_off(slash + 1),
+                            _ => String::new(),
+                        };
+                        lines.push(std::mem::replace(&mut line, rest));
                     }
                     line.push(ch);
                 }
@@ -2982,6 +2989,25 @@ mod tests {
         view.sliding = None;
         view.sections[0].rows = vec![row];
         view
+    }
+
+    #[test]
+    fn a_path_too_long_for_a_line_breaks_after_a_slash_and_not_in_a_name() {
+        let path =
+            "~/work/projects/storefront/.agents/skillsets/database/skills/migrate-db/SKILL.md";
+        let row = RowView::new("Migrate", "", ControlView::Toggle(true))
+            .with_status("skillset database", Ink::Muted)
+            .noted(path, Ink::Muted);
+        let laid = laid_out(&page_of(row), [640, 700]);
+        let lines: Vec<&str> = (laid.texts.iter())
+            .map(|text| &*text.content)
+            .filter(|line| line.len() > 1 && path.contains(line))
+            .collect();
+        assert!(lines.len() > 1, "it doesn't fit one line: {lines:?}");
+        assert_eq!(lines.concat(), path, "{lines:?}");
+        for line in &lines[..lines.len() - 1] {
+            assert!(line.ends_with('/'), "{lines:?}");
+        }
     }
 
     #[test]

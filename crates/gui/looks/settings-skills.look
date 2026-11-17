@@ -53,6 +53,10 @@ keys G
 shot skills-not-loaded
 keys /migration
 shot skills-search
-keys <Esc><Esc>
+# One Esc clears the search; another would close the menu.
+keys <Esc>
+wait-for /deploy-service
 size 640x700
 shot skills-640
+keys G
+shot skills-not-loaded-640

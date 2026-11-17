@@ -107,7 +107,8 @@ impl Page {
             Self::Skills => Some(
                 "A skill is a folder with a SKILL.md, in the project's .agents/skills, or in a \
                  bundle under .agents/skillsets; under ~/.agents, it's for every project. A \
-                 skill is read afresh each time it's used.",
+                 skill is read afresh each time it's used. Its switch is for every project: \
+                 off, no skill of that name is offered anywhere.",
             ),
             Self::Machines => Some(
                 "The phone app and the web's password are the daemon's: clackatoo web sets them \
@@ -316,9 +317,9 @@ pub(crate) const ENTRIES: &[Entry] = &[
         (
             "Who answers agents' requests",
             "The agent's own permission settings, or the rules below, asking you when none \
-             matches. Under the rules, Claude Code and Codex are kept to the modes in which \
-             they ask before they act. A chat already open keeps its own, changed in its \
-             permissions menu.",
+             matches. Only Claude Code and Codex chats can go by rules, kept to the modes in \
+             which they ask before they act: any other agent goes by its own settings. A \
+             chat already open keeps its own, changed in its permissions menu.",
         ),
         &["permissions.engine"],
         &[

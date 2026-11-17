@@ -93,6 +93,9 @@ pub(super) struct FormView {
     pub(super) subtitle: String,
     /// Whether anything in it differs from what's saved.
     pub(super) changed: bool,
+    /// Whether the form it was opened from, which Cancel goes back to,
+    /// has changes of its own: leaving the page loses those too.
+    pub(super) beneath: bool,
     /// What its button that finishes it says: `Save`, or `Saving…`; or
     /// nothing, for a form that only shows something, which has none.
     pub(super) save: String,
@@ -119,10 +122,11 @@ pub(super) enum Notice {
 }
 
 impl Notice {
-    /// Whether it's about the form shown, rather than something asked of
-    /// the daemon: then it goes with the form.
+    /// Whether it's about the form shown, a question it asks or what
+    /// went wrong in it, rather than something the daemon is doing or
+    /// did: then it goes with the form.
     pub(super) fn of_form(&self) -> bool {
-        matches!(self, Self::Confirm(_) | Self::Marked)
+        matches!(self, Self::Confirm(_) | Self::Marked | Self::Failed(_))
     }
 }
 
@@ -144,6 +148,9 @@ pub(super) enum Listing {
 pub(super) struct Feed {
     due: Option<Instant>,
     reading: bool,
+    /// What's being read was asked for before something changed: it's
+    /// read again once that's answered.
+    again: bool,
 }
 
 impl Feed {
@@ -152,6 +159,7 @@ impl Feed {
         Self {
             due: Some(Instant::now()),
             reading: false,
+            again: false,
         }
     }
 
@@ -168,22 +176,41 @@ impl Feed {
         }
     }
 
+    /// It's to be read now, as what it says has changed: one being read
+    /// may have been answered before that, so it's read once more after.
+    pub(super) fn read_afresh(&mut self) {
+        if self.reading {
+            self.again = true;
+        } else {
+            self.due = Some(Instant::now());
+        }
+    }
+
     /// It's been asked for.
     pub(super) fn asked(&mut self) {
         self.reading = true;
         self.due = None;
     }
 
-    /// It was answered: it's read again `after` so long, if that's said.
-    pub(super) fn came(&mut self, after: Option<Duration>) {
+    /// It was answered: it's read again `after` so long, if that's said,
+    /// or at once, if what it says changed while it was being read.
+    /// Returns whether it's as fresh as was asked for: not to be read
+    /// again at once.
+    pub(super) fn came(&mut self, after: Option<Duration>) -> bool {
         self.reading = false;
+        if std::mem::take(&mut self.again) {
+            self.due = Some(Instant::now());
+            return false;
+        }
         self.due = after.map(|after| Instant::now() + after);
+        true
     }
 
     /// The connection was lost: it won't be answered, and isn't asked
     /// for until it's wanted again.
     pub(super) fn lost(&mut self) {
         self.reading = false;
+        self.again = false;
         self.due = None;
     }
 }
@@ -780,5 +807,23 @@ mod tests {
         assert_eq!(tilde("/home/u", "/home/u"), "~");
         assert_eq!(tilde("/home/user2/a", "/home/u"), "/home/user2/a");
         assert_eq!(tilde("/srv/a", ""), "/srv/a");
+    }
+
+    #[test]
+    fn what_is_read_while_it_changes_is_read_once_more() {
+        let mut feed = Feed::due_now();
+        feed.asked();
+        assert_eq!(feed.due(), None);
+        // Changed while it's being read: its answer isn't believed, and
+        // it's asked for again at once.
+        feed.read_afresh();
+        assert!(!feed.came(None));
+        assert!(feed.due().is_some());
+        feed.asked();
+        assert!(feed.came(None), "nothing changed under this one");
+        assert_eq!(feed.due(), None);
+        // Not being read, it's simply due.
+        feed.read_afresh();
+        assert!(feed.due().is_some());
     }
 }
