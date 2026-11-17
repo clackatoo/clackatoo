@@ -33,7 +33,9 @@
 //! workspaces keep a chat's tree as stubs, so a cold start comes back
 //! with its branches, and on the branch it showed.
 
-use clackatoo_protocol::{BranchSummary, Divergence, ForkFiles, Outcome, Subagent, Turn, TurnEnd};
+use clackatoo_protocol::{
+    BranchSummary, ContextSnapshot, Divergence, ForkFiles, Outcome, Subagent, Turn, TurnEnd,
+};
 
 use super::{HostedChat, Link, TurnUid, handover, now, turn_from_handover, turn_to_handover};
 use crate::saved;
@@ -329,53 +331,74 @@ impl Tree {
 }
 
 impl HostedChat {
+    /// The context people attached to its messages, for the next build:
+    /// what its turns were sent with, on the branch shown and those kept,
+    /// what waits with its queued messages, and what's chosen in its draft.
     pub(crate) fn hand_over_context_state(&self) -> handover::ChatContext {
+        fn frozen(context: &[ContextSnapshot]) -> Vec<handover::ContextSnapshot> {
+            context.iter().map(Into::into).collect()
+        }
         let mut turns = self
             .turn_uids(0..self.node.turns.len())
             .iter()
             .zip(&self.node.turns)
-            .filter(|(_, t)| !t.context.is_empty())
-            .map(|(uid, t)| (uid.0, t.context.clone()))
+            .filter(|(_, turn)| !turn.context.is_empty())
+            .map(|(uid, turn)| (uid.0, frozen(&turn.context)))
             .collect::<Vec<_>>();
         for seg in self.tree.segs.iter().flatten() {
             if let Some(held) = &seg.held {
                 turns.extend(
                     held.turns
                         .iter()
-                        .filter(|(_, t)| !t.context.is_empty())
-                        .map(|(uid, t)| (uid.0, t.context.clone())),
+                        .filter(|(_, turn)| !turn.context.is_empty())
+                        .map(|(uid, turn)| (uid.0, frozen(&turn.context))),
                 );
             }
         }
         handover::ChatContext {
-            draft: self.node.draft_context.clone(),
             chat: self.id.0,
             turns,
             queued: self
                 .user_queue
                 .messages
                 .iter()
-                .filter(|p| p.prompt.resolved_context || !p.prompt.context.is_empty())
-                .map(|p| (p.id, p.prompt.context.clone(), p.prompt.resolved_context))
+                .filter(|queued| {
+                    queued.prompt.resolved_context || !queued.prompt.context.is_empty()
+                })
+                .map(|queued| {
+                    (
+                        queued.id,
+                        frozen(&queued.prompt.context),
+                        queued.prompt.resolved_context,
+                    )
+                })
                 .collect(),
             waiting: self
                 .queued
                 .as_ref()
-                .map(|p| p.context.clone())
+                .map(|prompt| frozen(&prompt.context))
                 .unwrap_or_default(),
-            waiting_resolved: self.queued.as_ref().is_some_and(|p| p.resolved_context),
+            waiting_resolved: self
+                .queued
+                .as_ref()
+                .is_some_and(|prompt| prompt.resolved_context),
+            draft: self.node.draft_context.iter().map(Into::into).collect(),
         }
     }
 
+    /// Takes back the context an older build handed over for it, out of
+    /// `records`: each turn's by its uid, each queued message's by its ID.
     pub(crate) fn resume_context_state(&mut self, records: &mut Vec<handover::ChatContext>) {
-        let Some(at) = records.iter().position(|r| r.chat == self.id.0) else {
+        fn thawed(context: Vec<handover::ContextSnapshot>) -> Vec<ContextSnapshot> {
+            context.into_iter().map(Into::into).collect()
+        }
+        let Some(at) = records.iter().position(|record| record.chat == self.id.0) else {
             return;
         };
         let record = records.swap_remove(at);
-        self.node.draft_context.clone_from(&record.draft);
-        let contexts = record
-            .turns
-            .into_iter()
+        self.node.draft_context = record.draft.into_iter().map(Into::into).collect();
+        let contexts = (record.turns.into_iter())
+            .map(|(uid, context)| (uid, thawed(context)))
             .collect::<std::collections::BTreeMap<_, _>>();
         let uids = self.turn_uids(0..self.node.turns.len()).to_vec();
         for (uid, turn) in uids.iter().zip(&mut self.node.turns) {
@@ -393,16 +416,19 @@ impl HostedChat {
             }
         }
         for (id, context, resolved) in record.queued {
-            if let Some(p) = self.user_queue.messages.iter_mut().find(|p| p.id == id) {
-                p.prompt.context = context;
-                p.prompt.resolved_context = resolved;
+            if let Some(queued) =
+                (self.user_queue.messages.iter_mut()).find(|queued| queued.id == id)
+            {
+                queued.prompt.context = thawed(context);
+                queued.prompt.resolved_context = resolved;
             }
         }
         if let Some(prompt) = &mut self.queued {
-            prompt.context = record.waiting;
+            prompt.context = thawed(record.waiting);
             prompt.resolved_context = record.waiting_resolved;
         }
     }
+
     /// Whether a new branch of the conversation, not yet written to, ends
     /// the branch shown.
     pub(crate) fn branch_pending(&self) -> bool {
