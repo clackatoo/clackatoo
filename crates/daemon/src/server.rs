@@ -641,7 +641,9 @@ fn others_ready(
 /// protocol `wire`, which `subscription` is of. Returns whether it was:
 /// one dropped as newer than the client, or that can't be encoded, never
 /// arrives, so the subscription forgets what it recorded as sent, and its
-/// next update is a snapshot.
+/// next update is a snapshot. For one that can't be encoded, as too big,
+/// that's of a chat's latest turns alone (see
+/// [`Subscription::start_recent`]).
 fn queue_update(
     subscription: &mut Subscription,
     (wire, relays): (u32, bool),
@@ -675,8 +677,8 @@ fn queue_update(
             false
         }
         Err(err) => {
-            log::error!("encoding a view update failed: {err}");
-            subscription.forget_sent();
+            log::error!("encoding an update of view {id} failed: {err}");
+            subscription.start_recent();
             false
         }
     }
@@ -861,6 +863,18 @@ impl Subscription {
         self.masking = masking;
         self.shown_until = shown_until;
         self.hinted = hinted;
+    }
+
+    /// Forgets what the client was sent, as [`forget_sent`](Self::forget_sent)
+    /// does, and for a chat the older turns it had loaded too: its next
+    /// update is a snapshot of the latest turns alone, from which it asks
+    /// for older ones a page at a time. An update that couldn't be sent, as
+    /// too big, would be as big again as a snapshot from as far back, and
+    /// never arrive, the chat staying as it was for good.
+    fn start_recent(&mut self) {
+        self.forget_sent();
+        self.chat.recent = true;
+        self.chat.first = None;
     }
 
     /// The update that brings the client, which speaks `wire`, from what
@@ -5780,6 +5794,63 @@ mod tests {
         assert!(matches!(
             sent.update(&terminal, PROTOCOL_VERSION),
             Some(ViewUpdate::Snapshot(_))
+        ));
+    }
+
+    #[test]
+    fn a_chat_too_big_to_send_from_where_its_viewer_began_goes_from_its_latest_turns() {
+        use crate::chat::tests::{chat, connect, send, words};
+        use agent_client_protocol_schema::v1::StopReason;
+
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        // A window attaches for the latest turns while the chat has none,
+        // as while its agent loads a session: it begins at the first turn.
+        let mut sent = Subscription::new();
+        sent.chat.recent = true;
+        let update = chat.catch_up(&mut sent.chat).expect("a snapshot");
+        let mut outgoing = Vec::new();
+        assert!(queue_update(
+            &mut sent,
+            (PROTOCOL_VERSION, false),
+            TerminalId(1),
+            update,
+            &mut outgoing
+        ));
+        sent.awaiting_ack = false;
+        assert_eq!(sent.chat.first, Some(0));
+        // Then the session's turns come at once, more than a frame holds.
+        for i in 0..24 {
+            send(&mut chat, &format!("message {i}"));
+            words(&mut chat, &"answer ".repeat(120_000));
+            chat.answered(Ok(StopReason::EndTurn));
+        }
+        let update = chat.catch_up(&mut sent.chat).expect("the turns");
+        let mut outgoing = Vec::new();
+        assert!(!queue_update(
+            &mut sent,
+            (PROTOCOL_VERSION, false),
+            TerminalId(1),
+            update,
+            &mut outgoing
+        ));
+        assert!(outgoing.is_empty() && !sent.awaiting_ack);
+        // What follows is the latest turns alone, not all of them since the
+        // first again, which would never go either; and it goes.
+        let update = chat.catch_up(&mut sent.chat).expect("a snapshot");
+        let ViewUpdate::Snapshot(view) = &update else {
+            panic!("a snapshot, not a patch");
+        };
+        let node = view.chat().expect("a chat");
+        assert!(node.first_turn > 0, "from turn {}", node.first_turn);
+        assert_eq!(node.turns.last(), chat.node().turns.last());
+        let mut outgoing = Vec::new();
+        assert!(queue_update(
+            &mut sent,
+            (PROTOCOL_VERSION, false),
+            TerminalId(1),
+            update,
+            &mut outgoing
         ));
     }
 

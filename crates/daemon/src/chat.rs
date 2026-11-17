@@ -5079,7 +5079,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use agent_client_protocol_schema::v1::{RequestPermissionRequest, SessionNotification};
 
     use super::*;
@@ -5252,7 +5252,7 @@ mod tests {
         assert_eq!(resumed.next_user(), Some(id));
     }
 
-    pub(super) fn chat() -> HostedChat {
+    pub(crate) fn chat() -> HostedChat {
         chat_with("claude")
     }
 
@@ -5773,7 +5773,7 @@ mod tests {
         assert_eq!(wrote.paths[1], "/f1");
     }
 
-    fn words(chat: &mut HostedChat, text: &str) {
+    pub(crate) fn words(chat: &mut HostedChat, text: &str) {
         let text = serde_json::to_string(text).unwrap();
         update(
             chat,
@@ -5784,7 +5784,7 @@ mod tests {
     }
 
     /// Opens `chat`'s session, `session`, with no settings.
-    pub(super) fn connect(chat: &mut HostedChat, session: &str) -> Vec<Action> {
+    pub(crate) fn connect(chat: &mut HostedChat, session: &str) -> Vec<Action> {
         chat.connected(Opened {
             session: session.to_owned(),
             settings: None,
@@ -5803,7 +5803,7 @@ mod tests {
         .unwrap()
     }
 
-    pub(super) fn send(chat: &mut HostedChat, text: &str) -> Vec<Action> {
+    pub(crate) fn send(chat: &mut HostedChat, text: &str) -> Vec<Action> {
         chat.act(ChatAction::Send(text.to_owned()))
     }
 
