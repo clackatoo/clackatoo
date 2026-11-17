@@ -210,6 +210,9 @@ Code's does it, through its native maximum-turn and USD-budget options:
 - **Only the adapter clackatoo installs and starts itself counts.** An agent
   started with your own command isn't taken to hold them, whatever it's
   called and whatever it says it is.
+- **It goes by the agent that's running.** Changing an agent's command in the
+  config doesn't change what the process already started holds; the next one
+  started is judged afresh.
 - **Choosing them with any other agent fails**, with a message naming the
   agents that hold them, rather than running without them. A provider change
   can't silently drop one.

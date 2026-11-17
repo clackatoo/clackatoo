@@ -33,9 +33,19 @@ Concurrent edits are refused without overwriting the newer definition.
 Personal servers live in `mcp.json` in clackatoo's configuration directory
 (`~/.config/clackatoo/mcp.json` by default). `~/.agents/mcp.json` is also read.
 Project files are `.agents/mcp.json`, searched from the chat's working
-directory up to the repository boundary. The nearest project definition wins,
-then personal configuration, then bundled definitions. An invalid shadowing
-entry stays invalid rather than enabling a lower-priority server.
+directory up to the repository boundary, in folders that are yours. The
+nearest project definition wins, then personal configuration, then bundled
+definitions, with two rules for a project's definition that has the name of
+one of your own servers:
+
+- **Until you've reviewed and enabled it, chats there go on getting your
+  own.** A file in a project can't switch one of your servers off by naming
+  it. Settings lists the project's beside yours as needing review, saying it
+  will take yours' place once enabled.
+- **Once enabled, the project's is the one chats there get.**
+
+An invalid shadowing entry stays invalid rather than enabling a lower-priority
+server.
 
 ```json
 {
