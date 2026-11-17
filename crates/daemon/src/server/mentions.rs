@@ -256,7 +256,10 @@ impl Daemon {
                     stop = Some(action);
                     break;
                 }
-                Action::Answer { .. } | Action::Elicited { .. } | Action::Permit { .. } => {
+                Action::Answer { .. }
+                | Action::Elicited { .. }
+                | Action::Permit { .. }
+                | Action::PermitMcp { .. } => {
                     now.push(action);
                 }
                 other => held.after.push(other),

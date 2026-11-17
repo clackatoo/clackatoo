@@ -45,6 +45,7 @@ pub(crate) mod failure;
 mod forks;
 mod limits;
 mod live;
+pub(crate) mod managed;
 mod modes;
 mod nested;
 mod originals;
@@ -274,6 +275,19 @@ const BROWSER_CHOICES: [(&str, &str, ChoiceKind); 2] = [
     ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
+/// The answers to a question about a call to an MCP server clackatoo
+/// manages for the chat. Allowing always is for that server, in this
+/// chat: the rest of the agent's tools still ask as they did.
+const SERVER_CHOICES: [(&str, &str, ChoiceKind); 3] = [
+    ("allow", "Allow", ChoiceKind::AllowOnce),
+    (
+        "server",
+        "Always allow this server",
+        ChoiceKind::AllowAlways,
+    ),
+    ("reject", "Reject", ChoiceKind::RejectOnce),
+];
+
 /// Which answers a tool's question offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Choices {
@@ -286,6 +300,10 @@ pub(crate) enum Choices {
     /// Allow for this chat, which lets its agent open pages in the
     /// browser from then on, and Reject.
     Browser,
+    /// Allow, Always allow this server, which lets the agent use that
+    /// managed MCP server without asking for the rest of the chat, and
+    /// Reject (see `chat/managed.rs`).
+    Server,
 }
 
 /// A message kept intact while the agent opens or reloads its session.
@@ -363,6 +381,12 @@ pub(crate) enum Action {
     /// Let a call to one of clackatoo's tools go ahead, numbered as the
     /// server numbered it, or refuse it.
     Permit { call: u64, allow: bool },
+    /// Tell the call to a managed MCP server the daemon numbered `call`
+    /// how the user answered the question about it.
+    PermitMcp {
+        call: u64,
+        answer: managed::McpAnswer,
+    },
     /// Change one of the agent's settings for the chat.
     Set { setting: String, value: String },
     /// Install the chat's agent, as the user agreed to.
@@ -626,6 +650,10 @@ pub(crate) struct HostedChat {
     /// opened: only a server showing one serves the chat's tools, and only
     /// the session's own is clackatoo's server for that session.
     mcp_tokens: VecDeque<(Option<String>, String)>,
+    /// The questions waiting that are about a managed MCP server's call:
+    /// the daemon's number for each call, and the server. Not handed
+    /// over: the daemon takes them back before an upgrade.
+    server_calls: Vec<(u64, String)>,
     /// Its agent's account's limits, as the daemon last heard them from
     /// any of that agent's chats, shown with the context it fills. Not
     /// handed over: after an upgrade they come again with the next that
@@ -891,6 +919,7 @@ impl HostedChat {
             own_tools: VecDeque::new(),
             own_server_lost: false,
             mcp_tokens: VecDeque::new(),
+            server_calls: Vec::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
@@ -1380,6 +1409,9 @@ impl HostedChat {
             // The chat's own: the agent never hears of it.
             ChatAction::Set { setting, value } if setting == TOOLS_SETTING => {
                 if let Some(&(tools, ..)) = (TOOLS_VALUES.iter()).find(|(_, id, ..)| *id == value) {
+                    // Setting Tools takes back the managed MCP servers
+                    // allowed for the chat: each asks again.
+                    self.forget_allowed_servers();
                     self.set_tools(tools);
                 }
             }
@@ -2924,6 +2956,7 @@ impl HostedChat {
             Choices::Tool => &TOOL_CHOICES,
             Choices::Once => &ONCE_CHOICES,
             Choices::Browser => &BROWSER_CHOICES,
+            Choices::Server => &SERVER_CHOICES,
         };
         let choices = (choices.iter())
             .map(|&(id, name, kind)| Choice {
@@ -2954,6 +2987,7 @@ impl HostedChat {
     /// waits for an answer: the agent cancelled it, or went.
     pub(crate) fn withdraw(&mut self, call: u64) {
         self.asking.retain(|(asker, _)| *asker != Asker::Tool(call));
+        self.forget_server_call(call);
         self.show_question();
     }
 
@@ -2986,6 +3020,11 @@ impl HostedChat {
             }
             Asker::Tool(call) => {
                 let option = option.as_deref();
+                // One about a managed MCP server's call is that server's
+                // to hear, and allows nothing else.
+                if let Some(action) = self.server_answered(call, option) {
+                    return Some(action);
+                }
                 if option == Some("always") {
                     self.set_tools(AgentTools::Allow);
                 }

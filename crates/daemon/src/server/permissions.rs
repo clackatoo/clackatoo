@@ -99,6 +99,13 @@ impl Daemon {
             chat.turned_down(&asked.tool, &known)
                 .or_else(|| chat.about_own_tools(&asked.tool, &known, serving))
         };
+        // A managed MCP server's call asks the user itself, through
+        // clackatoo's proxy, when it must (see `about_managed_call`).
+        let answered = answered.or_else(|| {
+            (!interaction)
+                .then(|| self.about_managed_call(id, &asked.tool, &known))
+                .flatten()
+        });
         if let Some(option) = answered {
             if let Some(slot) = self.agents.running.get_mut(&asked.agent) {
                 slot.agent.answer_permission(&asked.request, Some(&option));

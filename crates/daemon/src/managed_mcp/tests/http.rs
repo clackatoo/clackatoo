@@ -336,3 +336,32 @@ fn oauth_discovery_pkce_manual_and_split_loopback_callbacks_refresh_and_revocati
             .any(|body| body.contains("grant_type=refresh_token"))
     );
 }
+
+#[test]
+fn a_server_that_wants_a_sign_in_says_so_by_what_it_answers_not_by_its_words() {
+    use super::super::transport::Lost;
+    let fixture = Fixture::new(true, false);
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    // Set up for OAuth, and not signed in: known before anything is sent.
+    let bound = fixture.bound(&roots);
+    assert!(matches!(transport::probe(&bound), Err(Lost::NeedsLogin(_))));
+    // Not set up for it: the server's 401 says so.
+    let registry = Registry::discover(&roots, &BTreeSet::new());
+    config::save(
+        &roots,
+        &registry,
+        "plain",
+        Some(&json!({"url":format!("{}/mcp",fixture.base),"timeout_seconds":5}).to_string()),
+        McpScope::Personal,
+        None,
+    )
+    .unwrap();
+    let plain = (Registry::discover(&roots, &BTreeSet::new()).servers)
+        .remove("plain")
+        .unwrap();
+    assert!(matches!(transport::probe(&plain), Err(Lost::NeedsLogin(_))));
+    // A server that just isn't there is a failure, not a sign-in.
+    drop(fixture);
+    assert!(matches!(transport::probe(&plain), Err(Lost::Failed(_))));
+}
