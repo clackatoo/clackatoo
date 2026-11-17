@@ -52,8 +52,10 @@ JSON object mapping provider names to defaults.
 The editor writes `SPECIALIST.md` files on the connected daemon's machine.
 Choose **Personal** or **Project** for a new role. Existing files keep their
 location. Built-in roles offer **Make a custom copy**, retaining their
-instructions and defaults in a new file, and so do roles a `skillset.toml`
-defines: saving one in place would put its manifest out of use. A field left
+instructions and defaults in a new file. So do roles a `skillset.toml`
+defines, as saving one in place would put its manifest out of use, and roles
+nested inside another bundle. A personal folder that's a symlink, such as a
+`~/.agents` kept with your dotfiles, is saved through. A field left
 empty isn't written to the file. A file is at most 64 KiB. Names stay fixed
 when editing an
 existing file. Conflicting edits are refused and leave your draft open.
@@ -137,9 +139,16 @@ A project's definitions are held to more than your own:
   and are never read through a symlink.
 - **None replaces a built-in.** A project's `explore`, `research`, `plan` or
   `general` isn't loaded; give it another name.
-- **None loosens one of yours.** Where a project's specialist has the name of
-  one of your own, the project's is used, with the stricter access limit and
-  the lower budgets of the two.
+- **None gets round one of yours.** Where a project's specialist has the name
+  of one of your own, the project's is used, with the stricter access limit
+  and the lower `seconds`, `turns` and `cost_usd` of the two. Its other
+  settings are the project's own: instructions, model, skills, MCP servers
+  and `delegates_to`.
+- **These hold however the project's specialist is reached**, a bundle of your
+  own that includes a project's skillset included: what counts is the folder
+  that defines it.
+- **One saved from Settings into a project that isn't trusted** is written,
+  and loads once the folder is trusted.
 
 A specialist that can't be loaded isn't silently missing. It's listed under
 **Settings → Agents → Skills** with the reason, and an agent that asks
@@ -198,12 +207,12 @@ the active deadline rather than restarting it.
 `turns` and `cost_usd` are held by the agent's own adapter, and only Claude
 Code's does it, through its native maximum-turn and USD-budget options:
 
-- **It goes by the adapter, not the agent's name.** The Claude Code that
-  clackatoo installs is known to; an agent started with your own command isn't
-  until it has started and named Claude Code's adapter as what it is.
-- **Choosing them with any other agent fails** with an unsupported-limit
-  message, rather than running without them. A provider change can't silently
-  drop one.
+- **Only the adapter clackatoo installs and starts itself counts.** An agent
+  started with your own command isn't taken to hold them, whatever it's
+  called and whatever it says it is.
+- **Choosing them with any other agent fails**, with a message naming the
+  agents that hold them, rather than running without them. A provider change
+  can't silently drop one.
 - **They're given when a session opens**, and use the runtime's own accounting
   and stopping boundary; USD budgets can exceed the ceiling by the final model
   operation.

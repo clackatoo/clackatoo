@@ -43,7 +43,10 @@ accompany the request.
 
 With the chat's **Tools** on, an agent can also select a skill whose
 description matches the task. `load_skill` returns its instructions and
-directory; `list_skills` reads the catalogue again and lists it. Neither tool executes a
+directory; `list_skills` reads the catalogue again and lists it: the skills
+the chat is offered and those it can't use, each with the start of its
+description, in at most 32 KiB. It names nothing from a folder that isn't
+trusted, only how many things weren't loaded. Neither tool executes a
 script, changes the agent's model, or grants permissions. The agent uses its
 usual tools to follow the procedure.
 
@@ -86,10 +89,13 @@ Three kinds of folder are read, each trusted differently:
 | A project's: `.agents/skills` | As your own, but only once you [trust the project](#project-trust), and never through a symlink. |
 | Other products': `~/.claude/skills`, `~/.codex/skills`, and a project's `.claude/skills` | One folder deep only, `NAME/SKILL.md`, as those products document them. A project's needs trust too. |
 
-Folders whose names start with a dot are skipped everywhere. So what another
-product keeps in its folder for itself isn't offered: the skills the Claude
-desktop app syncs into `~/.claude/skills/synced`, and those Codex bundles in
-`~/.codex/skills/.system`.
+So what another product keeps in its folder for itself isn't offered. The
+skills the Claude desktop app syncs into `~/.claude/skills/synced` are deeper
+than one folder. Those Codex bundles are in `~/.codex/skills/.system`, and
+folders whose names start with a dot are skipped everywhere.
+
+A project's folders get half the room a catalogue has, 128 skills, so a
+project with a great many never leaves your own unread.
 
 Project folders are searched from the chat's working directory up to its
 project root: the repository it's in, or else the working directory itself.
@@ -117,13 +123,19 @@ trusted. It's the same trust that lets a project's
 `clackatoo trust` in the folder, or `:trust FOLDER`, and `:trusted` lists
 what's marked.
 
-- **Until then nothing in the project's folders is read.** What they hold is
-  listed in Settings by folder name, as not loaded, and a new chat there says
-  so once.
+- **Until then no skill, skillset or specialist in the project is read.**
+  What its folders hold is listed in Settings by folder name, as not loaded,
+  and a new chat there says so once. Only names that could be a skill's are
+  listed, and agents aren't given them.
+- **A project's `.agents/mcp.json` is the exception**: it's read whatever the
+  folder's trust, from folders that are yours. Its
+  [servers](~clackatoo/reference/mcp-servers) are only listed until you've
+  reviewed each one's exact definition, which is the stricter check.
 - **Your own skill of the same name is still offered.** A project that isn't
   trusted changes nothing.
-- **Trusting or untrusting a folder reads its chats' catalogues again**, so
-  open chats gain or lose the project's skills at once.
+- **Untrusting a folder takes its skills from open chats at once**, before
+  anything is read again. Trusting one reads its chats' catalogues again, and
+  they gain its skills when that read ends; a read that fails is tried again.
 - **Trust never lets a project replace a built-in specialist** or loosen one
   of your own: see [Specialists](~clackatoo/reference/specialists#defining-a-specialist).
 
@@ -138,6 +150,8 @@ daemon.skills.disabled = "docx pptx imagegen"
 
 A skill switched off stays listed in Settings, with that as its reason. It has
 no slash command and no line in the catalogue, and `load_skill` refuses it.
+Open chats lose it as the option is saved. A specialist that names it in
+`skills` can't start, and says the skill is switched off.
 Skillsets' skills are switched off the same way. The option takes effect as
 the config is saved. There's no switch for one agent alone: every agent
 sharing the same skills is what they're for.
@@ -223,7 +237,8 @@ Check the release named in $ARGUMENTS:
 
 The YAML frontmatter needs a name and description. Names contain at most 64
 lowercase letters, digits, hyphens, underscores or colons, and match the
-skill's folder. The file may start with a byte-order mark, use Windows line
+skill's folder: one that doesn't is listed as unavailable, saying to rename
+the folder or change `name`. The file may start with a byte-order mark, use Windows line
 ends, and end at its closing `---`. Names reserved by
 built-in commands, such as `compact`, `init` and `review`, cannot be used.
 Descriptions should say when to use the skill. Supporting paths are relative
