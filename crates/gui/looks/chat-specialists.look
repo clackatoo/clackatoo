@@ -9,13 +9,17 @@ limits: read-only
 ---
 Review changes and report concrete bugs with file references.
 END
-keys <C-;>:Agent claude<CR>
+# The project's own load only once its folder is trusted.
+keys <C-;>
+type :trust $PROJECT
+keys <CR>
+keys :Agent claude<CR>
 keys i
 sleep 200
 click 245 808
 shot specialist-menu
 click 819 433
-wait-for Create specialist
+wait-for New specialist
 shot specialist-settings-shortcut
 keys <Esc>
 click 245 808
