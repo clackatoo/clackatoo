@@ -1019,6 +1019,7 @@ impl Daemon {
             command,
             cwd,
             file,
+            search: false,
             consent,
         }
     }
