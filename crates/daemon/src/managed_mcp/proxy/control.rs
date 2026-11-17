@@ -55,6 +55,11 @@ pub(crate) struct Pace {
     /// Its loop does both in a moment: one that takes longer is stuck,
     /// and is treated as away.
     pub(crate) greeting: Duration,
+    /// How long the daemon may take to accept and greet the connection a
+    /// call is asked about on. Longer than `greeting`: a loop that
+    /// stalls for a few seconds under load is still there, and a call
+    /// is better late than failed.
+    pub(crate) asking: Duration,
     /// How long the daemon may take to grant a watch. It may hold the
     /// request while it reads the chat's servers, for up to a minute.
     pub(crate) opening: Duration,
@@ -68,6 +73,7 @@ impl Default for Pace {
             longest_retry: Duration::from_secs(2),
             give_up: Duration::from_mins(2),
             greeting: Duration::from_secs(5),
+            asking: Duration::from_secs(30),
             opening: Duration::from_secs(90),
         }
     }
@@ -105,10 +111,9 @@ struct Connection {
 }
 
 impl Daemon {
-    /// Connects to the daemon and greets it, within the time a daemon
-    /// that's there takes.
-    async fn connect(&self) -> Result<Connection, Failed> {
-        tokio::time::timeout(self.pace.greeting, self.greet())
+    /// Connects to the daemon and greets it, within `limit`.
+    async fn connect(&self, limit: Duration) -> Result<Connection, Failed> {
+        tokio::time::timeout(limit, self.greet())
             .await
             .unwrap_or_else(|_| {
                 Err(Failed::Away(
@@ -160,7 +165,7 @@ impl Daemon {
 
     /// Asks the daemon one thing on a connection of its own.
     async fn ask(&self, action: McpProxyAction) -> Result<Response, Failed> {
-        let mut connection = self.connect().await?;
+        let mut connection = self.connect(self.pace.asking).await?;
         connection.send(self, action).await?;
         connection.answer().await
     }
@@ -281,9 +286,15 @@ impl Daemon {
                         let Ok(grant) = serde_json::from_str::<Grant>(&text) else {
                             return "the daemon's new grant couldn't be read".into();
                         };
+                        // A grant no newer than the one it's for is no
+                        // news: asking again at once would only spin.
+                        let same = grant.revision() == revision;
                         revision = grant.revision();
                         if news.send(News::Granted(Box::new(grant))).await.is_err() {
                             return "the proxy stopped".into();
+                        }
+                        if same {
+                            tokio::time::sleep_until(sent + pace.beat).await;
                         }
                     }
                     Ok(_) => return "the daemon gave an answer this MCP proxy doesn't know".into(),
@@ -314,7 +325,7 @@ impl Daemon {
 
     /// Opens the watch: a connection, and the grant asked for on it.
     async fn open(&self) -> Result<(Connection, Grant), Failed> {
-        let mut connection = self.connect().await?;
+        let mut connection = self.connect(self.pace.greeting).await?;
         connection.send(self, McpProxyAction::Open).await?;
         let answer = tokio::time::timeout(self.pace.opening, connection.answer())
             .await

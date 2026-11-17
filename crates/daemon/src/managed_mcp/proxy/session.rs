@@ -8,7 +8,7 @@
 //! with a stand-in, lists with nothing, and calls with why. When the
 //! server is back it's sent the agent's `initialize` again, and the agent
 //! is told its tools changed.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{McpState, McpToolInfo};
@@ -183,7 +183,7 @@ pub(crate) struct Session {
     sent: BTreeMap<String, Sent>,
     /// What the server asked the agent and hasn't been answered: the IDs,
     /// as the server wrote them.
-    asked: BTreeMap<String, Value>,
+    asked: VecDeque<(String, Value)>,
     /// How many times in a row connecting has failed.
     failures: u32,
     ending: Option<Ending>,
@@ -250,7 +250,7 @@ impl Session {
             next_ask: 0,
             garbled: None,
             sent: BTreeMap::new(),
-            asked: BTreeMap::new(),
+            asked: VecDeque::new(),
             failures: 0,
             ending: None,
             effects: Vec::new(),
@@ -503,9 +503,16 @@ impl Session {
 
     /// The agent answered what the server asked it, kept as `key`.
     fn agent_answered(&mut self, key: &str, message: Value) {
-        if self.asked.remove(key).is_some() && self.initialized() {
+        if self.forget_asked(key).is_some() && self.initialized() {
             self.server(message);
         }
+    }
+
+    /// Forgets that the server waits for an answer to its request kept
+    /// as `key`, and returns the request's ID if it did.
+    fn forget_asked(&mut self, key: &str) -> Option<Value> {
+        let at = (self.asked.iter()).position(|(asked, _)| asked == key)?;
+        self.asked.remove(at).map(|(_, id)| id)
     }
 
     /// Why a call can't be sent now, if it can't: there's no server
@@ -631,7 +638,7 @@ impl Session {
             self.name()
         );
         if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
-            self.asked.remove(&key(id));
+            self.forget_asked(&key(id));
             self.server(error(
                 id,
                 "This request is over 4 MiB, more than the agent is passed",
@@ -723,15 +730,30 @@ impl Session {
         match (method, id) {
             // It asks the agent something.
             (Some(_), Some(id)) => {
-                if self.asked.len() >= MOST_ASKED {
-                    let why = "Too many requests already wait for the agent's answer";
-                    self.server(error(id, why));
-                    return;
+                // An agent that never answers some doesn't cost the
+                // server its requests for good: the oldest gives way,
+                // told to both as given up.
+                if self.asked.len() >= MOST_ASKED
+                    && let Some((_, oldest)) = self.asked.pop_front()
+                {
+                    let why = "The agent didn't answer this before too many more were asked";
+                    self.server(error(&oldest, why));
+                    self.agent(json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/cancelled",
+                        "params": {"requestId": oldest, "reason": why},
+                    }));
                 }
-                self.asked.insert(key(id), id.clone());
+                self.asked.push_back((key(id), id.clone()));
                 self.agent(message);
             }
             (Some(method), None) => {
+                // Its own request it no longer wants answered.
+                if method == "notifications/cancelled"
+                    && let Some(id) = message.pointer("/params/requestId")
+                {
+                    self.forget_asked(&key(id));
+                }
                 if method == "notifications/progress"
                     && let Some(token) = message.pointer("/params/progressToken")
                 {
@@ -761,7 +783,8 @@ impl Session {
         let Kind::Initialize { again } = sent.kind else {
             let tools = transport::tool_infos(&message, &self.grant.bound);
             if !tools.is_empty() {
-                self.report(McpState::Connected, "", tools);
+                let detail = self.garbled.clone().unwrap_or_default();
+                self.report(McpState::Connected, &detail, tools);
             }
             self.agent(message);
             return;
@@ -784,7 +807,10 @@ impl Session {
             resources: message.pointer("/result/capabilities/resources").is_some(),
             prompts: message.pointer("/result/capabilities/prompts").is_some(),
         };
-        self.report(McpState::Connected, "", Vec::new());
+        // What it wrote that couldn't be read stays shown while it's
+        // connected, for as long as this connection lasts.
+        let detail = self.garbled.clone().unwrap_or_default();
+        self.report(McpState::Connected, &detail, Vec::new());
         self.lists = lists;
         if !again {
             self.greeted = true;
@@ -881,7 +907,10 @@ impl Session {
                 match &self.link {
                     Link::Up {
                         initialized: true, ..
-                    } => self.report(McpState::Connected, "", Vec::new()),
+                    } => {
+                        let detail = self.garbled.clone().unwrap_or_default();
+                        self.report(McpState::Connected, &detail, Vec::new());
+                    }
                     Link::Down(lost) => {
                         let (state, detail) = (lost.state(), lost.detail().to_owned());
                         self.report(state, &detail, Vec::new());
@@ -1014,7 +1043,11 @@ impl Session {
             self.agent(error(&id, &why));
         }
         for (_, sent) in std::mem::take(&mut self.sent) {
-            self.agent(error(&sent.id, &why));
+            // The agent's `initialize` is answered below, once, and only
+            // if it has no answer yet.
+            if !matches!(sent.kind, Kind::Initialize { .. }) {
+                self.agent(error(&sent.id, &why));
+            }
         }
         // The agent's `initialize`, if it still waits for an answer.
         if let Some(id) = self
