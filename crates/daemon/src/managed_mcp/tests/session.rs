@@ -77,16 +77,18 @@ fn connected(timeout: u32, call_timeout: u32, now: Instant) -> Session {
 /// Has the daemon allow the call `id`, which the session asked about.
 fn allow(session: &mut Session, id: u32, now: Instant) {
     session.agent_said(call(id), now);
-    let effects = session.effects();
-    assert!(
-        matches!(
-            &effects[..],
-            [Effect::Ask { key, method, .. }] if *key == id.to_string() && method == "tools/call"
-        ),
-        "{effects:?}"
-    );
-    session.answered(&id.to_string(), Verdict::Allowed, now);
+    let ask = asked(&session.effects());
+    session.answered(ask, Verdict::Allowed, now);
     assert_eq!(session.effects(), [Effect::Server(call(id))]);
+}
+
+/// The number of the one asking of the daemon among `effects`, which
+/// must be about a tool call.
+fn asked(effects: &[Effect]) -> u64 {
+    match effects {
+        [Effect::Ask { ask, method, .. }] if method == "tools/call" => *ask,
+        _ => panic!("not one asking: {effects:?}"),
+    }
 }
 
 /// The error the agent was told for the request `id`, among `effects`.
@@ -117,13 +119,13 @@ fn a_call_waits_for_leave_as_long_as_a_person_takes_and_is_given_up_only_after_a
     assert_eq!(session.next_due(), Some(start + LONGEST_ASKING));
     session.tick(start + LONGEST_ASKING);
     let effects = session.effects();
-    assert_eq!(effects[0], Effect::Unask("1".into()));
+    assert_eq!(effects[0], Effect::Unask(0));
     assert!(
         error_for(&effects, 1).contains("within a day"),
         "{effects:?}"
     );
     // An answer that comes after all is no longer wanted.
-    session.answered("1", Verdict::Allowed, start + LONGEST_ASKING);
+    session.answered(0, Verdict::Allowed, start + LONGEST_ASKING);
     assert_eq!(session.effects(), []);
 }
 
@@ -382,7 +384,7 @@ fn while_the_daemon_is_away_calls_are_refused_and_everything_else_goes_on() {
 
     session.daemon_went();
     // The one being asked about is told as its connection closes.
-    session.answered("2", Verdict::Away, start);
+    session.answered(1, Verdict::Away, start);
     assert!(error_for(&session.effects(), 2).contains("daemon isn't answering"));
     // Thirty seconds on it's still away: a new call is refused at once,
     // and can be tried again.
@@ -404,9 +406,17 @@ fn while_the_daemon_is_away_calls_are_refused_and_everything_else_goes_on() {
     assert_eq!(session.effects(), [Effect::Agent(answer)]);
     assert!(session.ending().is_none() && session.initialized());
 
-    // Back, with the grant it had: nothing is connected again.
+    // Back, with the grant it had: nothing is connected again, and the
+    // daemon, which may be a new one, is told the server is connected.
     session.granted(grant(30, 600, 0));
-    assert_eq!(session.effects(), []);
+    assert_eq!(
+        session.effects(),
+        [Effect::Report {
+            state: McpState::Connected,
+            detail: String::new(),
+            tools: vec![]
+        }]
+    );
     allow(&mut session, 5, later);
 }
 
@@ -421,7 +431,7 @@ fn a_new_grant_connects_again_in_place_and_answers_what_was_waiting() {
     edited.bound.revision = "edited".into();
     session.granted(edited.clone());
     let effects = session.effects();
-    assert_eq!(effects[0], Effect::Unask("2".into()));
+    assert_eq!(effects[0], Effect::Unask(1));
     assert!(error_for(&effects, 2).contains("was not sent"));
     assert!(error_for(&effects, 1).contains("isn't known"));
     assert_eq!(
@@ -444,8 +454,8 @@ fn cancelling_a_call_that_waits_for_leave_takes_the_question_back() {
     session.agent_said(cancel(1), start);
     // Nothing was sent, so the server isn't told, and a cancelled
     // request is never answered.
-    assert_eq!(session.effects(), [Effect::Unask("1".into())]);
-    session.answered("1", Verdict::Allowed, start);
+    assert_eq!(session.effects(), [Effect::Unask(0)]);
+    session.answered(0, Verdict::Allowed, start);
     assert_eq!(session.effects(), []);
 
     // One the server has is cancelled there.
@@ -461,7 +471,7 @@ fn a_refusal_and_a_verdict_are_told_the_agent_in_the_daemons_words() {
     session.agent_said(call(1), start);
     session.effects();
     session.answered(
-        "1",
+        0,
         Verdict::Refused("The user refused this call.".into()),
         start,
     );
@@ -487,7 +497,7 @@ fn every_ending_answers_every_request_still_waiting() {
             "{id}"
         );
     }
-    assert!(effects.contains(&Effect::Unask("2".into())));
+    assert!(effects.contains(&Effect::Unask(1)));
     assert_eq!(effects.last(), Some(&Effect::Disconnect));
     assert_eq!(
         session.ending(),
@@ -541,4 +551,85 @@ fn too_many_calls_waiting_and_too_long_a_request_have_their_own_words() {
     session.agent_said(long, start);
     let why = error_for(&session.effects(), 1);
     assert!(why.contains("KiB") && !why.contains("waiting"), "{why}");
+}
+
+#[test]
+fn an_answer_about_a_call_the_agent_cancelled_never_allows_another_with_its_id() {
+    let start = Instant::now();
+    let mut session = connected(30, 600, start);
+    session.agent_said(call(5), start);
+    let first = asked(&session.effects());
+    // The agent cancels it just as the user allows it, and uses the ID
+    // again for a call nobody has allowed.
+    let cancel =
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}});
+    session.agent_said(cancel, start);
+    assert_eq!(session.effects(), [Effect::Unask(first)]);
+    let mut other = call(5);
+    other["params"]["name"] = json!("delete");
+    session.agent_said(other.clone(), start);
+    let second = asked(&session.effects());
+    assert_ne!(first, second);
+    session.answered(first, Verdict::Allowed, start);
+    assert_eq!(session.effects(), [], "the stale answer allows nothing");
+    session.answered(second, Verdict::Allowed, start);
+    assert_eq!(session.effects(), [Effect::Server(other)]);
+}
+
+#[test]
+fn what_cant_be_read_or_passed_on_is_told_of_never_just_dropped() {
+    let start = Instant::now();
+    let mut session = Session::new(grant(5, 60, 0));
+    session.agent_said(initialize(0), start);
+    session.connected(Ok(()), start);
+    session.effects();
+    // A server that pretty-prints its JSON never answers `initialize`:
+    // the first line that couldn't be read is told the daemon, once, and
+    // is why it failed to connect.
+    session.server_garbled("It wrote a line that isn't a JSON message: {".into());
+    session.server_garbled("and another".into());
+    let effects = session.effects();
+    assert!(
+        matches!(&effects[..], [Effect::Report { state: McpState::Starting, detail, .. }] if detail.ends_with(": {")),
+        "{effects:?}"
+    );
+    session.tick(start + Duration::from_secs(5));
+    let effects = session.effects();
+    assert!(
+        effects.iter().any(|effect| matches!(effect, Effect::Report { state: McpState::Error, detail, .. }
+            if detail.contains("didn't answer initialize") && detail.contains("isn't a JSON message"))),
+        "{effects:?}"
+    );
+
+    // A request of the server's too long for the agent is answered for
+    // it, so the server isn't left waiting, and told of.
+    let mut session = connected(30, 600, start);
+    let asks = json!({"jsonrpc":"2.0","id":"big","method":"sampling/createMessage"});
+    session.server_said(asks.clone(), start);
+    assert_eq!(session.effects(), [Effect::Agent(asks.clone())]);
+    session.not_passed_on(&asks);
+    let effects = session.effects();
+    assert!(
+        matches!(&effects[0], Effect::Server(refused) if refused["id"] == "big" && refused["error"].is_object()),
+        "{effects:?}"
+    );
+    assert!(
+        matches!(&effects[1], Effect::Report { detail, .. } if detail.contains("sampling/createMessage") && detail.contains("4 MiB")),
+        "{effects:?}"
+    );
+    // The agent's late answer to it has nowhere to go.
+    session.agent_said(json!({"jsonrpc":"2.0","id":"big","result":{}}), start);
+    assert_eq!(session.effects(), []);
+
+    // And a server can't have the agent hold requests without end.
+    for id in 0..64 {
+        session.server_said(json!({"jsonrpc":"2.0","id":id,"method":"ping"}), start);
+    }
+    session.effects();
+    session.server_said(json!({"jsonrpc":"2.0","id":64,"method":"ping"}), start);
+    let effects = session.effects();
+    assert!(
+        matches!(&effects[..], [Effect::Server(refused)] if refused["id"] == 64 && refused["error"].is_object()),
+        "{effects:?}"
+    );
 }

@@ -102,6 +102,18 @@ pub(super) struct Output {
     lines: std::sync::mpsc::Sender<Vec<u8>>,
     /// How many bytes wait to be written.
     waiting: Arc<AtomicUsize>,
+    /// Told once the thread has written all it will.
+    done: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// What became of a message for the agent.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Written {
+    /// It was queued, as it is or as the error that stands in for an
+    /// answer too long.
+    Queued,
+    /// It was too long, and nothing could stand in for it.
+    Dropped,
 }
 
 /// The agent can no longer be written to: it closed its end, or stopped
@@ -115,6 +127,7 @@ impl Output {
         let (lines, written) = std::sync::mpsc::channel::<Vec<u8>>();
         let waiting = Arc::new(AtomicUsize::new(0));
         let left = Arc::clone(&waiting);
+        let (finished, done) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             while let Ok(line) = written.recv() {
                 let result = output.write_all(&line).and_then(|()| output.flush());
@@ -123,24 +136,35 @@ impl Output {
                     break;
                 }
             }
+            let _ = finished.send(());
         });
-        Self { lines, waiting }
+        Self {
+            lines,
+            waiting,
+            done,
+        }
     }
 
-    /// Queues `message` for the agent, behind those before it.
-    pub(super) fn write(&self, message: &Value) -> Result<(), Gone> {
+    /// Queues `message` for the agent, behind those before it, and says
+    /// what became of it.
+    pub(super) fn write(&self, message: &Value) -> Result<Written, Gone> {
         let Some(line) = line(message) else {
-            return Ok(());
+            return Ok(Written::Dropped);
         };
         if self.waiting.fetch_add(line.len(), Ordering::Relaxed) > MAX_WAITING {
             return Err(Gone);
         }
-        self.lines.send(line).map_err(|_| Gone)
+        self.lines
+            .send(line)
+            .map(|()| Written::Queued)
+            .map_err(|_| Gone)
     }
 
-    /// Whether everything queued has been written, or can't be.
-    pub(super) fn drained(&self) -> bool {
-        self.waiting.load(Ordering::Relaxed) == 0
+    /// Takes no more, and waits until what's queued is written, or
+    /// can't be.
+    pub(super) async fn finish(self) {
+        drop(self.lines);
+        let _ = self.done.await;
     }
 }
 

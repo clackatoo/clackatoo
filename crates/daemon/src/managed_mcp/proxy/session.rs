@@ -23,9 +23,13 @@ const MOST_ASKING: usize = 16;
 /// The most requests the server may be working on at once.
 const MOST_SENT: usize = 64;
 
-/// The longest request shown to the daemon for its leave: what
-/// permission rules read, and the user may be shown.
-const MOST_SHOWN: usize = 256 * 1024;
+/// The longest request the daemon is asked about: what a chat's
+/// permission rules read. The user is shown less (see `MOST_SHOWN` in
+/// `server/managed_mcp.rs`).
+const MOST_CHECKED: usize = 256 * 1024;
+
+/// The most requests of the server's the agent may be answering at once.
+const MOST_ASKED: usize = 64;
 
 /// How long a call may wait for the daemon's leave. A person may take as
 /// long as they like to answer, so this only ends a wait on a daemon
@@ -56,15 +60,16 @@ pub(crate) enum Effect {
     Agent(Value),
     /// Send the server this message.
     Server(Value),
-    /// Ask the daemon whether the request kept as `key` may go ahead.
+    /// Ask the daemon whether a request may go ahead. `ask` numbers the
+    /// asking, and the answer comes back under it: never under the
+    /// request's own ID, which an agent may use again.
     Ask {
-        key: String,
+        ask: u64,
         method: String,
         params: String,
     },
-    /// Stop asking about the request kept as `key`: nothing waits for the
-    /// answer now.
-    Unask(String),
+    /// Stop the asking numbered so: nothing waits for the answer now.
+    Unask(u64),
     /// Close the connection to the server, if there is one, and make a
     /// new one after `after`.
     Connect { after: Duration },
@@ -167,7 +172,14 @@ pub(crate) struct Session {
     /// Whether the server the agent was last told of has resources and
     /// prompts to list. The stand-in says it has both, as the server may.
     lists: Lists,
-    asking: BTreeMap<String, Asking>,
+    /// The requests waiting for the daemon's leave, by the number each
+    /// asking was given.
+    asking: BTreeMap<u64, Asking>,
+    /// The number the next asking is given.
+    next_ask: u64,
+    /// The first line the server wrote on this connection that couldn't
+    /// be read, if it wrote one: said if it then fails to initialize.
+    garbled: Option<String>,
     sent: BTreeMap<String, Sent>,
     /// What the server asked the agent and hasn't been answered: the IDs,
     /// as the server wrote them.
@@ -235,6 +247,8 @@ impl Session {
             ready: false,
             lists: Lists::default(),
             asking: BTreeMap::new(),
+            next_ask: 0,
+            garbled: None,
             sent: BTreeMap::new(),
             asked: BTreeMap::new(),
             failures: 0,
@@ -281,6 +295,7 @@ impl Session {
         sent.chain(asking).min()
     }
 
+    /// The server's name, as the user configured it.
     fn name(&self) -> &str {
         &self.grant.bound.name
     }
@@ -298,14 +313,17 @@ impl Session {
         Duration::from_secs(definition.map_or(600, |d| u64::from(d.call_timeout_seconds)))
     }
 
+    /// Has the agent written `message`.
     fn agent(&mut self, message: Value) {
         self.effects.push(Effect::Agent(message));
     }
 
+    /// Has the server sent `message`.
     fn server(&mut self, message: Value) {
         self.effects.push(Effect::Server(message));
     }
 
+    /// Has the daemon told how the connection stands.
     fn report(&mut self, state: McpState, detail: &str, tools: Vec<McpToolInfo>) {
         self.effects.push(Effect::Report {
             state,
@@ -344,7 +362,7 @@ impl Session {
     /// The agent asked `method`, in the request `id`.
     fn agent_asked(&mut self, method: &str, id: &Value, request: Value, now: Instant) {
         let key = key(id);
-        if self.asking.contains_key(&key) || self.sent.contains_key(&key) {
+        if self.asking_about(id).is_some() || self.sent.contains_key(&key) {
             self.agent(error(id, "A request with this ID is already waiting"));
             return;
         }
@@ -386,28 +404,38 @@ impl Session {
             return;
         }
         let params = (request.get("params")).map_or_else(String::new, Value::to_string);
-        if params.len() > MOST_SHOWN {
+        if params.len() > MOST_CHECKED {
             let why = format!(
                 "This request is {} KiB. clackatoo checks at most {} KiB against a chat's \
                  permissions, so it was not sent: send less at a time.",
                 params.len().div_ceil(1024),
-                MOST_SHOWN / 1024
+                MOST_CHECKED / 1024
             );
             self.agent(error(id, &why));
             return;
         }
+        let ask = self.next_ask;
+        self.next_ask += 1;
         (self.asking).insert(
-            key.clone(),
+            ask,
             Asking {
                 request,
                 since: now,
             },
         );
         self.effects.push(Effect::Ask {
-            key,
+            ask,
             method: method.to_owned(),
             params,
         });
+    }
+
+    /// The number of the asking about the request `id`, if it waits for
+    /// the daemon's leave.
+    fn asking_about(&self, id: &Value) -> Option<u64> {
+        (self.asking.iter())
+            .find(|(_, asking)| asking.request.get("id") == Some(id))
+            .map(|(ask, _)| *ask)
     }
 
     /// The agent asked `method`, which needs no leave.
@@ -453,9 +481,10 @@ impl Session {
             && let Some(id) = message.pointer("/params/requestId")
         {
             let key = key(id);
-            if self.asking.remove(&key).is_some() {
+            if let Some(ask) = self.asking_about(id) {
                 // It was never sent: the server has nothing to cancel.
-                self.effects.push(Effect::Unask(key));
+                self.asking.remove(&ask);
+                self.effects.push(Effect::Unask(ask));
                 return;
             }
             // `initialize` is never cancelled, as the protocol says.
@@ -503,6 +532,7 @@ impl Session {
         }
     }
 
+    /// What a request is told when the server has too many already.
     fn too_many_sent(&self) -> String {
         format!(
             "MCP server ‘{}’ is still working on {MOST_SENT} requests. Wait for some to finish; \
@@ -570,8 +600,54 @@ impl Session {
         self.agent(result(&id, &stand_in));
     }
 
+    /// The server wrote a line that couldn't be read, and was passed
+    /// over, as `what` says. The first on a connection is told the
+    /// daemon, to log and show, so a server that writes something other
+    /// than a message a line isn't just quiet.
+    pub(crate) fn server_garbled(&mut self, what: String) {
+        if self.garbled.is_some() {
+            return;
+        }
+        let state = if self.initialized() {
+            McpState::Connected
+        } else {
+            McpState::Starting
+        };
+        self.report(state, &what, Vec::new());
+        self.garbled = Some(what);
+    }
+
+    /// `message`, which the server wrote, is too long for the agent and
+    /// wasn't passed on. An answer has an error in its place already. A
+    /// request is answered for the agent, so the server isn't left
+    /// waiting; that, or a notification, going missing is told the
+    /// daemon.
+    pub(crate) fn not_passed_on(&mut self, message: &Value) {
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            return;
+        };
+        let why = format!(
+            "A message from MCP server ‘{}’ ({method}) was over 4 MiB and wasn't passed on",
+            self.name()
+        );
+        if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
+            self.asked.remove(&key(id));
+            self.server(error(
+                id,
+                "This request is over 4 MiB, more than the agent is passed",
+            ));
+        }
+        let state = if self.initialized() {
+            McpState::Connected
+        } else {
+            McpState::Starting
+        };
+        self.report(state, &why, Vec::new());
+    }
+
     /// Connecting to the server went as `outcome` says.
     pub(crate) fn connected(&mut self, outcome: Result<(), Lost>, now: Instant) {
+        self.garbled = None;
         match outcome {
             Ok(()) => {
                 self.link = Link::Up {
@@ -647,6 +723,11 @@ impl Session {
         match (method, id) {
             // It asks the agent something.
             (Some(_), Some(id)) => {
+                if self.asked.len() >= MOST_ASKED {
+                    let why = "Too many requests already wait for the agent's answer";
+                    self.server(error(id, why));
+                    return;
+                }
                 self.asked.insert(key(id), id.clone());
                 self.agent(message);
             }
@@ -743,10 +824,11 @@ impl Session {
         self.agent(error(&sent.id, &why));
     }
 
-    /// The daemon said `verdict` about the request kept as `key`.
-    pub(crate) fn answered(&mut self, key: &str, verdict: Verdict, now: Instant) {
-        // One the agent cancelled meanwhile is no longer wanted.
-        let Some(asking) = self.asking.remove(key) else {
+    /// The daemon said `verdict` in answer to the asking numbered `ask`.
+    pub(crate) fn answered(&mut self, ask: u64, verdict: Verdict, now: Instant) {
+        // One the agent cancelled meanwhile is no longer wanted, and its
+        // answer is never taken for another request's.
+        let Some(asking) = self.asking.remove(&ask) else {
             return;
         };
         let id = asking.request.get("id").cloned().unwrap_or(Value::Null);
@@ -777,7 +859,7 @@ impl Session {
                 .pointer("/params/_meta/progressToken")
                 .cloned(),
         };
-        self.sent.insert(key.to_owned(), sent);
+        self.sent.insert(key(&sent.id), sent);
         self.server(asking.request);
     }
 
@@ -791,18 +873,32 @@ impl Session {
     /// reconnect, or changes the server's definition. A new one starts
     /// the connection to the server afresh.
     pub(crate) fn granted(&mut self, grant: Grant) {
-        self.daemon = true;
+        let was_away = !std::mem::replace(&mut self.daemon, true);
         if grant.revision() == self.grant.revision() {
+            // A daemon back from a restart knows nothing of the
+            // connection: it's told how it stands.
+            if was_away {
+                match &self.link {
+                    Link::Up {
+                        initialized: true, ..
+                    } => self.report(McpState::Connected, "", Vec::new()),
+                    Link::Down(lost) => {
+                        let (state, detail) = (lost.state(), lost.detail().to_owned());
+                        self.report(state, &detail, Vec::new());
+                    }
+                    Link::Up { .. } | Link::Connecting => {}
+                }
+            }
             return;
         }
         let name = self.name().to_owned();
-        for (key, asking) in std::mem::take(&mut self.asking) {
+        for (ask, asking) in std::mem::take(&mut self.asking) {
             let id = asking.request.get("id").cloned().unwrap_or(Value::Null);
             let why = format!(
                 "MCP server ‘{name}’ was reconnected before this call was sent, so it was not \
                  sent. Try again."
             );
-            self.effects.push(Effect::Unask(key));
+            self.effects.push(Effect::Unask(ask));
             self.agent(error(&id, &why));
         }
         for (_, sent) in std::mem::take(&mut self.sent) {
@@ -838,18 +934,18 @@ impl Session {
             };
             self.took_too_long(&sent, now);
         }
-        let given_up: Vec<String> = (self.asking.iter())
+        let given_up: Vec<u64> = (self.asking.iter())
             .filter(|(_, asking)| asking.since + LONGEST_ASKING <= now)
-            .map(|(key, _)| key.clone())
+            .map(|(ask, _)| *ask)
             .collect();
-        for key in given_up {
-            let Some(asking) = self.asking.remove(&key) else {
+        for ask in given_up {
+            let Some(asking) = self.asking.remove(&ask) else {
                 continue;
             };
             let id = asking.request.get("id").cloned().unwrap_or(Value::Null);
             let why = "clackatoo didn't decide whether to allow this call within a day, so it \
                        was not sent.";
-            self.effects.push(Effect::Unask(key));
+            self.effects.push(Effect::Unask(ask));
             self.agent(error(&id, why));
         }
     }
@@ -860,10 +956,13 @@ impl Session {
         let (what, limit, setting) = match &sent.kind {
             Kind::Initialize { .. } => {
                 let seconds = self.metadata_limit().as_secs();
-                let why = format!(
+                let mut why = format!(
                     "MCP server ‘{name}’ didn't answer initialize within {seconds} seconds \
                      (its timeout_seconds)"
                 );
+                if let Some(garbled) = &self.garbled {
+                    why = format!("{why}. {garbled}");
+                }
                 // Never cancelled: the connection is given up instead.
                 self.lost(Lost::Failed(why), now);
                 return;
@@ -909,9 +1008,9 @@ impl Session {
             "clackatoo closed this connection to MCP server ‘{}’: {why}",
             self.name()
         );
-        for (key, asking) in std::mem::take(&mut self.asking) {
+        for (ask, asking) in std::mem::take(&mut self.asking) {
             let id = asking.request.get("id").cloned().unwrap_or(Value::Null);
-            self.effects.push(Effect::Unask(key));
+            self.effects.push(Effect::Unask(ask));
             self.agent(error(&id, &why));
         }
         for (_, sent) in std::mem::take(&mut self.sent) {

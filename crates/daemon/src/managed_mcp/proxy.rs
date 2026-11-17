@@ -28,7 +28,7 @@ use serde_json::Value;
 use super::{
     config::Bound,
     credentials,
-    transport::{self, Lost, Unsent, Upstream},
+    transport::{self, Heard, Lost, Unsent, Upstream},
 };
 use control::{Daemon, News, Pace};
 use session::{Effect, Ending, Session, Verdict};
@@ -75,10 +75,11 @@ pub fn relay(
         chat,
         server: server.into(),
         token: token.into(),
+        pace: Pace::default(),
     };
     let runtime = transport::runtime().map_err(std::io::Error::other)?;
     runtime
-        .block_on(run(daemon, Pace::default(), input, output))
+        .block_on(run(daemon, input, output))
         .map_err(std::io::Error::other)
 }
 
@@ -88,6 +89,8 @@ enum FromServer {
     Connected(Result<(), Lost>),
     /// The server wrote this.
     Said(Value),
+    /// The server wrote a line that couldn't be read, described so.
+    Garbled(String),
     /// The server didn't take the request with this ID, for this reason.
     Unsent(Value, String),
     /// The connection went, for this reason. Nothing follows it.
@@ -97,22 +100,31 @@ enum FromServer {
 /// The connection to the server there is now, if any: a task of its
 /// own, told what to send.
 struct Server {
+    /// What to send it, in order. Dropped, the connection closes.
     send: tokio::sync::mpsc::UnboundedSender<Value>,
 }
 
 /// Everything a running proxy holds besides its session.
 struct Proxy {
+    /// Where the daemon is asked about calls.
     daemon: Daemon,
+    /// What the agent is written.
     output: stdio::Output,
+    /// What the proxy knows, and its rules.
     session: Session,
     /// Which connection to the server is the current one: what an
     /// earlier one still says is passed over.
     epoch: u64,
     server: Option<Server>,
+    /// Where each connection to the server tells what happens on it,
+    /// with its number.
     from_server: tokio::sync::mpsc::Sender<(u64, FromServer)>,
-    /// The calls the daemon is being asked about.
-    asks: tokio::task::JoinSet<(String, Verdict)>,
-    asking: BTreeMap<String, tokio::task::AbortHandle>,
+    /// The daemon being asked about calls: each task returns the number
+    /// of its asking with the answer.
+    asks: tokio::task::JoinSet<(u64, Verdict)>,
+    /// How to stop each asking, by its number.
+    asking: BTreeMap<u64, tokio::task::AbortHandle>,
+    /// What the daemon is to be told of the connection, in order.
     reports: tokio::sync::mpsc::UnboundedSender<Report>,
     /// Whether the server has answered `initialize`, for the watch to
     /// say in its heartbeats.
@@ -130,13 +142,12 @@ struct Report {
 /// Runs a proxy until the agent closes its end or the daemon ends it.
 pub(crate) async fn run(
     daemon: Daemon,
-    pace: Pace,
     input: std::fs::File,
     output: std::fs::File,
 ) -> Result<(), String> {
     let connected = Arc::new(AtomicBool::new(false));
     let (news, mut told) = tokio::sync::mpsc::channel(8);
-    let watch = tokio::spawn(daemon.clone().watch(pace, Arc::clone(&connected), news));
+    let watch = tokio::spawn(daemon.clone().watch(Arc::clone(&connected), news));
     // Nothing is read from the agent until the daemon has granted the
     // server: its `initialize` waits in the pipe.
     let grant = match told.recv().await {
@@ -215,6 +226,7 @@ impl Proxy {
         match event {
             FromServer::Connected(outcome) => self.session.connected(outcome, now),
             FromServer::Said(message) => self.session.server_said(message, now),
+            FromServer::Garbled(what) => self.session.server_garbled(what),
             FromServer::Unsent(id, why) => self.session.unsent(&id, &why, now),
             FromServer::Closed(lost) => {
                 self.server = None;
@@ -233,20 +245,23 @@ impl Proxy {
     }
 
     /// The daemon answered about a call, or the task asking it stopped.
-    fn daemon_answered(&mut self, answer: Result<(String, Verdict), tokio::task::JoinError>) {
+    fn daemon_answered(&mut self, answer: Result<(u64, Verdict), tokio::task::JoinError>) {
         // One stopped was no longer wanted: nothing waits for it.
-        let Ok((key, verdict)) = answer else {
+        let Ok((ask, verdict)) = answer else {
             return;
         };
-        self.asking.remove(&key);
-        self.session.answered(&key, verdict, Instant::now());
+        self.asking.remove(&ask);
+        self.session.answered(ask, verdict, Instant::now());
     }
 
     /// Writes the agent `message`; an agent that can't be written to has
     /// gone.
     fn write(&mut self, message: &Value) {
-        if self.output.write(message).is_err() {
-            self.session.agent_closed();
+        match self.output.write(message) {
+            Ok(stdio::Written::Queued) => {}
+            // Too long to pass on: the session says so where it's heard.
+            Ok(stdio::Written::Dropped) => self.session.not_passed_on(message),
+            Err(stdio::Gone) => self.session.agent_closed(),
         }
     }
 
@@ -264,6 +279,7 @@ impl Proxy {
         (self.connected).store(self.session.initialized(), Ordering::Relaxed);
     }
 
+    /// Does one thing the session says to.
     fn carry_out_one(&mut self, effect: Effect) {
         match effect {
             Effect::Agent(message) => self.write(&message),
@@ -275,23 +291,23 @@ impl Proxy {
                 }
             }
             Effect::Ask {
-                key,
+                ask,
                 method,
                 params,
             } => {
                 let daemon = self.daemon.clone();
                 let revision = self.session.grant().revision();
-                let asked = key.clone();
                 let task = self.asks.spawn(async move {
                     let verdict = daemon.check(revision, method, params).await;
-                    (asked, verdict)
+                    (ask, verdict)
                 });
-                self.asking.insert(key, task);
+                self.asking.insert(ask, task);
             }
-            Effect::Unask(key) => {
+            Effect::Unask(ask) => {
                 // Dropping the connection it asks on tells the daemon
-                // to take the question back.
-                if let Some(task) = self.asking.remove(&key) {
+                // to take the question back. An answer that has come
+                // already is under a number nothing waits for now.
+                if let Some(task) = self.asking.remove(&ask) {
                     task.abort();
                 }
             }
@@ -329,8 +345,8 @@ impl Proxy {
     }
 
     /// Ends the proxy: the daemon is told the agent closed it, if it
-    /// did, and what's queued for the agent is given a moment to be
-    /// written.
+    /// did, and what's queued for the agent is written, if it's still
+    /// reading.
     async fn finish(self, reporting: tokio::task::JoinHandle<()>) -> Result<(), String> {
         // A daemon that ended the proxy knows why, and one that can't be
         // reached can't be told.
@@ -347,10 +363,7 @@ impl Proxy {
         };
         drop(self.reports);
         let _ = tokio::time::timeout(Duration::from_secs(3), reporting).await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while !self.output.drained() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.output.finish()).await;
         result
     }
 }
@@ -380,6 +393,11 @@ async fn serve(
         async move { events.send((epoch, event)).await.is_ok() }
     };
     tokio::time::sleep(after).await;
+    // Done with before it began, as when a new grant came meanwhile:
+    // nothing is started.
+    if sent.is_closed() {
+        return;
+    }
     let limit = (bound.definition.as_ref()).map_or(30, |definition| definition.timeout_seconds);
     let connecting = tokio::time::timeout(
         Duration::from_secs(u64::from(limit)),
@@ -388,7 +406,7 @@ async fn serve(
     let mut upstream = match connecting.await {
         Ok(Ok(upstream)) => upstream,
         Ok(Err(lost)) => {
-            tell(FromServer::Connected(Err(lost))).await;
+            tell(FromServer::Connected(Err(lost.redacted(&bound)))).await;
             return;
         }
         Err(_) => {
@@ -419,25 +437,37 @@ async fn serve(
             }
             Some(went) = sending.join_next(), if !sending.is_empty() => match went {
                 Ok((Some(id), Err(Unsent::Refused(why)))) => {
+                    let why = credentials::redacted(&bound, &why);
                     if !tell(FromServer::Unsent(id, why)).await {
                         return;
                     }
                 }
-                Ok((_, Err(Unsent::Lost(lost)))) => break lost,
-                // It went, or it was a notification or an answer the
-                // server didn't take, which is no one's to hear of.
-                Ok((_, Ok(()) | Err(Unsent::Refused(_)))) | Err(_) => {}
-            },
-            said = upstream.receive() => match said {
-                Some(message) => {
-                    if !tell(FromServer::Said(message)).await {
+                // A notification or an answer it didn't take has no
+                // request to fail: it's told of instead.
+                Ok((None, Err(Unsent::Refused(why)))) => {
+                    let why = credentials::redacted(&bound, &why);
+                    let what = format!("It didn't take a message it was sent: {why}");
+                    if !tell(FromServer::Garbled(what)).await {
                         return;
                     }
                 }
-                None => break upstream.ended(&bound).await,
+                Ok((_, Err(Unsent::Lost(lost)))) => break lost,
+                Ok((_, Ok(()))) | Err(_) => {}
             },
+            said = upstream.receive() => {
+                let event = match said {
+                    Some(Heard::Message(message)) => FromServer::Said(message),
+                    Some(Heard::Garbled(what)) => {
+                        FromServer::Garbled(credentials::redacted(&bound, &what))
+                    }
+                    None => break upstream.ended(&bound).await,
+                };
+                if !tell(event).await {
+                    return;
+                }
+            }
         }
     };
     let _ = tokio::time::timeout(Duration::from_secs(2), upstream.close()).await;
-    tell(FromServer::Closed(lost)).await;
+    tell(FromServer::Closed(lost.redacted(&bound))).await;
 }
