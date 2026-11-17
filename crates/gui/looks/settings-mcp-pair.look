@@ -14,7 +14,7 @@ keys }}}}}}}}
 wait-for Add a server
 shot pair-list
 keys j<CR>
-wait-for as this project has it
+wait-for This project's search
 shot pair-shown
 size 640x780
 shot pair-shown-640
