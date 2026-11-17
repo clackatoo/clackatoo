@@ -558,6 +558,41 @@ impl Daemon {
         })
     }
 
+    /// Whether clackatoo's proxy serves the chat `chat` the managed
+    /// server `server` now. Its calls then ask the user themselves when
+    /// they must, so the agent's own question about one is answered at
+    /// once, as for clackatoo's own tools.
+    pub(super) fn serves_managed(&self, chat: TerminalId, server: &str) -> bool {
+        (self.managed_mcp.proxies.iter())
+            .any(|proxy| proxy.chat == chat && proxy.server == server && proxy.ending.is_none())
+    }
+
+    /// The option that lets `tool` go ahead once, if the chat `chat`'s
+    /// agent asks whether it may call a managed server's tool that
+    /// clackatoo's proxy serves it. The proxy asks the daemon's leave for
+    /// every call, which puts it to the user when it must, so the agent's
+    /// own question is answered at once and the user isn't asked twice:
+    /// as for clackatoo's own tools (see `HostedChat::about_own_tools`).
+    /// Which server it is goes by what the agent's adapter sets, never
+    /// the model's input, and counts only while that server's proxy has
+    /// its watch open: a server of the same name from the agent's own
+    /// configuration has no proxy, and is asked about as ever.
+    pub(super) fn about_managed_call(
+        &self,
+        chat: TerminalId,
+        tool: &agent_client_protocol_schema::v1::ToolCallUpdate,
+        options: &[agent_client_protocol_schema::v1::PermissionOption],
+    ) -> Option<String> {
+        use agent_client_protocol_schema::v1::PermissionOptionKind;
+        let server = self.chat_ref(chat)?.managed_call(tool)?;
+        if !self.serves_managed(chat, server) {
+            return None;
+        }
+        (options.iter())
+            .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+            .map(|option| option.option_id.0.to_string())
+    }
+
     /// A proxy asks `action` of the daemon, for the chat `chat`'s server
     /// `server`, showing the secret `shown`.
     pub(super) fn request_mcp_proxy(

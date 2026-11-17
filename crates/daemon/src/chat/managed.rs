@@ -5,11 +5,17 @@
 //! The servers allowed are kept with the chat's chosen settings, so they
 //! last through upgrades and restarts as its Tools setting does.
 
+use agent_client_protocol_schema::v1::{Meta, ToolCallUpdate};
+use serde_json::Value;
+
 use super::{Action, Choices, HostedChat};
 
 /// The start of the setting that says a server is allowed for the chat:
 /// the server's name follows.
 const ALLOWED: &str = "clackatoo.mcp.allowed.";
+
+/// What agents are told a managed server is called: this, then its name.
+const SERVER_PREFIX: &str = "managed_";
 
 /// How the user answered a question about a managed server's call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,5 +102,117 @@ impl HostedChat {
     /// which is how what they allowed is taken back.
     pub(super) fn forget_allowed_servers(&mut self) {
         self.chosen.retain(|(id, _)| !id.starts_with(ALLOWED));
+    }
+
+    /// The managed server the agent asks about a call of, in `tool`, if
+    /// its adapter says it's one: its name, without the prefix agents are
+    /// told it by. Whether the chat really has that server, served by
+    /// clackatoo's proxy, is for the daemon to say.
+    pub(crate) fn managed_call<'a>(&self, tool: &'a ToolCallUpdate) -> Option<&'a str> {
+        managed_call(
+            &self.agent,
+            tool.fields.title.as_deref(),
+            tool.fields.raw_input.as_ref(),
+            tool.meta.as_ref(),
+        )
+    }
+}
+
+/// The managed server a tool call `agent`'s adapter asked about, titled
+/// `title` with `input` and `meta`, is served by, going only by what the
+/// adapter sets, never by what the model wrote (see `own_call`, which
+/// reads the same fields for clackatoo's own server):
+/// - Claude Code's adapter says which server serves the tool it asks
+///   about in `_meta.claudeCode.mcpServer`: a managed one is named
+///   `managed_NAME` and was given by the client (`source` `dynamic`). One
+///   of that name from the user's own configuration isn't.
+/// - Codex's adapter titles its question "MCP tool call approval" with
+///   the server in `serverName`, or `mcp.SERVER.TOOL` with both in its
+///   input.
+/// - Any other agent's are never taken for a managed server's.
+fn managed_call<'a>(
+    agent: &str,
+    title: Option<&str>,
+    input: Option<&'a Value>,
+    meta: Option<&'a Meta>,
+) -> Option<&'a str> {
+    let server = match agent {
+        "claude" => {
+            let serving = meta?.get("claudeCode")?.get("mcpServer")?;
+            let field = |name: &str| serving.get(name).and_then(Value::as_str);
+            field("name").filter(|_| field("source") == Some("dynamic"))?
+        }
+        "codex" => {
+            let field = |name: &str| input.and_then(|input| input.get(name)?.as_str());
+            match title? {
+                "MCP tool call approval" => field("serverName")?,
+                title => {
+                    let (server, tool) = (field("server")?, field("tool")?);
+                    let named = title.strip_prefix("mcp.")?.strip_prefix(server)?;
+                    (named.strip_prefix('.') == Some(tool)).then_some(server)?
+                }
+            }
+        }
+        _ => return None,
+    };
+    server.strip_prefix(SERVER_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn meta(value: Value) -> Meta {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_managed_servers_call_is_known_by_what_the_adapter_sets_never_the_models_input() {
+        let dynamic = meta(json!({"claudeCode": {
+            "toolName": "mcp__managed_docs__search",
+            "mcpServer": {"name": "managed_docs", "source": "dynamic"},
+        }}));
+        assert_eq!(
+            managed_call("claude", None, None, Some(&dynamic)),
+            Some("docs")
+        );
+        // One the user's own configuration names alike isn't clackatoo's.
+        let configured = meta(json!({"claudeCode": {
+            "mcpServer": {"name": "managed_docs", "source": "user"},
+        }}));
+        assert_eq!(managed_call("claude", None, None, Some(&configured)), None);
+        // Nor is one only the tool's name, or the model's input, points at.
+        let named = meta(json!({"claudeCode": {"toolName": "mcp__managed_docs__search"}}));
+        let input = json!({"server": "managed_docs", "serverName": "managed_docs"});
+        assert_eq!(
+            managed_call("claude", None, Some(&input), Some(&named)),
+            None
+        );
+        // Clackatoo's own server isn't a managed one.
+        let own = meta(json!({"claudeCode": {
+            "mcpServer": {"name": "clackatoo", "source": "dynamic"},
+        }}));
+        assert_eq!(managed_call("claude", None, None, Some(&own)), None);
+
+        let asked = json!({"serverName": "managed_docs"});
+        let approval = Some("MCP tool call approval");
+        assert_eq!(
+            managed_call("codex", approval, Some(&asked), None),
+            Some("docs")
+        );
+        let called = json!({"server": "managed_docs", "tool": "search"});
+        let title = Some("mcp.managed_docs.search");
+        assert_eq!(
+            managed_call("codex", title, Some(&called), None),
+            Some("docs")
+        );
+        // A title the input doesn't bear out says nothing.
+        let other = json!({"server": "managed_docs", "tool": "delete"});
+        assert_eq!(managed_call("codex", title, Some(&other), None), None);
+        assert_eq!(
+            managed_call("gemini", approval, Some(&asked), Some(&dynamic)),
+            None
+        );
     }
 }
