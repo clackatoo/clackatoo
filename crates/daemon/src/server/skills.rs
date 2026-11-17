@@ -235,7 +235,7 @@ impl Daemon {
             .map(|chat| chat.project().to_owned());
         let project = known.unwrap_or_else(|| {
             let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-            clackatoo_syntax::git_root(&cwd, &self.config.home).unwrap_or(cwd)
+            clackatoo_syntax::git_root(&cwd, self.real_home()).unwrap_or(cwd)
         });
         self.roots_of(cwd, project)
     }
@@ -247,17 +247,21 @@ impl Daemon {
         Some(self.roots_of(cwd, project))
     }
 
+    /// The home directory with links followed, worked out once, as it
+    /// reads the disk. A chat's working directory and project have their
+    /// links followed too, so this is the home they're found to be in or
+    /// under: where `/home` is a link, the one in the environment isn't.
+    pub(super) fn real_home(&self) -> &std::path::Path {
+        self.skills.home.get_or_init(|| {
+            let home = &self.config.home;
+            home.canonicalize().unwrap_or_else(|_| home.clone())
+        })
+    }
+
     /// The roots of a catalogue for `cwd`, in `project`: with what the
     /// user has said of that project, and of skills, as it is now.
     fn roots_of(&self, cwd: PathBuf, project: PathBuf) -> Roots {
-        // Once, as it reads the disk: a home reached through a link is
-        // then the folder a chat's working directory is found to be in.
-        let home = (self.skills.home)
-            .get_or_init(|| {
-                let home = &self.config.home;
-                home.canonicalize().unwrap_or_else(|_| home.clone())
-            })
-            .clone();
+        let home = self.real_home().to_owned();
         let config = (self.config.own_config.as_ref())
             .and_then(|own| own.dirs.daemon.parent().map(std::path::Path::to_owned));
         let roots = Roots {

@@ -331,6 +331,19 @@ impl Tree {
 }
 
 impl HostedChat {
+    /// Every snapshot the chat holds: with its turns, on the branch shown
+    /// and those kept aside, with its queued messages and the one waiting
+    /// for its session: what the context store must not let go of.
+    pub(crate) fn held_context(&self) -> impl Iterator<Item = &ContextSnapshot> {
+        let shown = self.node.turns.iter().flat_map(|turn| &turn.context);
+        let kept = (self.tree.segs.iter().flatten())
+            .filter_map(|seg| seg.held.as_ref())
+            .flat_map(|held| held.turns.iter().flat_map(|(_, turn)| &turn.context));
+        let queued = (self.user_queue.messages.iter()).flat_map(|queued| &queued.prompt.context);
+        let waiting = self.queued.iter().flat_map(|prompt| &prompt.context);
+        shown.chain(kept).chain(queued).chain(waiting)
+    }
+
     /// The context people attached to its messages, for the next build:
     /// what its turns were sent with, on the branch shown and those kept,
     /// what waits with its queued messages, and what's chosen in its draft.

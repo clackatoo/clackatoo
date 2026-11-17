@@ -186,4 +186,38 @@ fn only_a_search_for_symbols_starts_an_index_and_never_of_the_home_directory() {
             .is_none()
     );
     assert!(world.daemon.outline_loaded(&home).is_none());
+    // The outline of one loose file there needs no walk: it gets an index
+    // that holds only what's asked about, which a search never reads.
+    assert!(world.daemon.outline_for_file(&home).is_ok());
+    let all = world.daemon.search_index(ContextKind::All, &home);
+    assert!(all.unwrap().is_none());
+    assert!(
+        world
+            .daemon
+            .search_index(ContextKind::Symbol, &home)
+            .is_err()
+    );
+    world.daemon.take_outlines();
+    let listed = world.daemon.work.scheduler.snapshot().1;
+    let scope = Some(home.to_string_lossy().into_owned());
+    assert!(
+        listed.iter().all(|job| job.scope != scope),
+        "home is never scanned: {listed:?}"
+    );
+}
+
+#[test]
+fn a_home_reached_through_a_link_is_still_the_home_that_is_never_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // The environment names home through the link, as where `/home` is
+    // one; a chat's project has its links followed.
+    let (mut daemon, chat) = crate::server::agent_files::tests::daemon_with_chat(&link);
+    daemon.config.languages = Some(real.join("languages"));
+    assert_eq!(daemon.chat_ref(chat).unwrap().project(), real);
+    let refused = daemon.search_index(ContextKind::Symbol, &real);
+    assert!(refused.is_err_and(|why| why.contains("home directory")));
 }

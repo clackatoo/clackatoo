@@ -32,11 +32,12 @@ struct Found {
 /// their room: those of another layout, those whose project root is no
 /// longer a folder, those not written to for `most_unused`, and then the
 /// least recently written until the folder holds no more than
-/// `most_held`. Those in `loaded` are in use, and always stay. Returns
+/// `most_held`. One `in_use` always stays: that's asked as each is about
+/// to go, so a project loaded while this runs keeps its index. Returns
 /// how many were removed.
 pub(crate) fn prune(
     dir: &Path,
-    loaded: &[PathBuf],
+    in_use: &dyn Fn(&Path) -> bool,
     most_unused: Duration,
     most_held: u64,
 ) -> usize {
@@ -58,7 +59,7 @@ pub(crate) fn prune(
         let Some(found) = found(path.clone()) else {
             continue;
         };
-        if loaded.contains(&path) {
+        if in_use(&path) {
             held += found.size;
             continue;
         }
@@ -66,7 +67,7 @@ pub(crate) fn prune(
             .duration_since(found.written)
             .is_ok_and(|unused| unused >= most_unused);
         if !name.starts_with(PREFIX) || unused || root_gone(&path) {
-            removed += remove(&path);
+            removed += remove(&path, in_use);
             continue;
         }
         held += found.size;
@@ -78,7 +79,7 @@ pub(crate) fn prune(
             break;
         }
         held = held.saturating_sub(found.size);
-        removed += remove(&found.path);
+        removed += remove(&found.path, in_use);
     }
     if removed > 0 {
         log::info!(
@@ -133,9 +134,12 @@ fn root_gone(path: &Path) -> bool {
     root.is_some_and(|root| !Path::new(&root).is_dir())
 }
 
-/// Removes the index at `path` and what `SQLite` keeps beside it. Returns
-/// 1 if it went.
-fn remove(path: &Path) -> usize {
+/// Removes the index at `path` and what `SQLite` keeps beside it, unless
+/// it has come into use since it was chosen. Returns 1 if it went.
+fn remove(path: &Path, in_use: &dyn Fn(&Path) -> bool) -> usize {
+    if in_use(path) {
+        return 0;
+    }
     for suffix in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(beside(path, suffix));
     }
@@ -183,12 +187,8 @@ mod tests {
         let loaded = index(&cache, "v2-loaded.sqlite", Some(&here), 40 * day);
         let layout = index(&cache, "v1-layout.sqlite", Some(&here), day);
         std::fs::write(cache.join("notes.txt"), "not an index").unwrap();
-        let removed = prune(
-            &cache,
-            std::slice::from_ref(&loaded),
-            MOST_UNUSED,
-            MOST_HELD,
-        );
+        let in_use = |index: &Path| index == loaded;
+        let removed = prune(&cache, &in_use, MOST_UNUSED, MOST_HELD);
         assert_eq!(removed, 3);
         assert!(current.exists());
         assert!(loaded.exists(), "an index in use stays however old");
@@ -207,9 +207,22 @@ mod tests {
         let oldest = index(&cache, "v2-c.sqlite", None, 3 * hour);
         let one = found(newest.clone()).unwrap().size;
         // Room for two of the three.
-        let removed = prune(&cache, &[], MOST_UNUSED, 2 * one + one / 2);
+        let removed = prune(&cache, &|_| false, MOST_UNUSED, 2 * one + one / 2);
         assert_eq!(removed, 1);
         assert!(newest.exists() && middle.exists());
         assert!(!oldest.exists());
+    }
+
+    #[test]
+    fn an_index_that_comes_into_use_while_the_clear_out_runs_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let old = index(&cache, "v2-old.sqlite", None, Duration::from_hours(40 * 24));
+        // Not in use when it's looked at, but loaded by the time it would
+        // go.
+        let asked = std::cell::Cell::new(0);
+        let in_use = |_: &Path| asked.replace(asked.get() + 1) > 0;
+        assert_eq!(prune(&cache, &in_use, MOST_UNUSED, MOST_HELD), 0);
+        assert!(old.exists());
     }
 }
