@@ -109,6 +109,7 @@ impl TestDaemon {
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
+            start_wait: clackatoo_daemon::DEFAULT_START_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
             quiet_turn: clackatoo_daemon::DEFAULT_QUIET_TURN,
@@ -14186,6 +14187,36 @@ while :; do
 done
 ";
 
+/// A shell that marks its commands as [`MARKING_SHELL`] does, but runs
+/// none it can't take, as fish does with bash's syntax (CLACKA-256): one
+/// starting `bad` it can't parse, which it says and draws its prompt
+/// again for, marking nothing more; one starting `more` it reads as
+/// unfinished, waiting for another line, marking nothing. Ctrl-C clears
+/// what it was given, as a shell's line editor does.
+const REFUSING_SHELL: &str = "#!/bin/sh
+trap 'interrupted=1' INT
+while :; do
+  interrupted=
+  printf '\\033]133;A\\007$ '
+  if ! IFS= read -r line; then
+    [ -n \"$interrupted\" ] && { echo; continue; }
+    exit 0
+  fi
+  case $line in
+    bad*) printf 'sh: %s: cannot be parsed\\n' \"$line\"; continue ;;
+    more*)
+      if ! IFS= read -r rest; then
+        [ -n \"$interrupted\" ] && { echo; continue; }
+        exit 0
+      fi
+      line=\"$line $rest\" ;;
+  esac
+  printf '\\033]133;C\\007'
+  eval \"$line\"
+  printf '\\033]133;D;%s\\007' \"$?\"
+done
+";
+
 impl TestDaemon {
     /// A daemon whose agents get clackatoo's tools, relayed by the fake
     /// agent, and whose terminals run a shell that marks its commands.
@@ -26628,6 +26659,89 @@ fn managed_activity_is_persisted_before_execution_and_duplicate_ids_do_not_rerun
         "mcp read_activities {\"id\":\"once\"}",
     ));
     assert!(words.contains("No operation"), "{words}");
+}
+
+/// A command the shell won't run, as fish won't bash's syntax, marks
+/// nothing, so nothing said it ended: its activity ends refused, in the
+/// shell's own words, a wait for it is answered, and Ctrl-C clears it
+/// from the shell's line, so the next command typed there runs
+/// (CLACKA-256).
+#[test]
+fn a_command_the_shell_never_runs_ends_its_activity_and_its_wait() {
+    use clackatoo_protocol::ActivityState;
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        // Named as a shell clackatoo knows marks its commands.
+        let shell = dir.join("bash");
+        std::fs::write(&shell, REFUSING_SHELL).unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        config.shell = shell.into();
+        config.shell_integration = Some(dir.into());
+        // Activities are kept there before they run.
+        config.workspaces = Some(dir.join("workspaces"));
+        config.start_wait = Duration::from_millis(300);
+    });
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+
+    // Waited for in a terminal beside the chat: the wait is answered.
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp run_in_terminal {\"command\":\"more to come\"}\n\
+         mcp wait_for_terminal {\"pane\":2}",
+    ));
+    assert!(
+        words.contains("wait_for_terminal: Pane 2's shell didn't run the command"),
+        "{words}"
+    );
+    // Ctrl-C cleared it: what's typed next isn't added to it, and runs
+    // by itself. (This shell's marks don't say the command.)
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp send_to_terminal {\"pane\":2,\"text\":\"echo fine\\n\"}\n\
+         mcp wait_for_terminal {\"pane\":2}",
+    ));
+    assert!(
+        words.contains("wait_for_terminal: fine\n[exited with status 0]"),
+        "{words}"
+    );
+
+    // An activity the shell can't parse ends, with what the shell said.
+    let args = serde_json::json!({"id":"bad", "title":"Bad", "command":"bad syntax"});
+    ask(&mut client, chat, &format!("mcp start_activity {args}"));
+    let node = wait_for_chat(&mut client, chat, |node| {
+        (node.activities.iter()).any(|a| a.id == "bad" && !a.state.active())
+    });
+    let bad = node.activities.iter().find(|a| a.id == "bad").unwrap();
+    assert_eq!(bad.state, ActivityState::Refused);
+    assert!(
+        bad.result.contains("didn't run the command"),
+        "{}",
+        bad.result
+    );
+    assert!(
+        bad.result.contains("bad syntax: cannot be parsed"),
+        "{}",
+        bad.result
+    );
+
+    // And one it reads as unfinished, which it says nothing of.
+    let args = serde_json::json!({"id":"more", "title":"More", "command":"more of it"});
+    ask(&mut client, chat, &format!("mcp start_activity {args}"));
+    let node = wait_for_chat(&mut client, chat, |node| {
+        (node.activities.iter()).any(|a| a.id == "more" && !a.state.active())
+    });
+    let more = node.activities.iter().find(|a| a.id == "more").unwrap();
+    assert_eq!(more.state, ActivityState::Refused);
+    assert!(
+        more.result.contains("didn't run the command"),
+        "{}",
+        more.result
+    );
 }
 
 #[test]

@@ -169,6 +169,13 @@ pub struct DaemonConfig {
     /// prompt, when the shell marks its prompts, before the agent is told
     /// the shell never became ready.
     pub prompt_wait: std::time::Duration,
+    /// How long a command an agent typed at a shell's prompt may take to
+    /// start before it's taken as one the shell won't run: one it can't
+    /// parse, or reads as unfinished, marks nothing. Counted from when the
+    /// prompt was seen, and only while the shell has the terminal to
+    /// itself: one inside ssh is waited for as it was. A setting for
+    /// tests: [`DEFAULT_START_WAIT`] for the rest.
+    pub start_wait: std::time::Duration,
     /// How long a command kept running always waits to run again once it
     /// ends: twice as long each time it ends again soon after it started,
     /// up to a minute. A setting for tests: [`DEFAULT_KEEP_WAIT`] for the
@@ -471,6 +478,13 @@ pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_m
 /// unless told otherwise: zsh with plugins can take seconds to start.
 pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a command typed at a shell's prompt may take to start, unless
+/// told otherwise. Shells mark a command's start as soon as they've read
+/// it, before running it or their users' hooks, so this is long only to be
+/// sure: going past it, the command is taken as never run, and Ctrl-C
+/// clears what's left of it.
+pub const DEFAULT_START_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long a command must have run for its end to be told, unless the
 /// daemon's config says otherwise (see
 /// [`DaemonConfig::long_commands`]).
@@ -658,6 +672,7 @@ impl DaemonConfig {
             lsp_trace: non_empty("CLACKATOO_LSP_TRACE").map(PathBuf::from),
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,
+            start_wait: DEFAULT_START_WAIT,
             keep_wait: DEFAULT_KEEP_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,
             session_wait: DEFAULT_SESSION_WAIT,

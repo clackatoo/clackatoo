@@ -243,6 +243,13 @@ impl Daemon {
                     expect: kept.expect,
                     expect_first: kept.expect_first,
                     renumbered: kept.renumbered,
+                    // Not handed over: a command typed just before the
+                    // upgrade that the shell never runs is waited for as
+                    // before, rather than have Ctrl-C typed at a prompt
+                    // that may be the user's again.
+                    typed_at: None,
+                    prompt_seen: None,
+                    not_run: false,
                     retained: saved.retained,
                     close_due: saved
                         .close_left
@@ -282,6 +289,10 @@ impl Daemon {
                 expect: kept.expect,
                 expect_first: kept.expect_first,
                 renumbered: kept.renumbered,
+                // Not handed over: see `resume_agent_terminals`.
+                typed_at: None,
+                prompt_seen: None,
+                not_run: false,
                 retained: true,
                 close_due: None,
                 published: None,

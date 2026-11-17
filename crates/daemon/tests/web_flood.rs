@@ -55,6 +55,7 @@ fn pipelined_requests_arent_answered_past_what_the_client_reads() {
         lsp_trace: None,
         server_idle: Duration::ZERO,
         prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
+        start_wait: clackatoo_daemon::DEFAULT_START_WAIT,
         probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
         session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
         quiet_turn: clackatoo_daemon::DEFAULT_QUIET_TURN,

@@ -76,6 +76,24 @@ exit status is still the one the marks gave: output that marked its command
 finished with status 0 can make a later real failure read as success once it
 truly ends.
 
+A command the shell won't run marks nothing at all: one it can't parse, as
+fish can't bash's `$((…))` or `&&` in the wrong place, or one it reads as
+unfinished, as fish reads bash's `for … do … done` (fish wants `end`) or
+any shell reads an unclosed quote. So once 10 seconds have passed with it
+typed at the shell's prompt and not started, while the shell has the
+terminal to itself, it's taken as never run. (A command typed ahead of its
+prompt counts from when the prompt comes. One typed into a shell inside
+`ssh` is waited for as below.)
+`wait_for_terminal` then answers at once, saying so, with what the terminal
+shows, the shell's own error among it; an activity's card says it was
+refused, with the same. clackatoo then presses
+<kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal, which clears the line from
+the shell's editor, so the next command typed there isn't added to it.
+Shells mark a command's start as soon as they've read it, before running it
+or your hooks, so one that's merely slow to start isn't taken for one never
+run. This isn't carried through a daemon upgrade: a command typed in the
+moments before one is waited for as it would have been before.
+
 The same holds for a shell inside another, at the far end of `ssh` or
 `docker exec`: its commands are marked, but the terminal's own shell has it
 back only once ssh ends. So `wait_for_terminal` on a command run in that inner

@@ -2072,6 +2072,7 @@ pub(super) mod tests {
             lsp_trace: None,
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
+            start_wait: crate::DEFAULT_START_WAIT,
             probe_wait: crate::DEFAULT_PROBE_WAIT,
             session_wait: crate::DEFAULT_SESSION_WAIT,
             quiet_turn: crate::DEFAULT_QUIET_TURN,

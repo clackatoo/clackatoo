@@ -382,6 +382,9 @@ impl Daemon {
         let record = &self.tools.activities[at];
         let commanded = self.tools.commanded.get(&terminal);
         let refused = commanded.and_then(|c| c.failed.clone());
+        // The shell didn't run it: refused as surely, in its own words,
+        // which the screen shows (see `describe_terminal`).
+        let not_run = commanded.is_some_and(|c| c.not_run);
         let grid = self
             .terminals
             .get(&terminal)
@@ -391,7 +394,7 @@ impl Daemon {
             .and_then(|g| record.expect.and_then(|block| g.block_progress(block)));
         let starting = record.activity.state == ActivityState::Starting;
         let pane = record.activity.pane;
-        let state = if refused.is_some() {
+        let state = if refused.is_some() || not_run {
             ActivityState::Refused
         } else if let Some(Progress::Finished(code)) = progress
             // Not as a program prints the marks of an end: only once the

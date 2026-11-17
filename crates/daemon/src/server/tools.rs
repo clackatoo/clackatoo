@@ -209,6 +209,17 @@ struct Commanded {
     /// when `expect` was set (see [`Terminal::block_renumberings`]): once
     /// that changes, an `expect` from before means nothing.
     renumbered: u64,
+    /// When the last command was typed at a prompt, while it's still to
+    /// be seen whether the shell runs it (see [`Commanded::never_ran`]).
+    typed_at: Option<Instant>,
+    /// When the prompt it was typed at was seen: as it was typed, or, for
+    /// one typed ahead of its prompt, as that came. The wait for it to
+    /// start counts from here, not from a slow prompt's drawing.
+    prompt_seen: Option<Instant>,
+    /// The shell didn't run the last command typed: it can't parse it, or
+    /// reads it as unfinished, and so marked nothing. Until another is
+    /// typed.
+    not_run: bool,
     /// Selection is permanent: moving away never re-enables cleanup.
     retained: bool,
     /// Confirmed completion starts one grace period, reset by new work.
@@ -315,13 +326,68 @@ impl Commanded {
         self.renumbered = grid.block_renumberings();
         // Typed before any prompt: the first one marked is the one.
         self.expect_first = latest.is_none();
+        let now = Instant::now();
+        self.typed_at = self.expect.map(|_| now);
+        self.prompt_seen = matches!(latest, Some((_, Progress::Prompt))).then_some(now);
+        self.not_run = false;
+    }
+
+    /// Notes what the shell `grid` shows has done since a command was
+    /// typed into it, by `now`: the prompt it was typed ahead of has come,
+    /// or a command has started where the last one was never run, which
+    /// is over then.
+    fn moved_on(&mut self, grid: &Terminal, now: Instant) {
+        let Some(expect) = self.expect else {
+            return;
+        };
+        let at_prompt = grid.block_renumberings() == self.renumbered
+            && grid.block_progress(expect) == Some(Progress::Prompt);
+        if self.typed_at.is_some() && self.prompt_seen.is_none() && at_prompt {
+            self.prompt_seen = Some(now);
+        }
+        if self.not_run && !at_prompt {
+            self.not_run = false;
+        }
+    }
+
+    /// Whether the command typed at the prompt of the shell `grid` shows
+    /// is one the shell won't run, by `now`: `wait` after it was typed, its
+    /// block still hasn't started. A shell marks a command's start as soon
+    /// as it has read it, but one it can't parse it only reports, drawing
+    /// its prompt again (fish) or marking an end with no start (bash), and
+    /// one it reads as unfinished it waits on for more, marking nothing.
+    /// The block is the same through all of it, as a prompt drawn again
+    /// is (see `clackatoo_term::blocks`). Counted from when its prompt was
+    /// seen (see [`Commanded::prompt_seen`]).
+    fn never_ran(&self, grid: &Terminal, now: Instant, wait: Duration) -> bool {
+        let (Some(_), Some(seen), Some(expect)) = (self.typed_at, self.prompt_seen, self.expect)
+        else {
+            return false;
+        };
+        !self.not_run
+            && self.failed.is_none()
+            && now >= seen + wait
+            && grid.block_renumberings() == self.renumbered
+            && grid.block_progress(expect) == Some(Progress::Prompt)
+    }
+
+    /// When to look again at whether the command typed at the prompt of
+    /// the shell `grid` shows is one it won't run, if that's still to be
+    /// seen: never once its block has started.
+    fn next_start_look(&self, grid: &Terminal, wait: Duration) -> Option<Instant> {
+        let expect = self.expect?;
+        let still = self.typed_at.is_some()
+            && !self.not_run
+            && grid.block_renumberings() == self.renumbered
+            && grid.block_progress(expect) == Some(Progress::Prompt);
+        still.then_some(self.prompt_seen? + wait)
     }
 
     /// Whether the command this says was typed into the shell `grid`
     /// shows has finished, or else the one running in it, if this is
     /// `None`: `None` if the shell doesn't say.
     fn finished(this: Option<&Self>, grid: &Terminal) -> Option<bool> {
-        if this.is_some_and(|commanded| commanded.failed.is_some()) {
+        if this.is_some_and(|commanded| commanded.failed.is_some() || commanded.not_run) {
             return Some(true);
         }
         if this.is_some_and(|commanded| commanded.typing.is_some()) {
@@ -2082,8 +2148,9 @@ impl Daemon {
         let grid = self.terminals.get(&terminal)?.terminal.grid()?;
         let commanded = self.tools.commanded.get(&terminal);
         let finished = Commanded::finished(commanded, grid)?;
-        // Never typed, it's over whatever the marks say.
-        let refused = commanded.is_some_and(|commanded| commanded.failed.is_some());
+        // Never typed, or never run, it's over whatever the marks say.
+        let refused =
+            commanded.is_some_and(|commanded| commanded.failed.is_some() || commanded.not_run);
         Some(finished && (refused || self.shell_back(terminal, Instant::now())))
     }
 
@@ -2200,6 +2267,9 @@ impl Daemon {
                 .and_then(|slot| slot.terminal.grid())
                 .map_or(0, Terminal::block_renumberings);
             commanded.expect_first = false;
+        }
+        if let Some(grid) = (self.terminals.get(&terminal)).and_then(|slot| slot.terminal.grid()) {
+            commanded.moved_on(grid, Instant::now());
         }
         // Output since a look that found the shell not back may be the
         // command's real end, which a forged one before it hid: looked at
@@ -2361,6 +2431,16 @@ impl Daemon {
         if let Some(failed) = commanded.and_then(|commanded| commanded.failed.as_ref()) {
             return format!("Pane {pane}: {failed}.");
         }
+        if commanded.is_some_and(|commanded| commanded.not_run) {
+            let (first, last) = grid.document_bounds();
+            let start = last.saturating_sub(lines as u64 - 1).max(first);
+            let text = whole_lines(grid, start, last, self.config.hints.noagent);
+            return format!(
+                "Pane {pane}'s shell didn't run the command: it can't parse it, or reads it as \
+                 unfinished, as a shell does with another shell's syntax. Nothing ran, and Ctrl-C \
+                 cleared it from the shell's line. The terminal shows:\n{text}"
+            );
+        }
         if commanded.is_some_and(|commanded| commanded.typing.is_some()) {
             return format!(
                 "Pane {pane}'s shell is still starting: the command hasn't been typed yet."
@@ -2469,6 +2549,7 @@ impl Daemon {
     /// Work is only eligible after shell integration confirms completion.
     /// Unmarked shells, new work, and explicit keep rules never expire.
     pub(super) fn maintain_agent_terminals(&mut self, now: Instant) {
+        self.give_up_commands_not_run(now);
         // An end the marks say came is taken once the shell is back (see
         // `shell_back`); seen so now, what waits for it is told, first.
         let commanded: Vec<TerminalId> = self.tools.commanded.keys().copied().collect();
@@ -2523,6 +2604,52 @@ impl Daemon {
         }
     }
 
+    /// Ends the waits for the commands typed at shells' prompts that the
+    /// shells haven't run by `now` (see [`Commanded::never_ran`]), and
+    /// clears each from its shell's line with Ctrl-C: left there, the next
+    /// command typed would be added to it. Only while the shell has its
+    /// terminal to itself, as it does at its prompt: one running a program
+    /// is busy, not refusing.
+    fn give_up_commands_not_run(&mut self, now: Instant) {
+        let wait = self.config.start_wait;
+        let due: Vec<TerminalId> = (self.tools.commanded.iter())
+            .filter(|(terminal, commanded)| {
+                (self.terminals.get(terminal))
+                    .and_then(|slot| slot.terminal.grid())
+                    .is_some_and(|grid| commanded.never_ran(grid, now, wait))
+            })
+            .map(|(&terminal, _)| terminal)
+            .collect();
+        let mut not_run = Vec::new();
+        for terminal in due {
+            let back = (self.terminals.get(&terminal))
+                .is_some_and(|slot| slot.terminal.shell_has_terminal().is_ok());
+            if back {
+                not_run.push(terminal);
+            } else if let Some(commanded) = self.tools.commanded.get_mut(&terminal) {
+                // A program has it, as ssh does with a shell inside it,
+                // whose marks these are: busy, not refusing, and no more
+                // to be told of it here. Its wait runs out its time.
+                commanded.typed_at = None;
+            }
+        }
+        for terminal in not_run {
+            if let Some(commanded) = self.tools.commanded.get_mut(&terminal) {
+                commanded.not_run = true;
+                commanded.typed_at = None;
+            }
+            log::info!("terminal {terminal}: its shell didn't run the command typed");
+            // Told as the screen shows it, the shell's own words of why,
+            // before Ctrl-C clears the line.
+            self.answer_finished(terminal, false);
+            self.typing_into(terminal, true);
+            if let Err(why) = self.type_into(terminal, b"\x03", false) {
+                log::warn!("terminal {terminal}: Ctrl-C couldn't be typed: {why}");
+            }
+            self.typing_into(terminal, false);
+        }
+    }
+
     /// What the marks say of how `terminal`'s command is getting on, for
     /// [`maintain_agent_terminals`](Self::maintain_agent_terminals).
     fn ended_by_marks(&self, terminal: TerminalId) -> Option<Ended> {
@@ -2546,7 +2673,10 @@ impl Daemon {
         Some(Ended {
             said,
             running,
-            looks: (said || activity) && running && commanded.failed.is_none(),
+            looks: (said || activity)
+                && running
+                && commanded.failed.is_none()
+                && !commanded.not_run,
         })
     }
 
@@ -2571,8 +2701,8 @@ impl Daemon {
     }
 
     /// When the tools next need the loop's attention: a shell's first
-    /// prompt given up on, a wait timing out, or a shell not seen back to
-    /// be looked at again.
+    /// prompt given up on, a wait timing out, a shell not seen back to be
+    /// looked at again, or a command typed not yet seen to start.
     pub(super) fn next_tool_due(&self) -> Option<Instant> {
         let typing = (self.tools.commanded.values())
             .filter_map(|commanded| commanded.typing.as_ref())
@@ -2614,11 +2744,17 @@ impl Daemon {
                     .is_some_and(|ended| ended.looks);
                 looks.then_some(now)
             });
+        // A command typed, to be seen started or not.
+        let starts = (self.tools.commanded.iter()).filter_map(|(terminal, commanded)| {
+            let grid = self.terminals.get(terminal)?.terminal.grid()?;
+            commanded.next_start_look(grid, self.config.start_wait)
+        });
         typing
             .chain(waits)
             .chain(finished)
             .chain(closing)
             .chain(looks)
+            .chain(starts)
             .min()
     }
 
@@ -3341,6 +3477,66 @@ mod keeping_whose {
         assert_eq!(daemon.tools.commanded[&selected].next_close_tick(due), None);
         // No dangling terminal in the layout after automatic closure.
         assert!(daemon.workspaces.get().pane_showing(unseen).is_none());
+    }
+
+    /// A command typed at a prompt whose terminal a program has, as ssh
+    /// does with the shell inside it whose marks these are, isn't taken
+    /// as never run, nor Ctrl-C typed: it's no longer watched for, so the
+    /// loop isn't woken for it at once, again and again (CLACKA-256).
+    #[test]
+    fn a_command_not_started_where_the_shell_isnt_back_is_left_alone() {
+        use super::Commanded;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.workspaces.new_workspace("test".into(), chat);
+        daemon.next_id = chat.0 + 1;
+        // The terminal's shell runs a program, as it would ssh.
+        let terminal = daemon
+            .new_terminal(&NewTerminal {
+                size: Size::new(40, 10).unwrap(),
+                command: Some(vec!["sh".into(), "-c".into(), "sleep 600; :".into()]),
+                cwd: None,
+                record_to: None,
+            })
+            .unwrap();
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        let pid = slot.terminal.pty().unwrap().info().pid.unwrap();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while crate::ports::children_of(std::path::Path::new("/proc"), pid).is_empty() {
+            assert!(Instant::now() < give_up, "sleep never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pty = daemon
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .terminal
+            .pty()
+            .unwrap();
+        // The far shell's prompt, and a line typed at it that never starts.
+        pty.emulator_mut().advance(b"\x1b]133;A\x07$ ");
+        let mut commanded = Commanded {
+            owner: Some(chat),
+            ..Commanded::default()
+        };
+        commanded.typed(pty.emulator());
+        let seen = commanded.prompt_seen.unwrap();
+        daemon.tools.commanded.insert(terminal, commanded);
+        let wait = daemon.config.start_wait;
+        let past = seen + wait + Duration::from_secs(1);
+        assert!(daemon.next_tool_due().is_some_and(|due| due <= past));
+        daemon.maintain_agent_terminals(past);
+        let commanded = &daemon.tools.commanded[&terminal];
+        assert!(!commanded.not_run, "the shell isn't back: it's busy");
+        assert_eq!(commanded.typed_at, None);
+        // Nothing past is left due for it.
+        assert!(
+            daemon.next_tool_due().is_none_or(|due| due > past),
+            "{:?}",
+            daemon.next_tool_due()
+        );
     }
 
     #[test]
@@ -4097,6 +4293,97 @@ mod tests {
         assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
         grid.advance(b"\x1b]133;D;2\x07");
         assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
+    }
+
+    /// A command the shell won't run marks nothing more, as fish and bash
+    /// do (CLACKA-256): it's taken as never run once the wait is over,
+    /// and then has finished; one that started never is.
+    #[test]
+    fn a_command_the_shell_never_starts_is_taken_as_never_run_after_the_wait() {
+        let wait = Duration::from_secs(10);
+        let typed = |grid: &Terminal| {
+            let mut commanded = Commanded::default();
+            commanded.typed(grid);
+            commanded
+        };
+        let later = |commanded: &Commanded| commanded.prompt_seen.unwrap() + wait;
+        // fish, with a line it can't parse: its error, and its prompt
+        // again.
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        let commanded = typed(&grid);
+        grid.advance(b"echo $((1))\r\nfish: not allowed\r\n");
+        grid.advance(PROMPT.as_bytes());
+        let just_before = (later(&commanded))
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        assert!(!commanded.never_ran(&grid, just_before, wait));
+        assert!(commanded.never_ran(&grid, later(&commanded), wait));
+        assert_eq!(
+            commanded.next_start_look(&grid, wait),
+            Some(later(&commanded))
+        );
+        // bash, with one: an end with no start, then its prompt.
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        let commanded = typed(&grid);
+        grid.advance(b"a && && b\r\nbash: syntax error\r\n\x1b]133;D;2\x07");
+        grid.advance(PROMPT.as_bytes());
+        assert!(commanded.never_ran(&grid, later(&commanded), wait));
+        // Either, with a line it reads as unfinished: nothing at all.
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        let mut commanded = typed(&grid);
+        grid.advance(b"for i in 1 2; do\r\n> ");
+        assert!(commanded.never_ran(&grid, later(&commanded), wait));
+        // Taken so, it has finished, until another command is typed.
+        commanded.not_run = true;
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
+        assert!(!commanded.never_ran(&grid, later(&commanded), wait));
+        assert_eq!(commanded.next_start_look(&grid, wait), None);
+        commanded.typed(&grid);
+        assert!(!commanded.not_run);
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        // Or until a command starts there, whoever typed it.
+        commanded.not_run = true;
+        grid.advance(b"\x03\r\n");
+        grid.advance(PROMPT.as_bytes());
+        commanded.moved_on(&grid, Instant::now());
+        assert!(commanded.not_run, "Ctrl-C's prompt is the same block");
+        grid.advance(b"ls\r\n\x1b]133;C\x07");
+        commanded.moved_on(&grid, Instant::now());
+        assert!(!commanded.not_run);
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        // One the shell started, however long it runs, never is.
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        let commanded = typed(&grid);
+        grid.advance(b"sleep 60\r\n\x1b]133;C\x07");
+        assert!(!commanded.never_ran(&grid, later(&commanded) + wait, wait));
+        assert_eq!(commanded.next_start_look(&grid, wait), None);
+        // One typed ahead of its prompt waits from when the prompt comes,
+        // however slow it is to come.
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        grid.advance(ran("make", "built\r\n").as_bytes());
+        let mut commanded = typed(&grid);
+        assert_eq!(commanded.prompt_seen, None);
+        let late = commanded.typed_at.unwrap() + wait * 3;
+        assert!(!commanded.never_ran(&grid, late, wait));
+        assert_eq!(commanded.next_start_look(&grid, wait), None);
+        grid.advance(PROMPT.as_bytes());
+        commanded.moved_on(&grid, late);
+        assert_eq!(commanded.prompt_seen, Some(late));
+        assert!(!commanded.never_ran(&grid, late, wait));
+        assert!(commanded.never_ran(&grid, late + wait, wait));
+        // Nor one typed into a program running, not at a prompt.
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        grid.advance(b"python\r\n\x1b]133;C\x07>>> ");
+        let mut commanded = Commanded::default();
+        commanded.typed(&grid);
+        assert_eq!(commanded.typed_at, None);
+        assert!(!commanded.never_ran(&grid, Instant::now() + wait * 2, wait));
     }
 
     #[test]
