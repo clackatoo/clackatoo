@@ -175,12 +175,17 @@ impl State {
         // A conversation that waits for a question changes only when the
         // user does something, and each such request is answered with it
         // whole.
-        // An answer that isn't the conversation (a refusal, an attachment)
-        // says nothing of whether its agent still works: go by the
-        // conversation as last seen.
+        // A follow-up, a stop or an attach refused says nothing of whether
+        // the side agent still works: go by the conversation as last seen.
+        // An error to the asking itself ends it, as asking again would
+        // only be refused again.
+        let acted = matches!(
+            action,
+            Some(SideAction::Send { .. } | SideAction::Stop | SideAction::Attach { .. })
+        );
         let at_work = match &response {
             Response::Side(reply) => reply.node.as_deref().is_some_and(working),
-            _ => self.side.node.as_deref().is_some_and(working),
+            _ => acted && self.side.node.as_deref().is_some_and(working),
         };
         self.side.due = if at_work {
             self.now + POLL
@@ -476,6 +481,20 @@ mod tests {
         state.receive(clackatoo_protocol::ServerMessage::Response(
             Response::Error(clackatoo_protocol::Error::Other("Not now.".into())),
         ));
+        state.now += 2.0 * POLL;
+        state.side_poll();
+        assert_eq!(state.take_outbox().len(), 1);
+        // The conversation itself refused isn't asked for again.
+        state.receive(clackatoo_protocol::ServerMessage::Response(
+            Response::Error(clackatoo_protocol::Error::Other("Unavailable.".into())),
+        ));
+        state.now += 2.0 * POLL;
+        state.side_poll();
+        assert!(state.take_outbox().is_empty());
+        // Asked for by hand, it comes back at work, and then finishes.
+        state.side_control(Control::Open);
+        state.take_outbox();
+        state.receive(reply(clackatoo_protocol::ChatState::Answering));
         state.now += 2.0 * POLL;
         state.side_poll();
         assert_eq!(state.take_outbox().len(), 1);

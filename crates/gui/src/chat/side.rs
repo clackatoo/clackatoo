@@ -170,12 +170,17 @@ impl ChatView {
             return;
         }
         let (_, action) = self.side.pending.take().expect("checked");
-        // An answer that isn't the conversation (a refusal, an attachment)
-        // says nothing of whether its agent is still at work: go by the
-        // conversation as last seen, or a sheet refused a follow-up
-        // mid-answer would stop on the half it has.
+        // A follow-up, a stop or an attach refused says nothing of whether
+        // the side agent is still at work: go by the conversation as last
+        // seen, or the sheet would stop on the half answer it has. An
+        // error to the asking itself ends it: the conversation can't be
+        // had, and asking again would only be refused again.
+        let acted = matches!(
+            action,
+            SideAction::Send { .. } | SideAction::Stop | SideAction::Attach { .. }
+        );
         let working = (self.side.child.as_ref()).is_some_and(|child| busy(&child.node));
-        self.side.due = working.then(|| Instant::now() + POLL);
+        self.side.due = (acted && working).then(|| Instant::now() + POLL);
         match response {
             Response::Side(reply) => {
                 self.side.due = None;
@@ -413,6 +418,12 @@ mod tests {
         let refused = clackatoo_protocol::Error::Other("Wait for the side answer.".into());
         view.side_answer(serial, Response::Error(refused));
         assert!(view.side_due().is_some());
+        // But the conversation itself refused isn't asked for again.
+        view.side.request(SideAction::Read);
+        let serial = view.take_side_requests()[0].0;
+        let gone = clackatoo_protocol::Error::Other("The parent is unavailable.".into());
+        view.side_answer(serial, Response::Error(gone));
+        assert_eq!(view.side_due(), None);
     }
 
     #[test]
