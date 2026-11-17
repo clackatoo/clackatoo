@@ -68,8 +68,13 @@ impl HostedChat {
     pub(crate) fn permission_turn(&self) -> Option<u32> {
         self.last_uid().map(|uid| uid.0)
     }
+
+    /// Whether the user stopped the turn the agent works in, so nothing
+    /// asked in it may be allowed by a rule now. A turn begun since, as
+    /// one the agent takes by itself, is not stopped: a Stop is of its
+    /// turn, and is known by that turn's uid.
     pub(crate) fn permission_stopped(&self) -> bool {
-        self.stop_requested
+        self.stopped_turn.is_some() && self.stopped_turn == self.last_uid()
     }
     pub(crate) fn permission_plan_choice(&self, option: &str) -> bool {
         super::modes::leaving_plan_for(&self.agent, option)
@@ -384,5 +389,24 @@ mod tests {
             }]
         );
         assert!(chat.node.question.is_none());
+    }
+
+    #[test]
+    fn a_stop_is_of_the_turn_it_stopped_and_not_of_one_begun_since() {
+        let mut chat = chat();
+        open(&mut chat, "default");
+        chat.act(ChatAction::Send("Do work".into()));
+        assert!(!chat.permission_stopped());
+        chat.act(ChatAction::Stop);
+        assert!(chat.permission_stopped());
+        chat.answered(Ok(agent_client_protocol_schema::v1::StopReason::Cancelled));
+        assert!(
+            chat.permission_stopped(),
+            "what was in flight stays stopped"
+        );
+        // The chat still holds what other agents send for the user.
+        assert!(chat.wake(None));
+        assert!(chat.held_by_stop());
+        assert!(!chat.permission_stopped());
     }
 }
