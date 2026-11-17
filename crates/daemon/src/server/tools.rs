@@ -1181,13 +1181,9 @@ impl Daemon {
         if self.permitted_mcp(call, false) {
             return;
         }
-        let Some(at) = (self.tools.waiting.iter()).position(
-            |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
-        ) else {
-            return;
-        };
-        let waiting = self.tools.waiting.remove(at);
-        self.answer_tool(waiting.token, &waiting.id, Err(rule_refusal(verdict)));
+        if let Some(waiting) = self.take_asked_call(call) {
+            self.answer_tool(waiting.token, &waiting.id, Err(rule_refusal(verdict)));
+        }
     }
 
     /// What the user is asked before `tool` is used by the chat `chat`'s
@@ -1321,28 +1317,37 @@ impl Daemon {
         Some(self.chat_ref(chat)?.project())
     }
 
-    /// The user answered the chat's question about the call numbered
-    /// `call`: it goes ahead if `allow`, and is refused if not.
+    /// The number for the next call the user is asked about.
     pub(super) fn next_tool_question(&mut self) -> u64 {
         let call = self.tools.next_call;
         self.tools.next_call += 1;
         call
     }
+
+    /// Takes the call numbered `call` from those waiting on a question to
+    /// the user, if it's one of clackatoo's own tools'.
+    fn take_asked_call(&mut self, call: u64) -> Option<Waiting> {
+        let at = (self.tools.waiting.iter()).position(
+            |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
+        )?;
+        Some(self.tools.waiting.remove(at))
+    }
+
+    /// The user answered the chat's question about the call numbered
+    /// `call`: it goes ahead if `allow`, and is refused if not.
     pub(super) fn permitted(&mut self, call: u64, allow: bool) {
         if self.permitted_mcp(call, allow) {
             return;
         }
-        let Some(at) = (self.tools.waiting.iter()).position(
-            |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
-        ) else {
-            return;
-        };
-        let Waiting {
+        let Some(Waiting {
             token,
             id,
             chat,
             what,
-        } = self.tools.waiting.remove(at);
+        }) = self.take_asked_call(call)
+        else {
+            return;
+        };
         let Wait::Permission { tool, raw, .. } = what else {
             return;
         };

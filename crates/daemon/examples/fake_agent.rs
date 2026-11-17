@@ -6,6 +6,7 @@
 //! | `cwd` | The session's working directory |
 //! | `tool` | A tool call that runs and finishes, then `done` |
 //! | `ask` | Asks permission first, then says which option was picked |
+//! | `bash-ask COMMAND` | Asks, as Claude Code's adapter does, to run COMMAND with its Bash tool, offering to allow it always, once, or reject it once; then says which option was picked. `bash-ask-no-reject COMMAND` offers no way to reject it once |
 //! | `wait` | Nothing until the message is cancelled |
 //! | `busy` | Starts running a command, which goes on until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
@@ -2085,6 +2086,29 @@ impl Fake {
                 );
                 say(&session, "done\n");
                 done(&id, "end_turn");
+            }
+            // As Claude Code's adapter asks to run a command: the tool by
+            // name, its input as the model wrote it, and "always" offered
+            // first.
+            _ if text.starts_with("bash-ask ") || text.starts_with("bash-ask-no-reject ") => {
+                let (asked, command) = text.split_once(' ').unwrap_or((text, ""));
+                let reject = if asked == "bash-ask" {
+                    json!({ "optionId": "reject", "name": "Reject", "kind": "reject_once" })
+                } else {
+                    json!({ "optionId": "never", "name": "Never", "kind": "reject_always" })
+                };
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": "t-bash", "name": "Bash", "kind": "execute",
+                                      "title": command, "rawInput": { "command": command } },
+                        "options": [
+                            { "optionId": "always", "name": "Always allow", "kind": "allow_always" },
+                            { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                            reject,
+                        ] } }),
+                );
+                self.waiting = Some((id, session));
             }
             "ask" => {
                 send(

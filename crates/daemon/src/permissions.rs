@@ -314,15 +314,17 @@ pub(crate) struct Context {
     pub(crate) project: PathBuf,
     /// The user's home, which `~` in a rule's target stands for.
     pub(crate) home: PathBuf,
-    /// Clackatoo's own config and state: an edit there always asks.
+    /// Clackatoo's own config and state: a read or an edit there always
+    /// asks.
     pub(crate) protected: Vec<PathBuf>,
 }
 
 impl Action {
-    /// What the agent `agent` asks to do with `tool`, in the approval
-    /// request its adapter sent.
+    /// What the agent `agent`, working in `cwd`, asks to do with `tool`,
+    /// in the approval request its adapter sent.
     pub(crate) fn provider(
         agent: &str,
+        cwd: &str,
         tool: &agent_client_protocol_schema::v1::ToolCallUpdate,
     ) -> Self {
         use agent_client_protocol_schema::v1::ToolKind;
@@ -348,17 +350,19 @@ impl Action {
         } else {
             None
         };
-        let file = match (agent, name) {
-            ("claude", Some("Read")) => field(&["file_path"]).map(|path| (Kind::Read, path)),
-            ("claude", Some("Write" | "Edit" | "NotebookEdit")) => {
-                field(&["file_path", "notebook_path"]).map(|path| (Kind::Edit, path))
-            }
-            _ => None,
-        };
-        let touches_files = matches!(
-            kind,
-            Some(ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
-        ) || matches!(name, Some("Read" | "Write" | "Edit" | "NotebookEdit"));
+        let file_tool = name.and_then(|name| FileTool::of(agent, name));
+        let file = file_tool.as_ref().and_then(|tool| {
+            let path = field(&[tool.key]).or_else(|| tool.searches.then(|| cwd.to_owned()))?;
+            Some((tool.kind, path))
+        });
+        let touches_files = file_tool.is_some()
+            || matches!(
+                kind,
+                Some(ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
+            );
+        let reaches_elsewhere = file_tool
+            .as_ref()
+            .is_some_and(|tool| tool.reaches_elsewhere(&input));
         // The bundled Codex adapter puts non-HTTP network consent in
         // permission content, without structured network input. Its
         // presence requires consent; its text never grants permission.
@@ -371,22 +375,26 @@ impl Action {
         let asks_authority = input.get("additionalPermissions").is_some()
             || input.get("permissions").is_some()
             || input.get("url").is_some() && executes;
-        let own_decision = matches!(
-            name,
-            Some("ExitPlanMode" | "EnterPlanMode" | "AskUserQuestion" | "request_permissions")
-        );
+        let own_decision = name.is_some_and(|name| OWN_DECISIONS.contains(&name));
+        // Codex's tool for typing into a command it left running: what
+        // is typed there is not the command a rule allowed.
+        let types = agent == "codex" && name == Some("write_stdin");
         let consent = if !bounded || tool.fields.raw_input.is_none() {
             Some("Its input is missing or too large to check")
         } else if own_decision {
-            Some("Plans, questions and sandbox changes are yours to answer")
+            Some("Plans, questions and sandbox or network access are yours to answer")
         } else if codex_consent || asks_authority {
             Some("It asks for more access than the action itself")
+        } else if types {
+            Some("Typing into a running command requires your direct approval")
         } else if executes && command.is_none() {
             Some("Its command could not be read")
         } else if executes && !only_harmless_keys(agent, name, &input) {
             Some("Its input holds more than the command, which the rules don't read")
         } else if touches_files && file.is_none() {
             Some("The files it changes could not be read")
+        } else if reaches_elsewhere {
+            Some("Its input names more places than the one the rules read")
         } else if name.is_none() && command.is_none() {
             Some("The provider did not name the tool")
         } else {
@@ -420,6 +428,74 @@ impl Action {
             file: None,
             consent,
         }
+    }
+}
+
+/// The provider tools whose approval is a decision of the user's own, not
+/// an action a rule could describe: Claude Code's plans, questions and
+/// network access from its sandbox, and Codex's requests for more sandbox
+/// permissions.
+const OWN_DECISIONS: [&str; 5] = [
+    "ExitPlanMode",
+    "EnterPlanMode",
+    "AskUserQuestion",
+    "SandboxNetworkAccess",
+    "request_permissions",
+];
+
+/// One of an agent's own tools that reads or changes the files at one
+/// place, which its input names in one key.
+struct FileTool {
+    /// Whether it reads or edits.
+    kind: Kind,
+    /// The key of its input that holds the place.
+    key: &'static str,
+    /// Whether it searches a folder, and the agent's working directory
+    /// when it names none.
+    searches: bool,
+}
+
+impl FileTool {
+    /// The agent `agent`'s tool `name`, if it is one: Claude Code's, the
+    /// only ones whose inputs are known.
+    fn of(agent: &str, name: &str) -> Option<Self> {
+        let (kind, key, searches) = match (agent, name) {
+            ("claude", "Read") => (Kind::Read, "file_path", false),
+            ("claude", "Grep" | "Glob") => (Kind::Read, "path", true),
+            ("claude", "Write" | "Edit") => (Kind::Edit, "file_path", false),
+            ("claude", "NotebookEdit") => (Kind::Edit, "notebook_path", false),
+            _ => return None,
+        };
+        Some(Self {
+            kind,
+            key,
+            searches,
+        })
+    }
+
+    /// Whether `input` could have the tool read or change somewhere other
+    /// than the place in its key: it holds another key that looks like a
+    /// path, which the tool might go by, or a search pattern that leaves
+    /// the folder searched.
+    fn reaches_elsewhere(&self, input: &Value) -> bool {
+        let path_like = |key: &str| {
+            let key = key.to_lowercase();
+            ["path", "file", "dir"]
+                .iter()
+                .any(|part| key.contains(part))
+        };
+        let other_place = input
+            .as_object()
+            .is_some_and(|input| input.keys().any(|key| key != self.key && path_like(key)));
+        let leaves = |pattern: &str| {
+            pattern.starts_with(['/', '~']) || pattern.split('/').any(|part| part == "..")
+        };
+        let pattern_leaves = self.searches
+            && ["pattern", "glob"]
+                .iter()
+                .filter_map(|key| input.get(*key).and_then(Value::as_str))
+                .any(leaves);
+        other_place || pattern_leaves
     }
 }
 
@@ -492,11 +568,15 @@ pub(crate) fn bounded_json(value: &Value) -> bool {
 /// A decision and the rule that justified it, or why it needs the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Verdict {
+    /// What is to become of the action.
     pub(crate) decision: Decision,
+    /// The rule that says so, by its number, or why the user is asked:
+    /// for the history, and for an agent a rule refuses.
     pub(crate) reason: String,
 }
 
 impl Verdict {
+    /// The user is to be asked, because of `reason`.
     pub(crate) fn ask(reason: impl Into<String>) -> Self {
         Self {
             decision: Decision::Ask,
@@ -505,11 +585,13 @@ impl Verdict {
     }
 }
 
-/// Why a check ended with nothing decided. Nobody refused the action: the
-/// agent is told so, and may ask again.
+/// Why a check ended with nothing decided. No rule refused the action,
+/// and the agent is told which it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cancelled {
-    /// The turn it was asked in ended, or the user stopped it.
+    /// The user stopped the turn it was asked in.
+    Stopped,
+    /// The turn it was asked in ended, and another has begun.
     TurnEnded,
     /// The chat closed, or went on to another session or agent.
     ChatChanged,
@@ -522,14 +604,21 @@ impl Cancelled {
     /// Why, for the history.
     pub(crate) const fn reason(self) -> &'static str {
         match self {
-            Self::TurnEnded => "The turn it was asked in ended or was stopped",
+            Self::Stopped => "You stopped the turn it was asked in",
+            Self::TurnEnded => "The turn it was asked in ended",
             Self::ChatChanged => "The chat closed or changed its session",
         }
     }
 
-    /// What the agent is told became of its call.
+    /// What the agent is told became of its call. One whose turn the user
+    /// stopped is not to try again; the others ended by no one's choice,
+    /// and may.
     pub(crate) const fn told(self) -> &'static str {
         match self {
+            Self::Stopped => {
+                "The user stopped this turn, so this was not done. Do not try it again \
+                 unless they ask."
+            }
             Self::TurnEnded => {
                 "Clackatoo cancelled this permission check: the turn it was asked in ended. \
                  Nobody refused it; ask again if it is still needed."
@@ -685,34 +774,109 @@ fn simple_command(command: &str) -> bool {
         && !sets_variable
 }
 
-/// Folders whose files instruct agents or run as a project is opened or
-/// worked in, wherever they are, in lower case.
-const GUARDED_FOLDERS: [&str; 6] = [
-    ".clackatoo",
-    ".claude",
-    ".codex",
-    ".agents",
-    ".git",
-    ".vscode",
+// What always asks, whatever rule would allow it. Each list below is one
+// class of place, in lower case, as a run of names: `[".config", "gh"]`
+// is the folder `gh` in `.config`, and everything in it. To guard
+// something new, add it to the list whose class it is.
+
+/// Agents' own instructions and settings, as folders or files in a
+/// project or the home directory: what an agent is told to do, and what
+/// it may do, when it next starts there. Edits ask.
+const AGENT_PLACES: [&[&str]; 7] = [
+    &[".clackatoo"],
+    &[".claude"],
+    &[".codex"],
+    &[".agents"],
+    &[".cursor"],
+    &[".gemini"],
+    &[".github", "copilot-instructions.md"],
 ];
 
-/// Files that do, wherever they are, in lower case.
-const GUARDED_FILES: [&str; 5] = [
+/// Agents' instruction files, by name, in whatever folder. Edits ask.
+const AGENT_FILES: [&str; 6] = [
     "claude.md",
     "claude.local.md",
     "agents.md",
+    "gemini.md",
+    ".cursorrules",
     ".mcp.json",
-    ".envrc",
 ];
 
-/// Cargo's config, which names programs cargo runs, within `.cargo`.
-const CARGO_CONFIGS: [&str; 2] = ["config.toml", "config"];
+/// Folders and files in a project that run code when it's opened, built,
+/// committed or pushed: git's own folder with its hooks and config,
+/// editors' tasks, dev containers, hook managers, CI workflows and
+/// cargo's config. Edits ask.
+const TOOLING_PLACES: [&[&str]; 9] = [
+    &[".git"],
+    &[".vscode"],
+    &[".zed"],
+    &[".idea"],
+    &[".devcontainer"],
+    &[".husky"],
+    &[".github", "workflows"],
+    &[".cargo", "config.toml"],
+    &[".cargo", "config"],
+];
 
-/// The user's credential stores, from their home, in lower case.
-const SECRET_FOLDERS: [&[&str]; 4] = [&[".ssh"], &[".aws"], &[".gnupg"], &[".config", "gh"]];
+/// Files that do the same, by name, in whatever folder: environments
+/// loaded on entering a folder, hook managers' and package managers'
+/// configs, git's submodules. Edits ask.
+const TOOLING_FILES: [&str; 8] = [
+    ".envrc",
+    ".pre-commit-config.yaml",
+    "lefthook.yml",
+    ".gitmodules",
+    "mise.toml",
+    ".mise.toml",
+    ".yarnrc.yml",
+    ".npmrc",
+];
+
+/// What runs as the user logs in, opens a shell or uses git, from their
+/// home: shell startup files, git's config, systemd user units, desktop
+/// autostart, and their own programs. Edits ask.
+const STARTUP_PLACES: [&[&str]; 15] = [
+    &[".bashrc"],
+    &[".bash_profile"],
+    &[".bash_login"],
+    &[".bash_logout"],
+    &[".profile"],
+    &[".zshrc"],
+    &[".zshenv"],
+    &[".zprofile"],
+    &[".zlogin"],
+    &[".config", "fish"],
+    &[".gitconfig"],
+    &[".config", "git"],
+    &[".config", "systemd", "user"],
+    &[".config", "autostart"],
+    &[".local", "bin"],
+];
+
+/// The user's credential stores, from their home: keys, cloud and
+/// registry sign-ins, and the agents' own. Reads and edits ask.
+const SECRET_PLACES: [&[&str]; 11] = [
+    &[".ssh"],
+    &[".aws"],
+    &[".gnupg"],
+    &[".kube"],
+    &[".docker"],
+    &[".config", "gh"],
+    &[".config", "gcloud"],
+    &[".claude", ".credentials.json"],
+    &[".codex", "auth.json"],
+    &[".cargo", "credentials.toml"],
+    &[".cargo", "credentials"],
+];
+
+/// Files that hold credentials, by name, in whatever folder. Reads and
+/// edits ask. `.env` files are known by their pattern (see
+/// [`env_file`]).
+const SECRET_FILES: [&str; 5] = [".netrc", ".git-credentials", ".npmrc", ".pypirc", ".envrc"];
 
 /// Where clackatoo keeps what managed MCP servers sign in with, under
-/// whichever folder holds the user's own agent files.
+/// whichever folder holds the user's own agent files. Reads and edits
+/// ask.
 const PRIVATE_FOLDER: &str = "mcp-private";
 
 /// The names along `path`, in lower case: guarded names are compared so
@@ -727,79 +891,153 @@ fn names(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Whether `path` is a file that tells agents what to do, or that runs as
-/// its project is opened or worked in.
-fn instructs_or_runs(path: &Path) -> bool {
-    let names = names(path);
-    let in_folder = names
-        .iter()
-        .any(|name| GUARDED_FOLDERS.contains(&name.as_str()));
-    let is_file = names
-        .last()
-        .is_some_and(|name| GUARDED_FILES.contains(&name.as_str()));
-    let cargo_config = names
-        .windows(2)
-        .any(|pair| pair[0] == ".cargo" && CARGO_CONFIGS.contains(&pair[1].as_str()));
-    in_folder || is_file || cargo_config
+/// Whether the names `place` come one after another somewhere in `names`.
+fn passes_through(names: &[String], place: &[&str]) -> bool {
+    names
+        .windows(place.len())
+        .any(|run| run.iter().zip(place).all(|(name, part)| name == part))
 }
 
-/// Whether `path` is in one of the credential stores of the user whose
-/// home is `home`, or is a `.env` file.
-fn holds_secrets(path: &Path, home: &Path) -> bool {
-    let all = names(path);
-    let env_file = all
-        .last()
-        .is_some_and(|name| name == ".env" || name.starts_with(".env."));
-    let private = all.iter().any(|name| name == PRIVATE_FOLDER);
-    let in_store = path.strip_prefix(home).is_ok_and(|rest| {
-        let rest = names(rest);
-        SECRET_FOLDERS.iter().any(|folder| {
-            rest.len() >= folder.len() && rest.iter().zip(*folder).all(|(name, part)| name == part)
-        })
-    });
-    env_file || private || in_store
+/// Whether `names` begin with the names `place`.
+fn begins_with(names: &[String], place: &[&str]) -> bool {
+    names.len() >= place.len() && names.iter().zip(place).all(|(name, part)| name == part)
+}
+
+/// Whether a file called `name` is a `.env` file: `.env`, `.env.local`,
+/// `prod.env`.
+fn env_file(name: &str) -> bool {
+    let named_env = Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension == "env");
+    name == ".env" || name.starts_with(".env.") || named_env
+}
+
+/// The chat's project and the user's home, as given and as they really
+/// are, which guarded places are told from.
+struct Roots {
+    homes: Vec<PathBuf>,
+    projects: Vec<PathBuf>,
+}
+
+impl Roots {
+    /// Those of `context`.
+    fn of(context: &Context) -> Self {
+        let both = |root: &Path| {
+            let mut roots = vec![root.to_owned()];
+            roots.extend(resolve(root).filter(|real| real != root));
+            roots
+        };
+        Self {
+            homes: both(&context.home),
+            projects: both(&context.project),
+        }
+    }
+
+    /// The names along `path` from the user's home, if it's there.
+    fn below_home(&self, path: &Path) -> Option<Vec<String>> {
+        self.homes
+            .iter()
+            .find_map(|home| path.strip_prefix(home).ok())
+            .map(names)
+    }
+
+    /// The names along `path` that count for guarded folders: from the
+    /// project or the home it's in, whichever is nearer, with that
+    /// folder's own name. Without them, the whole path.
+    ///
+    /// What lies above doesn't count: a project in a worktree under
+    /// `.claude/worktrees` is an ordinary project, though a `.claude`
+    /// folder in it, or one that is itself the project, is still guarded.
+    fn local_names(&self, path: &Path) -> Vec<String> {
+        let nearest = self
+            .projects
+            .iter()
+            .chain(&self.homes)
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count());
+        let above = nearest.and_then(|root| root.parent());
+        let local = above.and_then(|above| path.strip_prefix(above).ok());
+        names(local.unwrap_or(path))
+    }
+
+    /// Whether `path` is a file that tells agents what to do, or that runs
+    /// as its project is worked in or its user logs in.
+    fn instructs_or_runs(&self, path: &Path) -> bool {
+        let local = self.local_names(path);
+        let in_place = AGENT_PLACES
+            .iter()
+            .chain(&TOOLING_PLACES)
+            .any(|place| passes_through(&local, place));
+        let is_file = local.last().is_some_and(|name| {
+            AGENT_FILES.contains(&name.as_str()) || TOOLING_FILES.contains(&name.as_str())
+        });
+        let at_startup = self.below_home(path).is_some_and(|from_home| {
+            STARTUP_PLACES
+                .iter()
+                .any(|place| begins_with(&from_home, place))
+        });
+        in_place || is_file || at_startup
+    }
+
+    /// Whether `path` is in one of the user's credential stores, or is a
+    /// file that holds credentials wherever it is.
+    fn holds_secrets(&self, path: &Path) -> bool {
+        let all = names(path);
+        let is_file = all
+            .last()
+            .is_some_and(|name| env_file(name) || SECRET_FILES.contains(&name.as_str()));
+        let private = all.iter().any(|name| name == PRIVATE_FOLDER);
+        let in_store = self.below_home(path).is_some_and(|from_home| {
+            SECRET_PLACES
+                .iter()
+                .any(|place| begins_with(&from_home, place))
+        });
+        is_file || private || in_store
+    }
 }
 
 /// Why a rule may not allow the read or edit of the file `written`, which
 /// is really at `real`, if none may. Both are looked at, so a guarded name
 /// that is a link to an ordinary place still asks.
 fn guarded(kind: Kind, written: &Path, real: &Path, context: &Context) -> Option<&'static str> {
-    let homes = [Some(context.home.clone()), resolve(&context.home)];
-    let secret = |path: &Path| homes.iter().flatten().any(|home| holds_secrets(path, home));
-    if secret(written) || secret(real) {
+    let roots = Roots::of(context);
+    if roots.holds_secrets(written) || roots.holds_secrets(real) {
         return Some("Credential stores and .env files require your direct approval");
     }
-    if kind != Kind::Edit {
-        return None;
-    }
-    if instructs_or_runs(written) || instructs_or_runs(real) {
-        return Some(
-            "Files that instruct agents or run code with a project require your direct approval",
-        );
-    }
+    // Its state holds this machine's keys, so reading it asks too.
     let own = context
         .protected
         .iter()
         .filter_map(|root| resolve(root))
         .any(|root| real.starts_with(root));
-    own.then_some("Clackatoo's own config and state require your direct approval")
+    if own {
+        return Some("Clackatoo's own config and state require your direct approval");
+    }
+    if kind == Kind::Edit && (roots.instructs_or_runs(written) || roots.instructs_or_runs(real)) {
+        return Some(
+            "Files that instruct agents or run code by themselves require your direct approval",
+        );
+    }
+    None
 }
 
 /// The directory a file rule's `target` names, with `~` and `{project}`
 /// filled in, as it really is. These stand for something only here: a
 /// path an agent gives is taken as written.
 ///
-/// `{project}` names nothing when the project is the user's home, as for
-/// a chat started there outside any repository: a rule about a project
-/// must not come to cover everything the user has.
+/// `{project}` names nothing when the project is the user's home or holds
+/// it, as for a chat started in `/home` outside any repository, or when
+/// the home can't be told: a rule about a project must not come to cover
+/// everything the user has.
 fn rule_root(target: &str, context: &Context) -> Option<PathBuf> {
     let below = |root: &Path, rest: &str| root.join(rest.trim_start_matches('/'));
     let written = if let Some(rest) = target.strip_prefix("{project}") {
-        let home = resolve(&context.home);
-        if home.is_some() && resolve(&context.project) == home {
+        let home = resolve(&context.home)?;
+        let project = resolve(&context.project)?;
+        if home.starts_with(&project) {
             return None;
         }
-        below(&context.project, rest)
+        below(&project, rest)
     } else if let Some(rest) = target.strip_prefix('~') {
         below(&context.home, rest)
     } else {
@@ -889,7 +1127,7 @@ mod tests {
     fn asked(agent: &str, wire: Value) -> Action {
         let tool = serde_json::from_value::<agent_client_protocol_schema::v1::ToolCallUpdate>(wire)
             .unwrap();
-        Action::provider(agent, &tool)
+        Action::provider(agent, "/", &tool)
     }
 
     #[test]
@@ -1046,7 +1284,8 @@ mod tests {
                 json!({"toolCallId":"1","name":"Bash","kind":"execute","rawInput":input}),
             )
         };
-        // Codex's ordinary commands come with no tool name.
+        // Codex names the tool of only some of its commands: one from its
+        // plain shell tool comes with no name.
         let codex = |input: Value| {
             asked(
                 "codex",
@@ -1220,6 +1459,22 @@ mod tests {
             (".cargo/config.toml", Ask),
             (".cargo/config", Ask),
             (".vscode/tasks.json", Ask),
+            (".zed/tasks.json", Ask),
+            (".idea/workspace.xml", Ask),
+            (".devcontainer/devcontainer.json", Ask),
+            (".husky/pre-commit", Ask),
+            (".pre-commit-config.yaml", Ask),
+            ("lefthook.yml", Ask),
+            (".gitmodules", Ask),
+            ("mise.toml", Ask),
+            ("web/.npmrc", Ask),
+            (".github/workflows/ci.yml", Ask),
+            (".github/copilot-instructions.md", Ask),
+            (".github/ISSUE_TEMPLATE.md", Allow),
+            ("GEMINI.md", Ask),
+            (".cursorrules", Ask),
+            (".cursor/rules/style.mdc", Ask),
+            (".gemini/settings.json", Ask),
             (".agents/skills/review/SKILL.md", Ask),
             (".agents/specialists/reviewer.md", Ask),
             (".claude/settings.json", Ask),
@@ -1265,9 +1520,22 @@ mod tests {
             (".aws/credentials", Ask),
             (".gnupg/private-keys-v1.d/key", Ask),
             (".config/gh/hosts.yml", Ask),
+            (".config/gcloud/credentials.db", Ask),
             (".config/other/hosts.yml", Allow),
+            (".kube/config", Ask),
+            (".docker/config.json", Ask),
+            (".netrc", Ask),
+            (".git-credentials", Ask),
+            (".pypirc", Ask),
+            (".cargo/credentials.toml", Ask),
+            (".cargo/registry/index.txt", Allow),
+            (".claude/.credentials.json", Ask),
+            (".codex/auth.json", Ask),
             ("src/project/.env", Ask),
             ("src/project/.env.production", Ask),
+            ("src/project/prod.env", Ask),
+            ("src/project/.envrc", Ask),
+            ("src/project/.npmrc", Ask),
             ("src/project/env.rs", Allow),
             (".agents/mcp-private/docs.json", Ask),
             ("elsewhere/mcp-private/docs.json", Ask),
@@ -1280,6 +1548,236 @@ mod tests {
                     "{tool} {path}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn what_runs_as_the_user_logs_in_always_asks_before_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("src/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut context = context(&project);
+        context.home = home.clone();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"read","target":"~"},
+            {"decision":"allow","kind":"edit","target":"~"}
+        ]"#,
+        );
+        for (path, wanted) in [
+            (".bashrc", Ask),
+            (".bash_profile", Ask),
+            (".profile", Ask),
+            (".zshrc", Ask),
+            (".zshenv", Ask),
+            (".config/fish/config.fish", Ask),
+            (".gitconfig", Ask),
+            (".config/git/config", Ask),
+            (".config/systemd/user/sync.service", Ask),
+            (".config/autostart/app.desktop", Ask),
+            (".local/bin/tool", Ask),
+            (".local/share/notes.txt", Allow),
+            (".config/systemd/notes.txt", Allow),
+            // Only the user's own: a project's file of the name is its own.
+            ("src/project/docs/.bashrc", Allow),
+        ] {
+            let edit = file_action("Write", Kind::Edit, &home.join(path));
+            assert_eq!(rules.decide(&edit, &context).decision, wanted, "{path}");
+            // Reading them tells nothing a shell wouldn't.
+            let read = file_action("Read", Kind::Read, &home.join(path));
+            assert_eq!(rules.decide(&read, &context).decision, Allow, "{path}");
+        }
+    }
+
+    #[test]
+    fn clackatoos_own_config_and_state_always_ask_before_a_read_or_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let state = home.join(".local/state/clackatoo");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut context = context(&home.join("project"));
+        context.home = home.clone();
+        context.protected.push(state.clone());
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"read","target":"~"},
+            {"decision":"allow","kind":"edit","target":"~"}
+        ]"#,
+        );
+        for (tool, kind) in [("Read", Kind::Read), ("Write", Kind::Edit)] {
+            let request = file_action(tool, kind, &state.join("password"));
+            assert_eq!(rules.decide(&request, &context).decision, Ask, "{tool}");
+        }
+    }
+
+    #[test]
+    fn guarded_folders_are_told_from_the_project_and_not_from_what_lies_above_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let repo = home.join("repo");
+        // A worktree an agent works in, as Claude Code makes them.
+        let worktree = repo.join(".claude/worktrees/fix");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"edit","target":"{project}"},
+            {"decision":"allow","kind":"edit","target":"~"}
+        ]"#,
+        );
+        let mut context = context(&worktree);
+        context.home = home.clone();
+        for (path, wanted) in [
+            (worktree.join("src/main.rs"), Allow),
+            (worktree.join("new/deep/file.rs"), Allow),
+            // Guarded places in the worktree are guarded as in any project.
+            (worktree.join(".claude/settings.json"), Ask),
+            (worktree.join(".git"), Ask),
+            (worktree.join("CLAUDE.md"), Ask),
+            // The folder above it is still the repository's own.
+            (repo.join(".claude/settings.json"), Ask),
+            (repo.join(".claude/worktrees/other/src/main.rs"), Ask),
+            (repo.join("src/main.rs"), Allow),
+        ] {
+            let request = file_action("Write", Kind::Edit, &path);
+            assert_eq!(
+                rules.decide(&request, &context).decision,
+                wanted,
+                "{}",
+                path.display()
+            );
+        }
+        // A chat started in a guarded folder itself doesn't unguard it.
+        context.project = repo.join(".claude");
+        let request = file_action("Write", Kind::Edit, &repo.join(".claude/settings.json"));
+        assert_eq!(rules.decide(&request, &context).decision, Ask);
+    }
+
+    #[test]
+    fn searches_read_the_folder_they_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        let mut context = context(&project);
+        context.home = home.clone();
+        let rules = policy(
+            r#"[
+            {"decision":"allow","kind":"tool","target":"claude/Grep"},
+            {"decision":"allow","kind":"tool","target":"claude/Glob"},
+            {"decision":"deny","kind":"read","target":"{project}/vendor"}
+        ]"#,
+        );
+        let cwd = project.display().to_string();
+        let search = |name: &str, input: Value| {
+            let wire = json!({"toolCallId":"1","name":name,"kind":"search","rawInput":input});
+            let tool = serde_json::from_value(wire).unwrap();
+            Action::provider("claude", &cwd, &tool)
+        };
+        let at = |path: &str| home.join(path).display().to_string();
+        for (request, wanted) in [
+            (
+                search("Grep", json!({"pattern":"fn","path":at("project/src")})),
+                Allow,
+            ),
+            (
+                search("Grep", json!({"pattern":"fn","glob":"*.rs","-n":true})),
+                Allow,
+            ),
+            (search("Glob", json!({"pattern":"**/*.rs"})), Allow),
+            // The same read through the Read tool would ask.
+            (
+                search("Grep", json!({"pattern":".","path":at(".aws")})),
+                Ask,
+            ),
+            (
+                search("Grep", json!({"pattern":"KEY","path":at("project/.env")})),
+                Ask,
+            ),
+            (
+                search("Glob", json!({"pattern":"*","path":at(".ssh")})),
+                Ask,
+            ),
+            // A pattern can leave the folder searched.
+            (search("Glob", json!({"pattern":at(".ssh/*")})), Ask),
+            (search("Glob", json!({"pattern":"../../.ssh/*"})), Ask),
+            (search("Grep", json!({"pattern":".","glob":"../*"})), Ask),
+            (search("Grep", json!({"pattern":".","path":"src"})), Ask),
+            // A Read rule is about what a search reads, too.
+            (
+                search("Grep", json!({"pattern":".","path":at("project/vendor/x")})),
+                Deny,
+            ),
+        ] {
+            assert_eq!(
+                rules.decide(&request, &context).decision,
+                wanted,
+                "{:?}",
+                request.arguments
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_tool_is_judged_on_the_one_path_it_goes_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut context = context(&project);
+        context.home = home.clone();
+        let rules = policy(r#"[{"decision":"allow","kind":"edit","target":"{project}"}]"#);
+        let inside = project.join("a.ipynb").display().to_string();
+        let outside = home.join("x.ipynb").display().to_string();
+        let edit = |name: &str, input: Value| {
+            asked(
+                "claude",
+                json!({"toolCallId":"1","name":name,"kind":"edit","rawInput":input}),
+            )
+        };
+        for (request, wanted) in [
+            (
+                edit(
+                    "NotebookEdit",
+                    json!({"notebook_path":inside,"new_source":"x"}),
+                ),
+                Allow,
+            ),
+            (
+                edit(
+                    "NotebookEdit",
+                    json!({"notebook_path":outside,"new_source":"x"}),
+                ),
+                Ask,
+            ),
+            // The key the rules read must be the one the tool goes by.
+            (
+                edit(
+                    "NotebookEdit",
+                    json!({"file_path":inside,"notebook_path":outside}),
+                ),
+                Ask,
+            ),
+            (edit("NotebookEdit", json!({"file_path":inside})), Ask),
+            (
+                edit("Write", json!({"file_path":inside,"content":"x"})),
+                Allow,
+            ),
+            (
+                edit("Write", json!({"file_path":inside,"notebook_path":outside})),
+                Ask,
+            ),
+            (
+                edit("Edit", json!({"file_path":inside,"target_dir":outside})),
+                Ask,
+            ),
+        ] {
+            assert_eq!(
+                rules.decide(&request, &context).decision,
+                wanted,
+                "{:?}",
+                request.arguments
+            );
         }
     }
 
@@ -1299,12 +1797,19 @@ mod tests {
         context.home = home.clone();
         let inside = file_action("Write", Kind::Edit, &project.join("notes/a.txt"));
         assert_eq!(rules.decide(&inside, &context).decision, Allow);
-        // A chat started in the home directory, outside any repository.
-        context.project = home.clone();
-        for path in ["notes/a.txt", ".bashrc", "project/notes/a.txt"] {
-            let request = file_action("Write", Kind::Edit, &home.join(path));
-            assert_eq!(rules.decide(&request, &context).decision, Ask, "{path}");
+        // A chat started in the home directory, outside any repository,
+        // or in a folder that holds it.
+        for started_in in [home.clone(), dir.path().to_owned(), "/".into()] {
+            context.project = started_in;
+            for path in ["notes/a.txt", "todo.txt", "project/notes/a.txt"] {
+                let request = file_action("Write", Kind::Edit, &home.join(path));
+                assert_eq!(rules.decide(&request, &context).decision, Ask, "{path}");
+            }
         }
+        // A home that can't be told is never taken for somewhere else.
+        context.project = project.clone();
+        context.home = "home".into();
+        assert_eq!(rules.decide(&inside, &context).decision, Ask);
     }
 
     #[test]
@@ -1445,6 +1950,14 @@ mod tests {
             (
                 "codex",
                 json!({"toolCallId":"4","title":"mcp.docs.search","rawInput":{"server":"docs","tool":"search"}}),
+            ),
+            (
+                "codex",
+                json!({"toolCallId":"5","name":"write_stdin","kind":"execute","rawInput":{"command":"git status"}}),
+            ),
+            (
+                "claude",
+                json!({"toolCallId":"6","name":"SandboxNetworkAccess","kind":"other","rawInput":{"host":"example.com"}}),
             ),
         ] {
             assert!(asked(agent, wire.clone()).consent.is_some(), "{wire}");

@@ -14617,11 +14617,25 @@ fn clackatoo_permission_rules_override_tools_allow_and_keep_unmatched_requests_i
     let daemon = with_permission_rules(
         r#"[
         {"decision":"allow","kind":"command","target":"true"},
-        {"decision":"deny","kind":"command","target":"touch"}
+        {"decision":"deny","kind":"command","target":"touch"},
+        {"decision":"deny","kind":"tool","target":"clackatoo/run_in_background"}
     ]"#,
     );
     let mut client = daemon.client();
     let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    // A rule about a tool is about clackatoo's own tool of that name, and
+    // its Deny wins over the Allow of the command.
+    let node = ask(
+        &mut client,
+        chat,
+        "mcp run_in_background {\"command\":\"true\"}",
+    );
+    assert!(
+        last_words(&node).contains("Clackatoo permissions denied this action: Rule 3"),
+        "{}",
+        last_words(&node)
+    );
+    assert!(node.question.is_none());
     let node = ask(
         &mut client,
         chat,
@@ -14670,37 +14684,64 @@ fn rules_leave_tools_that_never_ask_alone() {
     // about: an agent working in the background is never left waiting on
     // a question nobody sees.
     let daemon = with_permission_rules(
-        r#"[{"decision":"deny","kind":"tool","target":"clackatoo/list_panes"}]"#,
+        r#"[
+        {"decision":"deny","kind":"tool","target":"clackatoo/list_panes"},
+        {"decision":"deny","kind":"tool","target":"clackatoo/get_diagnostics"},
+        {"decision":"deny","kind":"tool","target":"clackatoo/open_file"},
+        {"decision":"deny","kind":"tool","target":"clackatoo/run_in_terminal"}
+    ]"#,
     );
     std::fs::write(daemon.dir.path().join("a.txt"), "one\n").unwrap();
     let mut client = daemon.client();
     let chat = start_tooled_chat(&mut client, AgentTools::Ask);
     let prompt = "mcp list_panes {}\n\
                   mcp get_diagnostics {}\n\
-                  mcp open_file {\"path\":\"a.txt\"}\n\
-                  mcp send_to_terminal {\"pane\":99,\"text\":\"x\"}";
+                  mcp open_file {\"path\":\"a.txt\"}";
     let node = ask(&mut client, chat, prompt);
     assert!(node.question.is_none(), "{node:#?}");
     let words = last_words(&node);
-    assert!(!words.contains("list_panes: failed"), "{words}");
-    assert!(!words.contains("get_diagnostics: failed"), "{words}");
-    assert!(!words.contains("open_file: failed"), "{words}");
-    // What would fail anyway fails without a question, as it always did.
-    assert!(words.contains("send_to_terminal: failed"), "{words}");
+    assert!(!words.contains("failed"), "{words}");
     assert!(!words.contains("Clackatoo permissions"), "{words}");
+    // The same kind of rule does refuse a call that would be asked about.
+    let node = ask(
+        &mut client,
+        chat,
+        "mcp run_in_terminal {\"command\":\"true\"}",
+    );
+    assert!(
+        last_words(&node).contains("Clackatoo permissions denied this action: Rule 4"),
+        "{}",
+        last_words(&node)
+    );
 }
 
 #[test]
 fn the_browsers_first_page_keeps_its_own_answer_under_rules() {
+    let open = "mcp browser_navigate {\"url\":\"https://example.com/\"}";
+    // A rule about the tool is about this call: a Deny refuses it.
+    let daemon = with_permission_rules(
+        r#"[{"decision":"deny","kind":"tool","target":"clackatoo/browser_navigate"}]"#,
+    );
+    let mut client = daemon.client();
+    let chat = start_browsing_chat(&mut client);
+    let node = ask(&mut client, chat, open);
+    assert!(node.question.is_none());
+    assert!(
+        last_words(&node).contains("Clackatoo permissions denied this action: Rule 1"),
+        "{}",
+        last_words(&node)
+    );
+    drop(client);
+    drop(daemon);
+    // An Allow of it gives no consent, though: the user is asked, and
+    // offered the answer that lets the agent browse on, which nothing else
+    // does.
     let daemon = with_permission_rules(
         r#"[{"decision":"allow","kind":"tool","target":"clackatoo/browser_navigate"}]"#,
     );
     let mut client = daemon.client();
     let chat = start_browsing_chat(&mut client);
-    let open = "mcp browser_navigate {\"url\":\"https://example.com/\"}";
     client.chat(chat, ChatAction::Send(open.into())).unwrap();
-    // No rule gives this consent: the user is asked, and offered the
-    // answer that lets the agent browse on, which nothing else does.
     let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
     let ids: Vec<&str> = (node.question.iter())
         .flat_map(|question| &question.choices)
@@ -14709,6 +14750,43 @@ fn the_browsers_first_page_keeps_its_own_answer_under_rules() {
     assert_eq!(ids, ["browse", "reject"]);
     answer(&mut client, chat, Some("reject".into()));
     wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+}
+
+#[test]
+fn rules_answer_an_agents_own_request_once_and_never_always() {
+    let daemon = with_permission_rules(
+        r#"[
+        {"decision":"allow","kind":"command","target":"cargo test"},
+        {"decision":"deny","kind":"command","target":"git push"}
+    ]"#,
+    );
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    // The agent offers "always" first: a rule's Allow is for this once.
+    for (prompt, picked) in [
+        ("bash-ask cargo test", "picked allow"),
+        ("bash-ask git push origin main", "picked reject"),
+        // With no way to reject it once, a Deny cancels the request.
+        ("bash-ask-no-reject git push", "picked nothing"),
+    ] {
+        let node = ask(&mut client, chat, prompt);
+        assert!(node.question.is_none(), "{prompt}");
+        assert!(last_words(&node).contains(picked), "{prompt}: {node:#?}");
+    }
+    // No rule is about this one: the user is asked, and isn't offered
+    // "always" either, which would have the agent stop asking.
+    client
+        .chat(chat, ChatAction::Send("bash-ask cargo build".into()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let ids: Vec<&str> = (node.question.iter())
+        .flat_map(|question| &question.choices)
+        .map(|choice| choice.id.as_str())
+        .collect();
+    assert_eq!(ids, ["allow", "reject"]);
+    answer(&mut client, chat, Some("allow".into()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert!(last_words(&node).contains("picked allow"), "{node:#?}");
 }
 
 #[test]
