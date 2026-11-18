@@ -288,6 +288,20 @@ const SERVER_CHOICES: [(&str, &str, ChoiceKind); 3] = [
     ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
+/// `text` in a code block whose fence is longer than any run of backticks
+/// in it, so nothing in it can end the block early and show the rest as
+/// something else: what an agent asks to do is shown as it is.
+fn fenced(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for ch in text.chars() {
+        run = if ch == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}\n{text}\n{fence}")
+}
+
 /// The answers to a question about a message to a chat whose agent may do
 /// more than this one's. Allowing always is for messages to that chat,
 /// from this one: nothing else is allowed by it.
@@ -318,8 +332,8 @@ pub(crate) enum Choices {
     /// Reject (see `chat/managed.rs`).
     Server,
     /// Allow, Always allow messages to this chat, which lets its agent
-    /// message that chat without asking for as long as both are open, and
-    /// Reject (see `chat/relations.rs`).
+    /// message that chat without asking, as it may do more now, for as
+    /// long as both are open, and Reject (see `server/tools/talk.rs`).
     Chat,
 }
 
@@ -398,6 +412,10 @@ pub(crate) enum Action {
     /// Let a call to one of clackatoo's tools go ahead, numbered as the
     /// server numbered it, or refuse it.
     Permit { call: u64, allow: bool },
+    /// Let the message the call `call` sends another chat, whose agent may
+    /// do more, go ahead, and messages from this chat to that one from then
+    /// on: the user answered "Always allow messages to this chat".
+    PermitChat { call: u64 },
     /// Tell the call to a managed MCP server the daemon numbered `call`
     /// how the user answered the question about it.
     PermitMcp {
@@ -675,14 +693,6 @@ pub(crate) struct HostedChat {
     /// the daemon's number for each call, and the server. Not handed
     /// over: the daemon takes them back before an upgrade.
     server_calls: Vec<(u64, String)>,
-    /// The questions waiting that are about a message to a chat whose
-    /// agent may do more: the daemon's number for each call, and the chat.
-    /// Not handed over, as `server_calls` isn't.
-    chat_calls: Vec<(u64, TerminalId)>,
-    /// The chats whose agents may do more that the user has let this one's
-    /// message without asking. Not handed over, nor saved, nor copied: an
-    /// upgrade or a restart asks again, and a copy of the chat is asked.
-    allowed_chats: Vec<TerminalId>,
     /// Its agent's account's limits, as the daemon last heard them from
     /// any of that agent's chats, shown with the context it fills. Not
     /// handed over: after an upgrade they come again with the next that
@@ -950,8 +960,6 @@ impl HostedChat {
             own_server_lost: false,
             mcp_tokens: VecDeque::new(),
             server_calls: Vec::new(),
-            chat_calls: Vec::new(),
-            allowed_chats: Vec::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
@@ -2972,13 +2980,18 @@ impl HostedChat {
             return false;
         }
         if let Some(whole) = whole {
+            let title = if offered == Choices::Chat {
+                "The message, in full, as the other chat's agent gets it"
+            } else {
+                "What the agent asks to type, in full"
+            };
             self.set_tool(
                 Tool {
                     id: format!("clackatoo-{call}"),
-                    title: "What the agent asks to type, in full".to_owned(),
+                    title: title.to_owned(),
                     status: ToolStatus::Done,
                     kind: ToolKind::Other,
-                    content: vec![ToolContent::Text(format!("```\n{whole}\n```"))],
+                    content: vec![ToolContent::Text(fenced(whole))],
                     locations: Vec::new(),
                     exit: None,
                 },
@@ -3022,7 +3035,6 @@ impl HostedChat {
     pub(crate) fn withdraw(&mut self, call: u64) {
         self.asking.retain(|(asker, _)| *asker != Asker::Tool(call));
         self.forget_server_call(call);
-        self.chat_calls.retain(|(asked, _)| *asked != call);
         self.show_question();
     }
 
@@ -3060,10 +3072,10 @@ impl HostedChat {
                 if let Some(action) = self.server_answered(call, option) {
                     return Some(action);
                 }
-                // One about a message to a chat that may do more allows,
-                // always, only messages to that chat.
-                if let Some(action) = self.chat_answered(call, option) {
-                    return Some(action);
+                // Always allowing messages to a chat that may do more is
+                // the daemon's to keep, for that chat alone.
+                if option == Some("chat") {
+                    return Some(Action::PermitChat { call });
                 }
                 if option == Some("always") {
                     self.set_tools(AgentTools::Allow);

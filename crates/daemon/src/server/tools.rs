@@ -1181,12 +1181,16 @@ impl Daemon {
         };
         let call = self.tools.next_call;
         self.tools.next_call += 1;
-        let asked = (self.chat(chat)).is_some_and(|hosted| match &tool {
-            Tool::SendToChat { chat: to, message } if shown == Choices::Chat => {
-                hosted.ask_for_chat(call, *to, &what, message)
-            }
-            _ => hosted.ask_for_tool(call, &what, whole.as_deref(), shown),
-        });
+        let asked = (self.chat(chat))
+            .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref(), shown));
+        // What the user is told of a chat that may do more is what they
+        // answer for (see `talk::Daemon::still_allowed`).
+        if asked
+            && let Tool::SendToChat { chat: to, .. } = &tool
+            && let Some(more) = self.to_ask_about(chat, *to)
+        {
+            self.asked_about_message(call, chat, *to, more);
+        }
         if !asked {
             let refused = "too many questions are waiting for the user: wait for their answers";
             self.answer_tool(token, &id, Err(refused.to_owned()));
@@ -1273,17 +1277,15 @@ impl Daemon {
         match tool {
             // To a chat whose agent may do more, whatever this one's Tools
             // setting: Allow lets it act, not act through another chat.
+            // The message as it would reach the other agent, its hidden
+            // characters shown.
             Tool::SendToChat { chat: to, message } => {
-                let own = self.chat_ref(chat)?;
-                let more = self.may_do_more(own, chat, *to);
-                if more.is_empty() || own.allows_messages_to(*to) {
-                    return None;
-                }
+                let more = self.to_ask_about(chat, *to)?;
                 let what = format!(
                     "send chat {to} this message, though its agent may do more than this one: {}",
                     talk::More::told_to_sender(&more)
                 );
-                Some((what, Some(message.clone()), Choices::Chat))
+                Some((what, Some(unhidden(message)), Choices::Chat))
             }
             Tool::RunInTerminal { command, cwd, .. } => {
                 if tools == AgentTools::Allow {
@@ -1436,8 +1438,13 @@ impl Daemon {
         let Wait::Permission { tool, raw, .. } = what else {
             return;
         };
-        // What it may do may have changed since it asked, as its mode.
-        if allow && let Some(why) = self.refused_now(chat, &tool) {
+        // What it may do may have changed since it asked, as its mode; and
+        // a chat it messages, what it may do.
+        let changed = match &tool {
+            Tool::SendToChat { chat: to, .. } => self.still_allowed(call, chat, *to).err(),
+            _ => None,
+        };
+        if allow && let Some(why) = self.refused_now(chat, &tool).or(changed) {
             self.answer_tool(token, &id, Err(why));
         } else if allow {
             self.carry_out(token, chat, id, tool, raw);
@@ -2519,13 +2526,6 @@ impl Daemon {
         self.answer_finished(terminal, true);
         self.tools.commanded.remove(&terminal);
         self.tools.talk.forget(terminal);
-        // No chat may message it without asking any more: a chat of that
-        // number never comes again in this run, but its leave goes with it.
-        for slot in self.terminals.values_mut() {
-            if let Some(chat) = slot.terminal.chat() {
-                chat.forget_allowed_chat(terminal);
-            }
-        }
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
         self.tools.explorers.remove(&terminal);

@@ -210,26 +210,33 @@ refused, and the agent is told to ask you:
   it: one whose Tools setting is looser than the sender's, whose
   [limits](#specialists) are fewer, counting what each one's mode rules out,
   or whose mode lets its agent do more without asking. The question shows the
-  message in full and says how the other chat can do more. **Allow** sends
-  it; **Always allow messages to this chat** sends it and every later one
-  from this chat to that one, for as long as both are open, but not after
-  the daemon upgrades or restarts, nor from a copy of the chat; **Reject**
-  tells the agent you said no. It's asked whatever the sender's Tools setting
-  is: Allow lets an agent act, not act through another chat. Under
+  message in full, as the other agent would get it, and says how the other
+  chat can do more. **Allow** sends it; **Always allow messages to this
+  chat** sends it and every later one from this chat to that one, for as long
+  as both are open, but not after the daemon upgrades or restarts, nor from a
+  copy of the chat. Either holds only for what you were told: if, by the time
+  you answer or the message's turn comes, or for a later message, the other
+  chat can do more than that, you're asked again. **Reject** tells the agent
+  you said no. It's asked whatever the sender's Tools setting is: Allow lets
+  an agent act, not act through another chat. Under
   [clackatoo's rules](~clackatoo/reference/permissions), no rule allows it,
-  and a Deny on `clackatoo/send_to_chat` refuses it.
+  and a Deny on `clackatoo/send_to_chat` refuses a message that would ask;
+  one between chats you allowed always isn't asked about, so a Deny doesn't
+  reach it.
 
   The chat it goes to is told, in clackatoo's words beside the message, how
   the sender can do less, and not to do on its behalf what it couldn't do
   itself, unless you asked it to. A message you allowed that waits its turn
-  still goes when that comes; one that had no need to ask when it was sent,
-  but would by then, is dropped, and the sender told to send it again. The modes of Claude Code and Codex compare on one scale, whichever
+  still goes when that comes, if the other chat can do no more than you were
+  told; otherwise, or if it had no need to ask when it was sent but would by
+  then, it's dropped, and the sender told to send it again. The modes of Claude Code and Codex compare on one scale, whichever
   agent each chat runs:
 
   | What it does unasked | Claude Code | Codex |
   |---|---|---|
-  | Nothing: it changes nothing, or asks about all it does | Plan, Manual | Read-only |
-  | Edits, and asks about commands or keeps them in a sandbox | Accept edits | Workspace access |
+  | Reads; changes nothing | Plan, Manual | Read-only |
+  | Edits, and asks about commands | Accept edits | |
+  | Edits, and runs commands in a sandbox that reads what it likes | | Workspace access |
   | What an automatic reviewer lets it | Auto | Auto review |
   | Everything | Bypass permissions | Full access |
 

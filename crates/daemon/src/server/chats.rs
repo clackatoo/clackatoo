@@ -1084,6 +1084,7 @@ impl Daemon {
                     slot.agent.answer(&request, Ok(result));
                 }
                 (Action::Permit { call, allow }, _, _) => self.permitted(call, allow),
+                (Action::PermitChat { call }, _, _) => self.permitted_always(call),
                 (Action::PermitMcp { call, answer }, _, _) => self.answered_mcp(call, answer),
                 (Action::Browser(on), _, _) => self.browser_turned(id, on),
                 (Action::Abandon, slot, _) => {

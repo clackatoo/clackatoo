@@ -142,6 +142,17 @@ pub(super) struct Talk {
     /// was dropped as its turn came, by sender and the chat it was for:
     /// the sender is told as it waits for that chat.
     undelivered: BTreeMap<(TerminalId, TerminalId), String>,
+    /// The chats whose agents may do more that the user let each chat
+    /// message without asking, by sender and the chat messaged, with how
+    /// that chat may do more as the user was told: should it come to do
+    /// more still, the user is asked again. In memory only: an upgrade or
+    /// a restart asks again.
+    granted: BTreeMap<(TerminalId, TerminalId), Vec<More>>,
+    /// The questions waiting about messages to chats whose agents may do
+    /// more, by the call's number: the sender, the chat messaged, and how
+    /// it may do more as the user is told. An answer goes for what the
+    /// user saw, no more (see [`Daemon::still_allowed`]).
+    asked: BTreeMap<u64, (TerminalId, TerminalId, Vec<More>)>,
 }
 
 impl Talk {
@@ -161,7 +172,15 @@ impl Talk {
         self.finished.remove(&chat);
         self.inboxes.remove(&chat);
         (self.undelivered).retain(|&(from, to), _| from != chat && to != chat);
+        (self.granted).retain(|&(from, to), _| from != chat && to != chat);
+        (self.asked).retain(|_, &mut (from, to, _)| from != chat && to != chat);
     }
+}
+
+/// Whether what `now` says of how a chat may do more is all in `seen`,
+/// what the user was told: then their answer still holds.
+fn covered(now: &[More], seen: &[More]) -> bool {
+    now.iter().all(|more| seen.contains(more))
 }
 
 /// A wait for chats an upgrade cut off: for all of `chats`, or with
@@ -954,6 +973,9 @@ impl Daemon {
         let mode_looser = match (own.mode_level(), target.mode_level()) {
             (Some(own), Some(theirs)) => unasked(theirs) > unasked(own),
             (None, Some(theirs)) => unasked(theirs) > unasked(0),
+            // A mode clackatoo doesn't know, of an agent whose modes it
+            // does: one its adapter has since added, which may do anything.
+            (_, None) if target.mode_unknown() => true,
             _ => match (same, own.mode_rank(), rank) {
                 (false, _, theirs) => theirs != Some(0),
                 (true, Some(own), Some(theirs)) => theirs > own,
@@ -991,16 +1013,82 @@ impl Daemon {
         more
     }
 
-    /// Why the chat `chat` can't message the chat `to` without the user's
-    /// leave, if it can't: `to`'s agent may do more, and the user hasn't
-    /// let `chat`'s message it without asking.
-    #[cfg(test)]
-    pub(super) fn unasked_refused(&self, chat: TerminalId, to: TerminalId) -> Option<String> {
+    /// How the agent of the chat `to` may do more than that of the chat
+    /// `chat`, if it may and the user hasn't let `chat`'s message it
+    /// without asking, or has, but it may do more since: what a message
+    /// from `chat` to `to` asks the user about. `None` if it asks nothing.
+    pub(super) fn to_ask_about(&self, chat: TerminalId, to: TerminalId) -> Option<Vec<More>> {
         let own = self.chat_ref(chat)?;
         let more = self.may_do_more(own, chat, to);
-        if more.is_empty() || own.allows_messages_to(to) {
-            return None;
+        let granted = (self.tools.talk.granted.get(&(chat, to)))
+            .is_some_and(|granted| covered(&more, granted));
+        (!more.is_empty() && !granted).then_some(more)
+    }
+
+    /// Notes that the user is asked, in the call `call`, about a message
+    /// from the chat `chat` to the chat `to`, told it may do `more`.
+    pub(super) fn asked_about_message(
+        &mut self,
+        call: u64,
+        chat: TerminalId,
+        to: TerminalId,
+        more: Vec<More>,
+    ) {
+        self.tools.talk.asked.insert(call, (chat, to, more));
+    }
+
+    /// Why the message the call `call` sends from the chat `chat` to the
+    /// chat `to`, which the user just allowed, may not go now, if it may
+    /// not: the chat may do more than the user was told, since, or the
+    /// question came before an upgrade, which kept no record of it.
+    pub(super) fn still_allowed(
+        &mut self,
+        call: u64,
+        chat: TerminalId,
+        to: TerminalId,
+    ) -> Result<(), String> {
+        let seen = self.tools.talk.asked.remove(&call);
+        let Some(now) = self.to_ask_about(chat, to) else {
+            return Ok(());
+        };
+        match seen {
+            Some((_, _, seen)) if covered(&now, &seen) => Ok(()),
+            _ => Err(format!(
+                "chat {to}'s agent may do more than the user was told when they allowed this \
+                 ({}), or their answer came after the daemon upgraded: send it again, and \
+                 they're asked again",
+                More::told_to_sender(&now)
+            )),
         }
+    }
+
+    /// The user allowed the message the call `call` sends, and every later
+    /// one from its chat to the chat it's for, without asking, as that
+    /// chat may do more as they were told now.
+    pub(in crate::server) fn permitted_always(&mut self, call: u64) {
+        let asked = (self.tools.waiting.iter()).find_map(|waiting| match &waiting.what {
+            Wait::Permission {
+                call: asked,
+                tool: Tool::SendToChat { chat: to, .. },
+                ..
+            } if *asked == call => Some((waiting.chat, *to)),
+            _ => None,
+        });
+        if let Some((chat, to)) = asked
+            && let Some((_, _, seen)) = self.tools.talk.asked.get(&call)
+            && let Some(now) = self.to_ask_about(chat, to)
+            && covered(&now, seen)
+        {
+            self.tools.talk.granted.insert((chat, to), now);
+        }
+        self.permitted(call, true);
+    }
+
+    /// Why the chat `chat` can't message the chat `to` without the user's
+    /// leave, if it can't: as [`Self::to_ask_about`] says.
+    #[cfg(test)]
+    pub(super) fn unasked_refused(&self, chat: TerminalId, to: TerminalId) -> Option<String> {
+        let more = self.to_ask_about(chat, to)?;
         Some(format!(
             "chat {to}'s agent may do more than this one ({}), so the user is asked first",
             More::told_to_sender(&more)
@@ -1937,20 +2025,23 @@ impl Daemon {
             // One that may go goes, if its agent may do no more than the
             // sender's, or the user let the sender message it, always or
             // this once, as its caution says, which only a message allowed
-            // to a chat that may do more has: with what it may do more
-            // now said beside it. Cautions aren't handed over, so after an
-            // upgrade only the user's leave for always lets one go.
+            // to a chat that may do more has, and which must say what it
+            // may do more now: with that said beside it. Cautions aren't
+            // handed over, so after an upgrade only the user's leave for
+            // always lets one go.
             let why = why.or_else(|| {
                 let caution = self.caution(from, id);
+                // Allowed as it was sent, if the chat may do no more than
+                // the user was told then, which its caution says.
                 let allowed_once = (self.chat_ref(id))
                     .and_then(|chat| chat.relations().inbox.front())
-                    .is_some_and(|next| next.caution.is_some());
-                let allowed_always =
-                    (self.chat_ref(from)).is_some_and(|own| own.allows_messages_to(id));
-                if caution.is_some() && !allowed_once && !allowed_always {
+                    .is_some_and(|next| next.caution.is_some() && next.caution == caution);
+                let unasked = self.to_ask_about(from, id).is_none();
+                if !unasked && !allowed_once {
                     return Some(format!(
-                        "chat {id}'s agent may do more now than when it was sent: send it again, \
-                         and the user is asked"
+                        "chat {id}'s agent may do more than this one, and the user wasn't asked \
+                         about this message, or allowed it when it could do less, or before the \
+                         daemon upgraded: send it again, and they're asked"
                     ));
                 }
                 if let Some(chat) = self.chat(id) {

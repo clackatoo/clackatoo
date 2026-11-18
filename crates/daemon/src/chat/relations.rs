@@ -274,57 +274,6 @@ pub(super) fn prompt_for(message: &Message) -> String {
 }
 
 impl HostedChat {
-    /// Asks whether the agent may message the chat `to`, whose agent may
-    /// do more, as [`ask_for_tool`](Self::ask_for_tool) asks about
-    /// clackatoo's own tools, for the call the daemon numbered `call`:
-    /// `what` finishes "Allow the agent to …?", and `message` is shown in
-    /// full above it. Returns whether it was asked.
-    pub(crate) fn ask_for_chat(
-        &mut self,
-        call: u64,
-        to: TerminalId,
-        what: &str,
-        message: &str,
-    ) -> bool {
-        if !self.ask_for_tool(call, what, Some(message), super::Choices::Chat) {
-            return false;
-        }
-        self.chat_calls.push((call, to));
-        true
-    }
-
-    /// What to do about the answer `option` to the question about the
-    /// call `call`, if it was about a message to another chat: "Always
-    /// allow messages to this chat" lets the agent message that chat
-    /// without asking from then on, and allows nothing else.
-    pub(super) fn chat_answered(
-        &mut self,
-        call: u64,
-        option: Option<&str>,
-    ) -> Option<super::Action> {
-        let at = (self.chat_calls.iter()).position(|(asked, _)| *asked == call)?;
-        let (_, to) = self.chat_calls.remove(at);
-        if option == Some("chat") && !self.allowed_chats.contains(&to) {
-            self.allowed_chats.push(to);
-        }
-        Some(super::Action::Permit {
-            call,
-            allow: matches!(option, Some("allow" | "chat")),
-        })
-    }
-
-    /// Whether the user has let the agent message the chat `to`, whose
-    /// agent may do more, without asking.
-    pub(crate) fn allows_messages_to(&self, to: TerminalId) -> bool {
-        self.allowed_chats.contains(&to)
-    }
-
-    /// Forgets that the agent may message the chat `to` without asking,
-    /// as that chat has closed.
-    pub(crate) fn forget_allowed_chat(&mut self, to: TerminalId) {
-        self.allowed_chats.retain(|allowed| *allowed != to);
-    }
-
     /// Says `caution` to the agent beside the next message from another
     /// chat, as it goes: or nothing more, with `None`.
     pub(crate) fn caution_next_message(&mut self, caution: Option<String>) {

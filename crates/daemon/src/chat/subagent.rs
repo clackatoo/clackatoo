@@ -459,6 +459,19 @@ impl HostedChat {
         }
     }
 
+    /// Whether its agent's mode is one clackatoo doesn't know, of an agent
+    /// whose modes it does: one its adapter has added since, which may do
+    /// anything.
+    pub(crate) fn mode_unknown(&self) -> bool {
+        let value = match self.setting_of(SettingKind::Mode) {
+            Some(setting) => Some(setting.value.as_str()),
+            None => self.mode_to_come(),
+        };
+        value.is_some_and(|value| {
+            super::modes::knows(&self.agent) && super::modes::level(&self.agent, value).is_none()
+        })
+    }
+
     /// How much its agent's mode lets it do unasked, on the scale every
     /// agent clackatoo knows shares (see `modes::level`): the mode it's in,
     /// or before its session opens, the one it will ask for. `None` if the

@@ -36,21 +36,28 @@ fn ranked(agent: &str) -> Option<&'static [&'static str]> {
 ///
 /// 0. Nothing is changed: Claude Code's Plan, Codex's Read-only.
 /// 1. Edits and commands are asked about: Claude Code's Manual.
-/// 2. Edits go ahead, and commands are asked about, or kept in a sandbox:
-///    Claude Code's Accept edits, Codex's Workspace access.
-/// 3. An automatic reviewer decides what's asked: Claude Code's Auto,
+/// 2. Edits go ahead, and commands are asked about: Claude Code's Accept
+///    edits.
+/// 3. Edits go ahead, and commands run in a sandbox, which reads what it
+///    likes: Codex's Workspace access.
+/// 4. An automatic reviewer decides what's asked: Claude Code's Auto,
 ///    Codex's Auto review.
-/// 4. Nothing is asked: Claude Code's Bypass permissions, Codex's Full
+/// 5. Nothing is asked: Claude Code's Bypass permissions, Codex's Full
 ///    access.
 ///
 /// `None` if clackatoo doesn't know the mode.
 pub(super) fn level(agent: &str, value: &str) -> Option<u8> {
     let levels: &[u8] = match agent {
-        "claude" => &[0, 1, 2, 3, 4],
-        "codex" => &[0, 2, 3, 4],
+        "claude" => &[0, 1, 2, 4, 5],
+        "codex" => &[0, 3, 4, 5],
         _ => return None,
     };
     levels.get(rank(agent, value)?).copied()
+}
+
+/// Whether clackatoo knows `agent`'s modes.
+pub(super) fn knows(agent: &str) -> bool {
+    ranked(agent).is_some()
 }
 
 /// Where the mode `value` is among `agent`'s modes, from 0, the one that
@@ -154,10 +161,9 @@ mod tests {
             level("codex", "agent-full-access")
         );
         assert!(level("claude", "default") < level("codex", "workspace-write"));
-        assert_eq!(
-            level("claude", "acceptEdits"),
-            level("codex", "workspace-write")
-        );
+        // Codex's sandbox runs commands unasked, and reads what it likes.
+        assert!(level("claude", "acceptEdits") < level("codex", "workspace-write"));
+        assert!(level("codex", "workspace-write") < level("claude", "auto"));
         assert_eq!(level("mine", "read-only"), None);
         assert_eq!(level("claude", "unheard-of"), None);
     }

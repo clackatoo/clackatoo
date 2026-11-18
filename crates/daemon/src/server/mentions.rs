@@ -256,6 +256,7 @@ impl Daemon {
                 Action::Answer { .. }
                 | Action::Elicited { .. }
                 | Action::Permit { .. }
+                | Action::PermitChat { .. }
                 | Action::PermitMcp { .. } => {
                     now.push(action);
                 }

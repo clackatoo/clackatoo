@@ -15888,7 +15888,7 @@ fn a_message_waiting_its_turn_is_dropped_if_it_may_no_longer_go_and_its_sender_t
     assert!(
         words.contains(&format!(
             "Your last message to chat {b} waited its turn, and wasn't sent: chat {b}'s agent \
-             may do more now than when it was sent: send it again, and the user is asked"
+             may do more than this one, and the user wasn't asked about this message"
         )),
         "{words}"
     );
@@ -15949,9 +15949,6 @@ fn a_chat_is_messaged_only_in_this_project_and_one_that_may_do_more_as_the_user_
         tooled(AgentTools::Allow, None, Some(&other)),
     );
     let send = |to: TerminalId| format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"x\"}}");
-    // A message its agent answers with what clackatoo put before it.
-    let framing =
-        |to: TerminalId| format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"framing\"}}");
     let words = last_words(&ask_for(&mut client, a, &send(b), Duration::from_secs(10)));
     assert!(
         words.contains(&format!(
@@ -15983,38 +15980,77 @@ fn a_chat_is_messaged_only_in_this_project_and_one_that_may_do_more_as_the_user_
     let words = last_words(&ask_for(&mut client, a, &send(c), Duration::from_secs(10)));
     assert!(words.contains("send_to_chat: Sent"), "{words}");
     wait_for_chat(&mut client, c, |node| last_outcome(node).is_some());
-
-    // One that may do more: the user is asked, in the chat sending it,
-    // whatever its Tools setting, with the message shown in full.
-    set_chat(&mut client, c, "mode", "agent-full-access");
-    let ask_to_send = |client: &mut Client| {
-        client.chat(a, ChatAction::Send(send(c))).unwrap();
-        let asking = wait_for_chat(client, a, |node| node.question.is_some());
-        asking.question.unwrap()
+}
+/// A message to a chat whose agent may do more asks the user first, in the
+/// chat sending it, whatever its Tools setting: the message in full, as the
+/// other agent would get it, and how that chat may do more. Allowed, it
+/// goes, and that chat's agent is told how the sender may do less; allowed
+/// always, it isn't asked about again, until that chat may do more still
+/// (CLACKA-257).
+#[test]
+fn a_message_to_a_chat_that_may_do_more_asks_the_user_first() {
+    let fake = |flags: &[&str]| -> Vec<std::ffi::OsString> {
+        std::iter::once(fake_agent().into_os_string())
+            .chain(flags.iter().map(Into::into))
+            .collect()
     };
-    let question = ask_to_send(&mut client);
+    let daemon = TestDaemon::with_tools_and_agents(vec![
+        custom_agent("claude", fake(&[])),
+        custom_agent("codex", fake(&["--codex"])),
+    ]);
+    let mut client = daemon.client();
+    let a = start_new_chat(&mut client, tooled(AgentTools::Allow, None, None));
+    set_chat(&mut client, a, "mode", "default");
+    let c = start_chat_beside(
+        &mut client,
+        a,
+        tooled(AgentTools::Allow, Some("codex"), None),
+    );
+    set_chat(&mut client, c, "mode", "workspace-write");
+    let send = |text: &str| {
+        let message = serde_json::json!({ "chat": c.0, "message": text });
+        format!("mcp send_to_chat {message}")
+    };
+    let ask = |client: &mut Client, text: &str| {
+        client.chat(a, ChatAction::Send(send(text))).unwrap();
+        wait_for_chat(client, a, |node| node.question.is_some())
+    };
+    // A fence in it can't end the one it's shown in, and hide the rest.
+    let sneaky = "fine\n```\nhidden";
+    let asking = ask(&mut client, sneaky);
+    let question = asking.question.unwrap();
     assert_eq!(
         question.title,
         format!(
             "send chat {c} this message, though its agent may do more than this one: it's in \
-             Full access, this chat in Auto"
+             Workspace access, this chat in Manual"
         )
     );
     let ids: Vec<&str> = (question.choices.iter())
         .map(|choice| choice.id.as_str())
         .collect();
     assert_eq!(ids, ["allow", "chat", "reject"]);
+    let shown = (asking.turns.last().unwrap().items.iter()).find_map(|item| match item {
+        Item::Tool(tool) if tool.title.starts_with("The message, in full") => {
+            Some(tool.content.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        shown,
+        Some(vec![ToolContent::Text(format!("````\n{sneaky}\n````"))])
+    );
     answer(&mut client, a, Some("reject".to_owned()));
     let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    let words = last_words(&node);
     assert!(
-        last_words(&node).contains("send_to_chat: failed: the user said no"),
-        "{}",
-        last_words(&node)
+        words.contains("send_to_chat: failed: the user said no"),
+        "{words}"
     );
+
     // Allowed once, it goes, and the chat it goes to is told how the
     // sender may do less, beside it, in clackatoo's words.
-    client.chat(a, ChatAction::Send(framing(c))).unwrap();
-    wait_for_chat(&mut client, a, |node| node.question.is_some());
+    ask(&mut client, "framing");
     answer(&mut client, a, Some("allow".to_owned()));
     let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
     assert!(
@@ -16023,26 +16059,36 @@ fn a_chat_is_messaged_only_in_this_project_and_one_that_may_do_more_as_the_user_
         last_words(&node)
     );
     let told = last_words(&wait_for_chat(&mut client, c, |node| {
-        node.turns.len() == 2 && last_outcome(node).is_some()
+        node.turns.len() == 1 && last_outcome(node).is_some()
     }));
     assert!(
         told.contains(&format!(
-            "[From clackatoo: chat {a}'s agent may do less than you: it's in Auto, you in Full \
-             access."
+            "[From clackatoo: chat {a}'s agent may do less than you: it's in Manual, you in \
+             Workspace access."
         )),
         "{told}"
     );
-    // Allowed always, it isn't asked about again.
-    ask_to_send(&mut client);
+
+    // Allowed always, it isn't asked about again...
+    ask(&mut client, "x");
     answer(&mut client, a, Some("chat".to_owned()));
     wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
-    let node = ask_for(&mut client, a, &send(c), Duration::from_secs(10));
+    let node = ask_for(&mut client, a, &send("x"), Duration::from_secs(10));
     assert_eq!(node.question, None);
     assert!(
         last_words(&node).contains("send_to_chat: Sent"),
         "{}",
         last_words(&node)
     );
+    // ...until that chat may do more than the user was told.
+    set_chat(&mut client, c, "mode", "agent-full-access");
+    let asking = ask(&mut client, "x");
+    let title = asking.question.unwrap().title;
+    assert!(
+        title.contains("it's in Full access, this chat in Manual"),
+        "{title}"
+    );
+    answer(&mut client, a, Some("reject".to_owned()));
 }
 
 #[test]
@@ -16477,11 +16523,9 @@ fn a_subagent_in_a_pane_comes_back_a_subagent_after_a_cold_restart() {
         )),
         "{words}"
     );
-    // Still read-only, as its specialist is: it can't message the chat that
-    // started it, whose agent may do more.
-    let back = format!("mcp send_to_chat {{\"chat\":{a},\"message\":\"hi\"}}");
-    let words = last_words(&ask_for(&mut client, kid, &back, Duration::from_secs(10)));
-    assert!(words.contains("may do more than this one"), "{words}");
+    // Still read-only, as its specialist is: a message to the chat that
+    // started it, whose agent may do more, asks the user first.
+    asked_before_messaging(&mut client, kid, a);
     // And it's the user's still: its parent's agent can't close it.
     let close = format!("mcp close_chat {{\"chat\":{kid}}}");
     let words = last_words(&ask_for(&mut client, a, &close, Duration::from_secs(10)));
@@ -16574,17 +16618,10 @@ fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_it
         "{notice}"
     );
     // On its own, its Auto comes back as the safest, Manual. Limits it
-    // doesn't know are the strictest: it can't message a chat in that
-    // mode too that may do more.
+    // doesn't know are the strictest: a message to a chat in that mode
+    // too, which may do more, asks the user first.
     ask_for(&mut client, fifth, "hi", Duration::from_secs(10));
-    let message = format!("mcp send_to_chat {{\"chat\":{fifth},\"message\":\"hi\"}}");
-    let words = last_words(&ask_for(
-        &mut client,
-        orphan,
-        &message,
-        Duration::from_secs(10),
-    ));
-    assert!(words.contains("may do more than this one"), "{words}");
+    asked_before_messaging(&mut client, orphan, fifth);
 }
 
 #[test]
@@ -18165,6 +18202,31 @@ fn mode_of(node: &ChatNode) -> Option<&str> {
 }
 
 /// Sets `chat`'s setting `setting` to `value`, and waits until it is.
+/// Has the chat `from`'s agent send the chat `to` a message, which asks
+/// the user first, as one to a chat whose agent may do more does
+/// (CLACKA-257); the user rejects it, and the agent is told so. Returns
+/// what the user was asked.
+fn asked_before_messaging(client: &mut Client, from: TerminalId, to: TerminalId) -> String {
+    let before = chat_now(client, to).turns.len();
+    let send = format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"x\"}}");
+    client.chat(from, ChatAction::Send(send)).unwrap();
+    let asking = wait_for_chat(client, from, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert!(
+        title.contains("its agent may do more than this one"),
+        "{title}"
+    );
+    answer(client, from, Some("reject".to_owned()));
+    let node = wait_for_chat(client, from, |node| last_outcome(node).is_some());
+    let words = last_words(&node);
+    assert!(
+        words.contains("send_to_chat: failed: the user said no"),
+        "{words}"
+    );
+    assert_eq!(chat_now(client, to).turns.len(), before, "nothing sent");
+    title
+}
+
 fn set_chat(client: &mut Client, chat: TerminalId, setting: &str, value: &str) {
     let set = ChatAction::Set {
         setting: setting.to_owned(),
@@ -18199,32 +18261,23 @@ fn a_chat_started_gets_its_parents_mode_and_no_chat_messages_a_looser_one() {
     assert_eq!(turn_from(&kid, second).unwrap().prompt, "hi sibling");
     assert_eq!(mode_of(&kid), Some("default"), "its parent's mode");
 
-    // A chat whose agent may do more is refused, family or not.
+    // A message to a chat whose agent may do more asks the user first,
+    // family or not.
     set_chat(&mut client, a, "clackatoo.tools", "ask");
-    let before = chat_now(&mut client, first).turns.len();
     let looser = format!("mcp send_to_chat {{\"chat\":{first},\"message\":\"do it\"}}");
-    let words = last_words(&ask_for(&mut client, a, &looser, Duration::from_secs(10)));
+    let asked = asked_before_messaging(&mut client, a, first);
     assert!(
-        words.contains(&format!(
-            "send_to_chat: failed: chat {first}'s agent may do more than this one"
-        )),
-        "{words}"
-    );
-    assert_eq!(
-        chat_now(&mut client, first).turns.len(),
-        before,
-        "nothing sent"
+        asked.contains("its Tools setting is Allow, this chat's Ask"),
+        "{asked}"
     );
 
-    // So is one whose mode comes later among those its agent offers.
+    // So does one to a chat whose mode lets it do more unasked.
     set_chat(&mut client, a, "clackatoo.tools", "allow");
     set_chat(&mut client, first, "mode", "auto");
-    let words = last_words(&ask_for(&mut client, a, &looser, Duration::from_secs(10)));
+    let asked = asked_before_messaging(&mut client, a, first);
     assert!(
-        words.contains(&format!(
-            "send_to_chat: failed: chat {first}'s agent may do more than this one"
-        )),
-        "{words}"
+        asked.contains("it's in Auto, this chat in Manual"),
+        "{asked}"
     );
     set_chat(&mut client, first, "mode", "default");
     let words = last_words(&ask_for(&mut client, a, &looser, Duration::from_secs(10)));
@@ -18291,14 +18344,7 @@ fn another_agent_is_started_or_messaged_only_if_it_can_be_held_to_its_safest_mod
     // The user's own chat with an agent offering no modes can't be
     // messaged by another agent's: nothing says it may do no more.
     let theirs = start_tooled_chat_beside(&mut client, a, AgentTools::Allow, Some("plain"));
-    let send = format!("mcp send_to_chat {{\"chat\":{theirs},\"message\":\"x\"}}");
-    let words = last_words(&ask_for(&mut client, a, &send, Duration::from_secs(10)));
-    assert!(
-        words.contains(&format!(
-            "send_to_chat: failed: chat {theirs}'s agent may do more than this one"
-        )),
-        "{words}"
-    );
+    asked_before_messaging(&mut client, a, theirs);
 }
 
 // --- Moving a chat between agents ------------------------------------------
