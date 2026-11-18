@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.48 (2026-11-18)
+
+### Fixes
+
+- **chat:** gx and Ctrl+click open a Markdown link's target (6bcd8c15)
+
 ## 2026.11.47 (2026-11-18)
 
 ### Features
