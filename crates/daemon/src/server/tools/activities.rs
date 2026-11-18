@@ -317,6 +317,41 @@ impl Daemon {
         serde_json::to_string(&records).map_err(|err| err.to_string())
     }
 
+    /// [`Self::read_activities`], for the agent of `chat`, which then
+    /// has the results of those that ended: a notice that one ended,
+    /// waiting for its turn to end, or yet to go, would only tell it
+    /// again, and start a turn to do it.
+    pub(super) fn agent_reads_activities(
+        &mut self,
+        chat: TerminalId,
+        id: Option<&str>,
+    ) -> Result<String, String> {
+        let read = self.read_activities(chat, id)?;
+        let mut told = Vec::new();
+        for record in &mut self.tools.activities {
+            let activity = &record.activity;
+            if activity.owner != chat
+                || id.is_some_and(|id| activity.id != id)
+                || activity.state.active()
+            {
+                continue;
+            }
+            if record.notified {
+                told.push(notice_text(activity));
+            }
+            record.notified = true;
+        }
+        if !told.is_empty()
+            && let Some(hosted) = self.chat(chat)
+        {
+            for text in told {
+                hosted.drop_notice(&text);
+            }
+            self.collect_damage(chat);
+        }
+        Ok(read)
+    }
+
     pub(in crate::server) fn cancel_activity(
         &mut self,
         chat: TerminalId,
@@ -432,14 +467,8 @@ impl Daemon {
         {
             return;
         }
-        let activity = &record.activity;
-        let owner = activity.owner;
-        let text = format!(
-            "Clackatoo activity {:?} ({}) is {}. Use read_activities with this id to inspect its recorded result before taking further action. This notification grants no additional permission. An unknown outcome must not be retried automatically.",
-            activity.id,
-            activity.title,
-            activity.state.label()
-        );
+        let owner = record.activity.owner;
+        let text = notice_text(&record.activity);
         let message = Message {
             from: Sender {
                 chat: owner,
@@ -448,7 +477,7 @@ impl Daemon {
             },
             text,
             hops: 0,
-            cause: Some((owner, activity.turn)),
+            cause: Some((owner, record.activity.turn)),
             finished: Vec::new(),
             caution: None,
         };
@@ -598,6 +627,17 @@ impl Daemon {
     }
 }
 
+/// What the notice that `activity` ended tells its chat's agent: the same
+/// each time, as it's how a notice waiting to go is found again.
+fn notice_text(activity: &Activity) -> String {
+    format!(
+        "Clackatoo activity {:?} ({}) is {}. Use read_activities with this id to inspect its recorded result before taking further action. This notification grants no additional permission. An unknown outcome must not be retried automatically.",
+        activity.id,
+        activity.title,
+        activity.state.label()
+    )
+}
+
 /// Where turn `uid` of `chat` is on the conversation shown, as an
 /// activity's card says: `None` if it isn't, being on another branch.
 fn shown_turn(chat: &crate::chat::HostedChat, uid: u32) -> Option<u32> {
@@ -714,6 +754,46 @@ mod tests {
         drop(hosted.act(ChatAction::Send("go on".to_owned())));
         hosted.answered(Ok(StopReason::EndTurn));
         assert!(!hosted.deliver_next().is_empty(), "begun after the user's");
+    }
+
+    /// The notice that an activity ended, waiting to go, is dropped once
+    /// the agent reads what it ended with: it would only start a turn to
+    /// tell the agent again. Reading another, or one still running, leaves
+    /// it, and leaves the running one's to go when it ends.
+    #[test]
+    fn an_activitys_notice_waiting_goes_once_the_agent_has_read_it() {
+        use agent_client_protocol_schema::v1::StopReason;
+        use clackatoo_protocol::ChatAction;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let hosted = daemon.chat(chat).unwrap();
+        drop(hosted.act(ChatAction::Stop));
+        hosted.answered(Ok(StopReason::Cancelled));
+        let (_, mut records): (u32, Vec<Record>) = serde_json::from_str(JOURNAL).unwrap();
+        records[0].activity.owner = chat;
+        records[0].activity.state = ActivityState::Exited(0);
+        let turn = daemon.chat_ref(chat).unwrap().turn_uid_to_come(0).unwrap();
+        records[0].activity.turn = turn.0;
+        let mut running = records[0].clone();
+        running.activity.id = "test".into();
+        running.activity.state = ActivityState::Running;
+        records.push(running);
+        daemon.tools.activities = records;
+        daemon.notify_activity(0);
+        assert_eq!(daemon.chat_ref(chat).unwrap().relations().inbox.len(), 1);
+        daemon.agent_reads_activities(chat, Some("test")).unwrap();
+        let hosted = daemon.chat_ref(chat).unwrap();
+        assert_eq!(hosted.relations().inbox.len(), 1, "another's read");
+        assert!(!daemon.tools.activities[1].notified, "still running");
+        let read = daemon.agent_reads_activities(chat, None).unwrap();
+        assert!(read.contains("\"build\""), "{read}");
+        let hosted = daemon.chat_ref(chat).unwrap();
+        assert!(
+            hosted.relations().inbox.is_empty(),
+            "read, so not told again"
+        );
+        assert_eq!(hosted.node().notice, None, "nothing said to wait");
+        assert!(!daemon.tools.activities[1].notified, "still running");
     }
 
     /// Finished activities past the caps are let go, oldest first, across

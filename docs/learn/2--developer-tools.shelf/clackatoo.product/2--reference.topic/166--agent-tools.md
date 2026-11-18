@@ -313,7 +313,9 @@ has an ID that doesn't change, kept before its command runs: asked to start
 the same ID, command, and folder again, the daemon answers with the one it
 has, and the same ID with another command or folder is refused. When an
 activity ends, its chat is told; a chat you stopped holds the notice until you
-write there, then hears it after your message.
+write there, then hears it after your message. A notice still waiting is
+dropped if the agent reads that activity's result with `read_activities` first,
+so it isn't told what it already knows.
 
 Activities, and what's kept of them, last through an upgrade. After a full
 restart, one that hadn't ended says `Outcome unknown`, and never runs again by

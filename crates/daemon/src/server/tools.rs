@@ -1482,7 +1482,7 @@ impl Daemon {
                 command,
                 cwd,
             } => self.start_activity(chat, &id, title, command, cwd),
-            Tool::ReadActivities { id } => self.read_activities(chat, id.as_deref()),
+            Tool::ReadActivities { id } => self.agent_reads_activities(chat, id.as_deref()),
             Tool::CancelActivity { id } => self.cancel_activity(chat, &id),
             Tool::Capabilities => Ok(self.harness_capabilities(chat)),
             Tool::Native(action) => {

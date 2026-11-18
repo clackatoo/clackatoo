@@ -1744,6 +1744,23 @@ impl HostedChat {
         Ok(self.begin_message(message))
     }
 
+    /// Drops the notice from clackatoo saying `text`, if it waits to go:
+    /// the agent knows what it says already.
+    pub(crate) fn drop_notice(&mut self, text: &str) {
+        let before = self.relations.inbox.len();
+        (self.relations.inbox).retain(|waiting| !(waiting.is_notice() && waiting.text == text));
+        if self.relations.inbox.len() == before {
+            return;
+        }
+        if self.relations.inbox.is_empty()
+            && (self.node.notice.as_deref()).is_some_and(|notice| notice.starts_with(HELD))
+        {
+            self.set_notice(None);
+        } else {
+            self.say_held();
+        }
+    }
+
     /// Whether the user stopped the chat and hasn't written in it since:
     /// what other agents send, and the notices from clackatoo that chats
     /// it started finished, wait for them rather than start a turn, as the
