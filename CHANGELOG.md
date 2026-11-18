@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.11.49 (2026-11-18)
+
+### Fixes
+
+- **activities:** drop a waiting notice the agent has read the result of (523e5b24)
+
 ## 2026.11.48 (2026-11-18)
 
 ### Fixes
