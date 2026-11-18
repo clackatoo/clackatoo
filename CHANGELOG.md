@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.47 (2026-11-18)
+
+### Features
+
+- **talk:** ask the user before a message to a chat that may do more (8612ac5e)
+
+### Fixes
+
+- **talk:** compare chats' modes by what they let agents do, across agents (4efd6811)
+- **talk:** hold a message to a chat that may do more to what the user was shown (44c87a0f)
+
 ## 2026.11.46 (2026-11-17)
 
 ### Fixes
