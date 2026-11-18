@@ -86,6 +86,9 @@ pub(in crate::chat) struct TextAt<'a> {
     pub(in crate::chat) text: &'a str,
     pub(in crate::chat) at: [f32; 2],
     pub(in crate::chat) kind: Option<&'a BlockKind>,
+    /// The links its Markdown made, by where they are in `text`: what
+    /// each goes to, which the text drawn needn't say.
+    pub(in crate::chat) links: &'a [markdown::Link],
 }
 
 /// `byte` in `text`, moved back to the start of the character it's in,
@@ -232,6 +235,7 @@ impl ChatView {
                 text: &block.text,
                 at: [left + block.left, top + block.top],
                 kind: None,
+                links: &[],
             });
         }
         if key.piece == FOLD {
@@ -243,6 +247,7 @@ impl ChatView {
                 text: &block.text,
                 at: [block.left, top + block.top],
                 kind: None,
+                links: &[],
             });
         }
         if let Some(card) = laid.cards.get(&key.piece) {
@@ -253,6 +258,7 @@ impl ChatView {
                 text: &block.text,
                 at: [span.left + x + block.left, span.top + y + block.top],
                 kind: None,
+                links: &[],
             });
         }
         let piece = laid.pieces.get(&key.piece)?;
@@ -272,6 +278,7 @@ impl ChatView {
                 span.top + origin[1] + block.top,
             ],
             kind: Some(&block.kind),
+            links: &block.links,
         })
     }
 
@@ -1039,6 +1046,65 @@ mod tests {
         );
         // What it didn't lay out, it didn't keep.
         assert!(chat.cache.turns[30].laid.is_none());
+    }
+
+    /// A link written as Markdown shows only its words: `gx` on them, and a
+    /// Ctrl+click, open where it goes, which a plain click doesn't.
+    #[test]
+    fn a_markdown_link_opens_where_it_goes_not_what_it_says() {
+        use crate::links::Target;
+        let mut fonts = fonts();
+        // Short, to be drawn on one line.
+        let answer = "Try [GXWI](https://10.10.0.111:7780/) or [the plan](docs/plan.md:12) now";
+        let mut chat = ChatView::new(String::new(), talk(&[("where?", answer)]));
+        chat.reading = true;
+        paint(&mut chat, &mut fonts);
+        let shown = *(chat.shown.iter())
+            .find(|shown| {
+                chat.text(shown.key)
+                    .is_some_and(|text| text.text.starts_with("Try"))
+            })
+            .expect("the answer drawn");
+        let words = chat.text(shown.key).unwrap().text.to_owned();
+        let byte = |word: &str| words.find(word).unwrap();
+        let (gxwi, plan) = (byte("GXWI"), byte("the plan"));
+        // From the pane's top left, as the mouse is.
+        let point = |byte: usize| {
+            let text = chat.text(shown.key).unwrap();
+            [
+                shown.at[0] + super::x_of(text.layout, byte) + 2.0,
+                shown.at[1] + 4.0,
+            ]
+        };
+        let (on_gxwi, on_plan, on_now) = (point(gxwi + 1), point(plan + 1), point(byte("now")));
+        // gx, at the cursor.
+        chat.cursor = Some(super::Position {
+            text: shown.key,
+            byte: gxwi + 1,
+        });
+        read(&mut chat, "gx");
+        assert_eq!(
+            chat.take_opening(),
+            Some(Target::Url("https://10.10.0.111:7780/".into()))
+        );
+        // A Ctrl+click: a path, at its line.
+        assert!(chat.ctrl_press(on_plan));
+        assert_eq!(
+            chat.take_opening(),
+            Some(Target::File {
+                path: "docs/plan.md".into(),
+                line: Some(12),
+                col: None
+            })
+        );
+        assert!(chat.ctrl_press(on_gxwi));
+        assert!(chat.take_opening().is_some());
+        // A plain click selects, as on any text; a Ctrl+click on text
+        // that's no link is a click.
+        chat.press(on_gxwi, 1, false);
+        chat.release();
+        assert_eq!(chat.take_opening(), None);
+        assert!(!chat.ctrl_press(on_now));
     }
 
     #[test]

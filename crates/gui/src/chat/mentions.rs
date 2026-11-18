@@ -296,10 +296,36 @@ impl super::ChatView {
     }
 
     /// The file a message mentions at `spot`, or the link there, if
-    /// there's one: `gf` opens it.
+    /// there's one: `gf`, `gx` and a Ctrl+click open it. A link written as
+    /// Markdown goes where its Markdown says, which its words drawn
+    /// needn't: `[GXWI](https://…)` shows only GXWI.
     pub(super) fn link_at_spot(&self, spot: Position) -> Option<crate::links::Found> {
         let text = self.text(spot.text)?;
-        crate::links::mention_at(text.text, spot.byte)
+        let written = (text.links.iter())
+            .filter(|link| !link.image && link.range.contains(&spot.byte))
+            .find_map(|link| {
+                Some(crate::links::Found {
+                    bytes: link.range.clone(),
+                    target: link_target(&link.to)?,
+                })
+            });
+        written.or_else(|| crate::links::mention_at(text.text, spot.byte))
+    }
+
+    /// A Ctrl+click at `at`, from the pane's top left: the file or link
+    /// there, if there's one, opens, as `gx` opens it, and the cursor goes
+    /// there. Returns whether there was one; if not, the click is a click.
+    pub(crate) fn ctrl_press(&mut self, at: [f32; 2]) -> bool {
+        let Some(spot) = self.spot_at(at, false) else {
+            return false;
+        };
+        let Some(found) = self.link_at_spot(spot) else {
+            return false;
+        };
+        self.picked = None;
+        self.cursor = Some(spot);
+        self.mentions.opening = Some(found.target);
+        true
     }
 
     /// Puts `text`, a mention, at the end of the message being typed, as
@@ -450,6 +476,22 @@ pub(crate) fn from_chat_paths(path: &str, paths: Option<&ChatPaths>) -> String {
         (Some(file), Some(folder)) => from_folder(&file, folder.trim_matches('/')),
         _ => path.to_owned(),
     }
+}
+
+/// Where a Markdown link's target `to` goes, if it's one that opens: a
+/// URL of a scheme the desktop may open, a file's URI, or a path, with a
+/// line if it says one. A link to a heading of the message, `#…`, doesn't.
+fn link_target(to: &str) -> Option<Target> {
+    if to.is_empty() || to.starts_with('#') {
+        return None;
+    }
+    if let Some(target) = crate::links::target_of_uri(to) {
+        return Some(target);
+    }
+    // A path, which a link's whole target must be: not one inside it.
+    crate::links::mention_at(to, 0)
+        .filter(|found| found.bytes == (0..to.len()))
+        .map(|found| found.target)
 }
 
 #[cfg(test)]

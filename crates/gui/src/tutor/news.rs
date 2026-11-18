@@ -1697,6 +1697,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Agents message chats that may do more once you allow it; Claude's Auto and Codex's Auto review are as one",
     },
+    News {
+        id: "chat-links",
+        date: "2026-11-18",
+        lesson: "agents",
+        what: "In chats, gx and Ctrl+click open a link's target, not just its words: [GXWI](https://…) opens the URL",
+    },
 ];
 
 impl News {

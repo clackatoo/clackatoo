@@ -8,7 +8,8 @@ related:
 
 Your messages are bubbles on the right. The agent's answers run the width of a
 column down the middle of the pane, with Markdown laid out as it's meant to
-look: headings in bold, lists, quotes, links in blue, code in the terminal's
+look: headings in bold, lists, quotes, links in blue (only a link's words
+show: `gx` on them, or a <kbd>Ctrl</kbd>+click, opens where it goes), code in the terminal's
 font on a background of its own, colored as an editor colors it when its
 language is installed, and tables as a grid. Code, quotes, and cards all start
 at the column's left edge.
@@ -41,7 +42,7 @@ the start of the bar, and <kbd>Ctrl</kbd>+<kbd>?</kbd> lists them:
 | `zt` `zz` `zb` | Put the cursor's row at the top, middle or bottom of the view. |
 | `{` `}` | The block before or after. |
 | `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
-| `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there (see [Mentioning files](~clackatoo/reference/chatting#mentioning-files)). |
+| `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there: a link written as Markdown, such as `[GXWI](https://…)`, opens its target, not its words (see [Mentioning files](~clackatoo/reference/chatting#mentioning-files)). <kbd>Ctrl</kbd>+click does the same with the mouse. |
 | <kbd>Ctrl</kbd>+<kbd>D</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd>, <kbd>Ctrl</kbd>+<kbd>E</kbd> <kbd>Ctrl</kbd>+<kbd>Y</kbd>, <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>Page Down</kbd> <kbd>Page Up</kbd> | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
 | `v` `V` | Select characters, or lines. `o` goes to the other end, <kbd>Esc</kbd> stops; `gv` restores the last selection, or swaps it with the current one. |
 | `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, whole lines, or to the line's end, into the registers (see [Yanking](#yanking)), `Y` as `y$`, as Neovim's. In visual mode, `y` yanks what's selected and `Y` its lines. |

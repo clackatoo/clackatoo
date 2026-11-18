@@ -657,6 +657,9 @@ impl ChatPane {
     /// Handles a mouse event. Returns whether it must be redrawn.
     pub(crate) fn mouse(&mut self, event: &PaneMouse) -> bool {
         match event.action {
+            // Ctrl+click opens a link or a file, as in a terminal pane.
+            MouseAction::Press(MouseButton::Left)
+                if event.modifiers.ctrl && self.view.ctrl_press(event.pixel) => {}
             MouseAction::Press(MouseButton::Left) => {
                 self.view
                     .press(event.pixel, event.clicks, event.modifiers.shift);

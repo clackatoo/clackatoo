@@ -14,6 +14,8 @@ Long chats open on recent turns in the window and web app. Scroll near the top t
 
 ## Reading and copying a chat
 
+Links show blue, and only their words: in normal mode, `gx` on one opens where it goes, and so does a Ctrl+click.
+
 Wide tables scroll sideways when you swipe horizontally on a trackpad or use a horizontal mouse wheel over them. Shift+wheel works too. In normal mode, `zl` and `zh` scroll the table the cursor is in; `zL` and `zH` move half a column.
 
 In normal mode, word motions and copies follow the same rules as the editor, including Unicode and the word characters of fenced code’s language. `ge` goes to the previous word’s end, `%` finds its matching bracket, and `(` and `)` move between sentences in a block. `g0` and `g$` move to the visual row’s edges; `g_` finds its last non-blank character.
