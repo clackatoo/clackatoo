@@ -458,8 +458,8 @@ pub(crate) struct Started {
     /// strictest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) limits: Option<String>,
-    /// The user had it in a pane and sent it back, so it's theirs to
-    /// close, never its parent's agent's.
+    /// The user had it in a pane and sent it back, so it outlives the
+    /// chat that started it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) kept: bool,
     /// The mode its agent was in, if it said: asked for again as its

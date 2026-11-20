@@ -20,7 +20,7 @@ An agent can work with your other chats through more of clackatoo's tools.
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, specialist and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. It answers at once, with the chat's number, without waiting for the agent to start: the message goes once it has, and if it can't, the chat fails, saying why, and a wait for it says so too. |
 | `start_chats` | Starts several at once, up to 16. |
-| `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you have open in a pane, opened and sent back to the background, or whose changes or comments wait for your review: those are yours to close. |
+| `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you have open in a pane, or whose changes or comments wait for your review: those are yours to close. One you opened and sent back to the background it can close. |
 | `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives every answer to its messages it hasn't had yet, oldest first, or else the last. If the chat still runs something in the background, it says so: the chat might go on by itself when that ends. |
 | `wait_for_chats` | Waits for several chats, up to 16, all of them or the first to finish, and gives one summary: each one's status, final answer, and files changed. |
 
@@ -128,9 +128,10 @@ not, until you close it, with `:bd`, or the agent that started it does, with
 takes. None is ever closed to make room: with 32 open under one of your chats
 (`open` under [`[subagents]`](#subagent-limits)), starting another is refused,
 and the agent is told to close those it's done with. One you had in a pane and
-sent back is yours: `close_chat` won't close it, and it doesn't close with the
-chat that started it, passing to the chat above as one in a pane does, or
-staying open if there's none. A finished one in the background lets its
+sent back doesn't close with the chat that started it, passing to the chat
+above as one in a pane does, or staying open if there's none; but the agent
+that started it, or the one it passed to, can still close it with
+`close_chat`. A finished one in the background lets its
 agent's process go after 2 minutes, and its next message brings it back in
 about half a second.
 

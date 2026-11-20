@@ -197,7 +197,7 @@ A terminal that has **never been selected** closes automatically 60 seconds afte
 
 An agent can give a subagent a pane of its own, and a card opens one as a pane. A teal band across the top of a subagent's pane says what it is, as `↳ subagent of chat 12 · explore`: whose it is, and the specialist it was started as. Click the band, or press Ctrl+B `u`, to go to the chat that started it, whichever tab that's in.
 
-`:q`, `:close` or Ctrl+B `x` in a subagent's pane closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. One you sent back is yours: the agent that started it can't close it. `:bd` closes the chat itself for good, pane and all, as `clackatoo close` does from a shell. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it.
+`:q`, `:close` or Ctrl+B `x` in a subagent's pane closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. One you sent back outlives the chat that started it, though that chat's agent can still close it. `:bd` closes the chat itself for good, pane and all, as `clackatoo close` does from a shell. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it.
 
 A subagent in a pane comes back after the daemon restarts, a subagent still, if its chat was in a pane too: band, card, `:q` and all, with its specialist's limits and never a mode above its chat's.
 

@@ -141,9 +141,8 @@ pub(crate) const SPECIALIST_SETTING: &str = "clackatoo.specialist";
 const LIMITS_SETTING: &str = "clackatoo.limits";
 
 /// The ID a chat an agent started keeps, with the values chosen, once
-/// the user has had it in a pane and sent it back to the background: the
-/// agent that started it can't close it (`close_chat`), as the user chose
-/// to keep it.
+/// the user has had it in a pane and sent it back to the background: it
+/// outlives the chat that started it, as one in a pane does.
 const KEPT_SETTING: &str = "clackatoo.kept";
 
 /// The ID of the chat's own setting for whether its agent gets tools that

@@ -2559,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_closes_only_the_chats_it_started_and_never_one_the_user_kept() {
+    fn a_chat_closes_only_the_chats_it_started_and_never_one_the_user_has_open() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let b = answered_chat(&mut daemon, 2, (a, a, 1));
@@ -2570,14 +2570,7 @@ mod tests {
         assert!(theirs.contains("this chat didn't start chat 3"), "{theirs}");
         assert!(daemon.close_child(a, users).is_err(), "the user's");
         assert!(daemon.close_child(a, TerminalId(9)).is_err());
-        // One the user had in a pane and sent back is theirs; it's kept as
-        // a setting of the chat's own, which an upgrade hands over and no
-        // agent hears of.
-        daemon.chat(b).unwrap().keep_for_user();
-        let kept = daemon.close_child(a, b).unwrap_err();
-        assert!(kept.contains("so it's theirs"), "{kept}");
-        assert!(daemon.chat_ref(b).unwrap().kept_by_user());
-        // So is one the user has open in a pane now (review of CLACKA-186).
+        // Not one the user has open in a pane now (review of CLACKA-186).
         let shown = answered_chat(&mut daemon, 7, (a, a, 1));
         let name = daemon.workspaces.name_for_new(None).unwrap();
         (daemon.workspaces).new_workspace(name, clackatoo_protocol::Content::Terminal(shown));
@@ -2601,6 +2594,13 @@ mod tests {
         let under = answered_chat(&mut daemon, 6, (own, a, 2));
         assert_eq!(daemon.close_child(a, own).unwrap(), "Closed chat 5.");
         assert!(daemon.chat_ref(own).is_none() && daemon.chat_ref(under).is_none());
+        // One the user had in a pane and sent back too: closing its pane
+        // was letting it go. It's kept as a setting of the chat's own,
+        // which an upgrade hands over and no agent hears of.
+        daemon.chat(b).unwrap().keep_for_user();
+        assert!(daemon.chat_ref(b).unwrap().kept_by_user());
+        assert_eq!(daemon.close_child(a, b).unwrap(), "Closed chat 2.");
+        assert!(daemon.chat_ref(b).is_none() && daemon.chat_ref(c).is_none());
     }
 
     #[test]

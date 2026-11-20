@@ -315,12 +315,6 @@ impl Daemon {
                 "this chat didn't start chat {to}: it closes only the chats it started"
             ));
         }
-        if target.kept_by_user() {
-            return Err(format!(
-                "the user opened chat {to} and sent it back to the background, so it's theirs: \
-                 ask them to close it"
-            ));
-        }
         if self.workspaces.get().pane_showing(to).is_some() {
             return Err(format!(
                 "the user has chat {to} open in a pane: they close it"

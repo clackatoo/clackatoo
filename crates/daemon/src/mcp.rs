@@ -1769,8 +1769,8 @@ fn clackatoo_tools() -> Value {
                 as the user's :bd does: the chats it started close with it, or pass to this chat if \
                 they're still working. Close the ones whose work is done and that you won't message \
                 again: a limited number may be open under one of the user's chats, and none is ever \
-                closed for you. A chat the user has open in a pane, or opened and sent back to the \
-                background, or whose changes wait for their review, is theirs to close.",
+                closed for you. A chat the user has open in a pane, or whose changes wait for their \
+                review, is theirs to close.",
             "inputSchema": { "type": "object", "properties": {
                 "chat": chat,
             }, "required": ["chat"] },

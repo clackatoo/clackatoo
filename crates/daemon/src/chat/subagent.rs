@@ -179,7 +179,8 @@ impl HostedChat {
     }
 
     /// Whether the user had it in a pane and sent it back to the
-    /// background: it's theirs to close, never the agent's (`close_chat`).
+    /// background: it outlives the chat that started it, which can still
+    /// close it (`close_chat`).
     pub(crate) fn kept_by_user(&self) -> bool {
         (self.chosen.iter()).any(|(id, _)| id == KEPT_SETTING)
     }
