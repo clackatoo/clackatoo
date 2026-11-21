@@ -3561,15 +3561,26 @@ fn stopping_ends_the_answer() {
     assert_eq!(last_words(&ask(&mut client, chat, "next")), "echo: next\n");
 }
 
+/// The agent stopping by itself as it answers starts it again, and the
+/// turn goes on in its session, told why; the next message goes as ever.
 #[test]
-fn when_the_agent_stops_the_next_message_starts_it_again() {
+fn when_the_agent_stops_as_it_answers_it_starts_again_and_goes_on() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
     let node = ask(&mut client, chat, "exit");
-    assert_eq!(
-        last_outcome(&node),
-        Some(&Outcome::Failed("the agent stopped".into()))
+    assert_eq!(node.turns.len(), 1, "the same turn");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    let turn = &node.turns[0];
+    assert!(
+        (turn.items.iter()).any(|item| matches!(item, Item::Other(said)
+            if said == "Continuing after the agent's process stopped.")),
+        "{turn:#?}"
+    );
+    assert!(
+        last_words(&node).starts_with("echo: Clackatoo started your agent's process again"),
+        "{}",
+        last_words(&node)
     );
     assert_eq!(last_words(&ask(&mut client, chat, "back")), "echo: back\n");
 }

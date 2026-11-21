@@ -7085,6 +7085,66 @@ pub(crate) mod tests {
         assert_eq!(chat.node.notice, None);
     }
 
+    /// The agent's process stopping by itself as it answers, as when the
+    /// system kills it for memory, doesn't end the turn: it goes on, in
+    /// the same session, once the agent has started again, told what
+    /// stopped with it. Once: stopping again ends it, as before.
+    #[test]
+    fn a_turn_goes_on_once_after_the_agents_process_stops_by_itself() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        chat.task_said(crate::agent::Task::Spawned {
+            id: "t1".into(),
+            kind: "shell".into(),
+            name: "Serve the docs".into(),
+            description: None,
+            can_stop: true,
+            tool: None,
+            output: None,
+        });
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t","title":"Run","status":"in_progress"}"#,
+        );
+        assert!(chat.agent_died());
+        let turn = &chat.node.turns[0];
+        assert_eq!(turn.end, None, "it goes on");
+        assert!(matches!(&turn.items[0], Item::Tool(tool) if tool.status == ToolStatus::Failed));
+        assert_eq!(
+            turn.items.last(),
+            Some(&Item::Other(
+                "Continuing after the agent's process stopped.".into()
+            ))
+        );
+        assert_eq!(chat.node.state, ChatState::Starting);
+        let actions = connect(&mut chat, "s");
+        let Some(Action::Prompt(prompt)) = actions.last() else {
+            panic!("{actions:?}");
+        };
+        assert!(
+            prompt.text.contains("stopped unexpectedly"),
+            "{}",
+            prompt.text
+        );
+        assert!(prompt.text.contains("`Serve the docs`"), "{}", prompt.text);
+        assert_eq!(chat.node.turns.len(), 1, "the same turn");
+        // Stopping again in that turn, it ends.
+        assert!(!chat.agent_died());
+        assert_eq!(
+            outcome(&chat.node.turns[0]),
+            Some(&Outcome::Failed("the agent stopped".into()))
+        );
+        // Nor does one the user asked to stop go on, nor an idle chat.
+        send(&mut chat, "again");
+        drop(chat.act(ChatAction::Stop));
+        assert!(!chat.agent_died());
+        assert!(chat.node.turns[1].end.is_some());
+        connect(&mut chat, "s");
+        assert!(!chat.agent_died());
+        assert!(chat.node.notice.is_some());
+    }
+
     #[test]
     fn what_the_agent_writes_keeps_its_lines_but_no_controls() {
         let mut chat = chat();

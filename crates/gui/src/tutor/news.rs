@@ -1703,6 +1703,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "In chats, gx and Ctrl+click open a link's target, not just its words: [GXWI](https://…) opens the URL",
     },
+    News {
+        id: "agent-goes-on-after-stopping",
+        date: "2026-11-21",
+        lesson: "agents",
+        what: "An agent killed mid-answer, as for memory, is started again and its answer goes on",
+    },
 ];
 
 impl News {

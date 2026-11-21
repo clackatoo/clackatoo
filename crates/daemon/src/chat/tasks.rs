@@ -302,6 +302,15 @@ impl HostedChat {
         self.background_rows_ended(&lost);
     }
 
+    /// What the agent is told of each task still going, should they be
+    /// lost.
+    pub(super) fn going_task_names(&self) -> Vec<String> {
+        (self.node.tasks.iter())
+            .filter(|task| task.going())
+            .map(lost_name)
+            .collect()
+    }
+
     /// Lets go of the tasks that have ended, as the user sends a message.
     pub(super) fn forget_ended_tasks(&mut self) {
         if self.node.tasks.iter().all(AgentTask::going) {
@@ -644,12 +653,7 @@ impl HostedChat {
             task.summary = Some(ENDED_BY_UPGRADE.to_owned());
             task.ended = Some(ended);
             ids.push(task.id.clone());
-            lost.push(match &task.command {
-                Some(command) if *command != task.title => {
-                    format!("{} ({})", task.title, command)
-                }
-                _ => task.title.clone(),
-            });
+            lost.push(lost_name(task));
         }
         let gone = bound(&mut tasks);
         self.set_tasks(tasks);
@@ -766,4 +770,13 @@ fn bound(tasks: &mut Vec<AgentTask>) -> Vec<AgentTask> {
         gone.push(tasks.remove(at));
     }
     gone
+}
+
+/// What the agent is told of `task`, which ended with its process: its
+/// title, and its command if that says more.
+fn lost_name(task: &AgentTask) -> String {
+    match &task.command {
+        Some(command) if *command != task.title => format!("{} ({})", task.title, command),
+        _ => task.title.clone(),
+    }
 }

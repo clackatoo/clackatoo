@@ -1987,12 +1987,24 @@ impl Daemon {
                     .iter()
                     .any(|(held, agent)| *held == id && *agent == name)
             {
-                chat.disconnected(why.as_deref());
-                chats.push(id);
+                // Having started, it stopped by itself: what it was
+                // answering goes on, once it's started again.
+                let goes_on = match why.as_deref() {
+                    Some(why) => {
+                        chat.disconnected(Some(why));
+                        false
+                    }
+                    None => chat.agent_died(),
+                };
+                chats.push((id, goes_on));
             }
         }
-        for id in chats {
+        for (id, goes_on) in chats {
             self.agents.opening.remove(&id);
+            if goes_on {
+                log::info!("chat {id}: starting {name} again, to go on with its turn");
+                self.connect(id);
+            }
             self.collect_damage(id);
         }
         // Asked for its settings, it never said.

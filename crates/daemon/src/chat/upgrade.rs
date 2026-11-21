@@ -1,11 +1,15 @@
-//! Only planned upgrades continue work automatically. The handover carries
-//! explicit intent, so a historical failure never becomes a new instruction.
+//! Planned upgrades continue work automatically, and so does an agent whose
+//! process stopped by itself as it answered, once per turn. The handover
+//! carries explicit intent, so a historical failure never becomes a new
+//! instruction.
 
 use std::fmt::Write as _;
 
-use clackatoo_protocol::{ChatImage, ChatPreview, ChatState, Item, Outcome, TerminalId, code_span};
+use clackatoo_protocol::{
+    ChatImage, ChatPreview, ChatState, Item, Outcome, TerminalId, ToolStatus, code_span,
+};
 
-use super::{HostedChat, Link, Message, Prompt};
+use super::{Asker, HostedChat, Link, Message, Prompt};
 use crate::handover::{self, ChatContinuation, QueuedImage, ResumePrompt};
 
 const CONTINUE: &str = "Clackatoo resumed this session after the daemon restarted for an \
@@ -18,7 +22,96 @@ const CONTINUE: &str = "Clackatoo resumed this session after the daemon restarte
     starting replacement work. Reusing an operation ID never starts it twice: a kept \
     one is inspected, and one let go long ago is refused.";
 
+/// What the agent is told as its turn goes on after its process stopped
+/// by itself.
+const CONTINUE_AFTER_STOP: &str = "Clackatoo started your agent's process again: it stopped \
+    unexpectedly during this turn, perhaps killed by the system for using too much memory. \
+    Continue the work of this turn from where you left off. A tool may have been interrupted \
+    after it already acted: inspect its result or the current state before repeating it, and \
+    don't assume an interrupted command failed. If a heavy build or test was running, it may be \
+    what used the memory: if you still need it, run it again lighter, with fewer jobs or \
+    threads. Keep the user's existing scope and permissions; an unanswered approval is not \
+    permission.";
+
+/// What a turn shows where it went on after the agent's process stopped,
+/// by which it's known to have once.
+const WENT_ON_AFTER_STOP: &str = "Continuing after the agent's process stopped.";
+
 impl HostedChat {
+    /// The agent's process stopped by itself, having started, as when the
+    /// system kills it for memory. A turn under way goes on, in the same
+    /// session and visible turn, once the agent has started again, as
+    /// after an upgrade that stopped it: once a turn, so one that brings it
+    /// down again ends, as any turn does as its agent stops. Not one the
+    /// user asked to stop, nor one telling its session again. Returns
+    /// whether it goes on, for the server to start the agent; otherwise
+    /// it's as [`Self::disconnected`].
+    pub(crate) fn agent_died(&mut self) -> bool {
+        let went_on = |turn: &clackatoo_protocol::Turn| {
+            (turn.items.iter())
+                .any(|item| matches!(item, Item::Other(said) if said == WENT_ON_AFTER_STOP))
+        };
+        let goes_on = self.answering_turn().filter(|&index| {
+            !self.stop_requested
+                && !self.told_again()
+                && matches!(self.link, Link::Open | Link::Opening)
+                && (self.session.is_some() || self.queued.is_some())
+                && !went_on(&self.node.turns[index])
+        });
+        let Some(index) = goes_on else {
+            self.disconnected(None);
+            return false;
+        };
+        let lost = self.going_task_names();
+        // Steering it may have had and acted on is kept for review, as
+        // through an upgrade.
+        let paused = self.node.delivery.paused || self.user_queue.native.is_some();
+        self.setting_asked.clear();
+        self.put_back.clear();
+        self.tasks_lost();
+        self.elicitations_lost();
+        self.queue_disconnected();
+        self.pause_queue(paused);
+        self.clear_slow();
+        // A message it never had goes as it was; otherwise it's told to go on.
+        let prompt = self.queued.take().unwrap_or_else(|| {
+            let mut text = CONTINUE_AFTER_STOP.to_owned();
+            if !lost.is_empty() {
+                let names: Vec<String> = lost.iter().map(|name| code_span(name)).collect();
+                let _ = write!(
+                    text,
+                    "\n\nWhat you ran in the background stopped with your process: {}. Start \
+                     again whatever you still need.",
+                    names.join(", ")
+                );
+            }
+            Prompt {
+                resolved_context: false,
+                context: Vec::new(),
+                text,
+                images: Vec::new(),
+            }
+        });
+        // What it was running, and what it asked, went with its process.
+        self.set_retrying(None);
+        let turn = &mut self.node.turns[index];
+        for item in &mut turn.items {
+            if let Some(tool) = item.tool_mut()
+                && tool.status == ToolStatus::Running
+            {
+                tool.status = ToolStatus::Failed;
+            }
+        }
+        turn.items.push(Item::Other(WENT_ON_AFTER_STOP.into()));
+        self.patch_turn(index);
+        (self.asking).retain(|(asker, _)| !matches!(asker, Asker::Agent(_)));
+        self.show_question();
+        self.queued = Some(prompt);
+        self.link = Link::Opening;
+        self.set_state(ChatState::Starting);
+        true
+    }
+
     pub(crate) fn prepare_upgrade(&mut self) -> Option<ChatContinuation> {
         self.keep_held_for_upgrade();
         if let Some((id, _, _)) = self.user_queue.native {

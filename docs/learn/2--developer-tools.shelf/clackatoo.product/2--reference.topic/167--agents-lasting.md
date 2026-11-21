@@ -31,8 +31,18 @@ comes through as one block of its text. Tools from a build before cards come
 through as lines, without their output or changes. Changes from a build before
 line numbers come through without them.
 
-If the agent stops on its own, the chat says so, and the next message starts
-it again, carrying on the same conversation.
+If the agent's process stops on its own while it's answering, as when the
+system kills it for using too much memory, clackatoo starts it again and the
+answer goes on, in the same session and turn, which shows `Continuing after
+the agent's process stopped.` The agent is told it stopped unexpectedly,
+perhaps for memory, to check what an interrupted tool had already done before
+repeating it, to run again more lightly a heavy build or test that may have
+been the cause, and which of its background tasks stopped with it. A message
+it never had goes instead, as it was. This happens once a turn: if the agent
+stops again in the same turn, the turn ends as failed, so a crash can't repeat
+for ever. A turn you asked to stop doesn't go on. An idle chat whose agent
+stops says so, and the next message starts it again, carrying on the same
+conversation; so does one whose agent stops before it has started, saying why.
 
 A chat keeps which agent it talks to. Chats from before there were other
 agents talk to Claude Code.
