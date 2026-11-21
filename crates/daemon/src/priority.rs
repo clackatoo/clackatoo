@@ -36,6 +36,19 @@
 //!   daemon doesn't need, but never what it does. Leaves, as the kernel
 //!   lets only a cgroup with no processes of its own divide itself.
 //!
+//!   `agents` is divided again (CLACKA-263): what the daemon starts there
+//!   goes in its leaf `agents/serve`, and every few seconds each program
+//!   those start, as each Claude Code process Claude Code's adapter runs
+//!   a session in, or a command Codex runs, is given a leaf of its own
+//!   with all it has started (see [`sweep`]); what it starts after starts
+//!   there. A program started by one in a leaf of its own goes in its
+//!   parent's. systemd-oomd, which kills a whole cgroup when memory runs
+//!   short, the one reclaiming most, then takes one chat's process and
+//!   the build it ran, not every agent at once; the chat opens its
+//!   session again (see `server/session_process.rs`). Empty leaves are
+//!   taken away as they're swept. An upgrade from a build before moves
+//!   what's in `agents` itself into `agents/serve` first.
+//!
 //! Linux passes both on to children, which mustn't have either (jack's
 //! rule: only the daemon itself). So the loop's thread is first set to
 //! `SCHED_RESET_ON_FORK`, which starts every process and thread it starts
@@ -107,6 +120,17 @@ impl Leaf {
             Self::Agents => "agents",
         }
     }
+
+    /// Where in the scope what the daemon starts in it goes: `agents`
+    /// itself until it's divided, then `agents/serve`.
+    fn path(self) -> String {
+        match self {
+            Self::Agents if AGENTS_DIVIDED.load(Ordering::SeqCst) => {
+                format!("{}/{SERVE}", self.name())
+            }
+            _ => self.name().to_owned(),
+        }
+    }
 }
 
 /// Where cgroup v2 is mounted, as systemd mounts it.
@@ -125,6 +149,16 @@ const DAEMON_WEIGHT: &str = "1000";
 
 /// The agents' leaf's weight, a fifth of the usual.
 const AGENTS_WEIGHT: &str = "20";
+
+/// The leaf of `agents` that what the daemon starts there goes in, before
+/// it's swept: see the module's docs.
+const SERVE: &str = "serve";
+
+/// How often `agents/serve` is swept.
+const SWEEP_EVERY: Duration = Duration::from_secs(2);
+
+/// Whether `agents` is divided, its programs in `agents/serve`.
+static AGENTS_DIVIDED: AtomicBool = AtomicBool::new(false);
 
 /// How much of the daemon's memory is kept from being reclaimed or
 /// swapped out while there's other memory to take: about what it uses
@@ -192,6 +226,8 @@ struct Leaves {
     /// process: a child writes `0` to its own to move itself in.
     terminals: OwnedFd,
     agents: OwnedFd,
+    /// `agents`, if it's divided, to sweep.
+    divided: Option<PathBuf>,
 }
 
 impl Leaves {
@@ -699,6 +735,8 @@ pub(crate) fn started(pid: u32, leaf: Leaf) {
 struct Movers {
     terminals: OwnedFd,
     agents: OwnedFd,
+    /// `agents`, if it's divided, to sweep.
+    divided: Option<PathBuf>,
 }
 
 impl Movers {
@@ -706,6 +744,7 @@ impl Movers {
         Ok(Self {
             terminals: rustix::io::fcntl_dupfd_cloexec(&leaves.terminals, LEAF_FDS)?,
             agents: rustix::io::fcntl_dupfd_cloexec(&leaves.agents, LEAF_FDS)?,
+            divided: leaves.divided.clone(),
         })
     }
 
@@ -783,6 +822,109 @@ fn descendants(proc: &Path, pid: Pid, since: u64) -> Vec<Pid> {
     found
 }
 
+/// What becomes of a program found in `agents/serve` (see [`sweep`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Swept {
+    /// It stays: the daemon started it.
+    Stays,
+    /// It gets a leaf of its own, called this.
+    Own(String),
+    /// It goes in its parent's leaf of `agents`, called this.
+    With(String),
+}
+
+/// What becomes of `pid`, in `agents/serve`, which started at `since`,
+/// whose parent is `parent`, in the leaf of `agents` called `parents`, as
+/// `serve`, or `None` if it's in none: one the daemon, `daemon`, started
+/// stays; one started by one of those gets a leaf of its own; one started
+/// by a program in a leaf of its own goes in that one's. One whose parent
+/// is elsewhere, as having ended, it was handed to another, gets one of
+/// its own.
+fn swept(pid: u32, since: u64, parent: u32, daemon: u32, parents: Option<&str>) -> Swept {
+    match parents {
+        _ if parent == daemon => Swept::Stays,
+        Some(leaf) if leaf != SERVE => Swept::With(leaf.to_owned()),
+        _ => Swept::Own(format!("{pid}-{since}")),
+    }
+}
+
+/// Process `pid`'s parent and start time, as `proc` (a `/proc`) has them.
+fn parent_and_start(proc: &Path, pid: u32) -> Option<(u32, u64)> {
+    let stat = fs::read_to_string(proc.join(pid.to_string()).join("stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let parent = rest.split_whitespace().nth(1)?.parse().ok()?;
+    Some((parent, start_time_in(&stat)?))
+}
+
+/// The leaf of `agents` process `pid` is in, by its name, as `proc` has
+/// it, if it's in one: `agents` being `agents_cgroup` in the cgroup tree.
+fn leaf_of(proc: &Path, pid: u32, agents_cgroup: &str) -> Option<String> {
+    let text = fs::read_to_string(proc.join(pid.to_string()).join("cgroup")).ok()?;
+    let leaf = cgroup_in(&text)?
+        .strip_prefix(agents_cgroup)?
+        .strip_prefix('/')?;
+    (!leaf.is_empty() && !leaf.contains('/')).then(|| leaf.to_owned())
+}
+
+/// Sweeps `agents/serve`, `agents` being the directory `agents`, as the
+/// module's docs say, with `proc` (a `/proc`), and takes away the leaves
+/// of `agents` that have emptied. As far as it can: a program that ends
+/// meanwhile is passed over.
+fn sweep(proc: &Path, agents: &Path) {
+    let Some(agents_cgroup) = (agents.strip_prefix(CGROUPS).ok())
+        .and_then(Path::to_str)
+        .map(|path| format!("/{path}"))
+    else {
+        return;
+    };
+    let daemon = std::process::id();
+    let Ok(serving) = fs::read_to_string(agents.join(SERVE).join("cgroup.procs")) else {
+        return;
+    };
+    for pid in serving.lines().filter_map(|line| line.parse::<u32>().ok()) {
+        let Some((parent, since)) = parent_and_start(proc, pid) else {
+            continue;
+        };
+        let parents = leaf_of(proc, parent, &agents_cgroup);
+        let leaf = match swept(pid, since, parent, daemon, parents.as_deref()) {
+            Swept::Stays => continue,
+            Swept::With(leaf) => leaf,
+            Swept::Own(leaf) => {
+                if let Err(err) = fs::create_dir(agents.join(&leaf))
+                    && err.kind() != io::ErrorKind::AlreadyExists
+                {
+                    log::debug!("pid {pid} has no leaf of its own: {err}");
+                    continue;
+                }
+                leaf
+            }
+        };
+        let procs = agents.join(&leaf).join("cgroup.procs");
+        if write(&procs, &pid.to_string()).is_err() {
+            continue;
+        }
+        // With what it has started by now, which may be in `serve` still.
+        let Some(own) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+            continue;
+        };
+        for descendant in descendants(proc, own, since) {
+            let _ = write(&procs, &descendant.as_raw_pid().to_string());
+        }
+    }
+    let Ok(leaves) = fs::read_dir(agents) else {
+        return;
+    };
+    let leaves = (leaves.flatten()).filter(|leaf| {
+        leaf.file_type().is_ok_and(|kind| kind.is_dir()) && leaf.file_name() != SERVE
+    });
+    for leaf in leaves {
+        let events = fs::read_to_string(leaf.path().join("cgroup.events"));
+        if events.is_ok_and(|events| events.lines().any(|line| line == "populated 0")) {
+            let _ = fs::remove_dir(leaf.path());
+        }
+    }
+}
+
 /// Where the moves the daemon hands its mover go: see [`start_mover`].
 static MOVES: OnceLock<mpsc::Sender<Early>> = OnceLock::new();
 
@@ -799,13 +941,26 @@ fn start_mover(movers: Movers) {
     let started = std::thread::Builder::new()
         .name("priority-moves".into())
         .spawn(move || {
-            for early in moving {
-                if let Err(err) = movers.move_in(&early) {
-                    log::debug!(
-                        "pid {} couldn't go in {}: {err}",
-                        early.pid,
-                        early.leaf.name()
-                    );
+            let mut swept = Instant::now();
+            loop {
+                match moving.recv_timeout(SWEEP_EVERY) {
+                    Ok(early) => {
+                        if let Err(err) = movers.move_in(&early) {
+                            log::debug!(
+                                "pid {} couldn't go in {}: {err}",
+                                early.pid,
+                                early.leaf.name()
+                            );
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                if let Some(agents) = &movers.divided
+                    && swept.elapsed() >= SWEEP_EVERY
+                {
+                    sweep(Path::new("/proc"), agents);
+                    swept = Instant::now();
                 }
             }
         });
@@ -1176,7 +1331,50 @@ fn divide(scope: &Path, unit: &str, pid: u32) -> io::Result<Leaves> {
     let agents = scope.join(Leaf::Agents.name());
     weigh(&agents.join("cpu.weight"), AGENTS_WEIGHT);
     weigh(&agents.join("io.weight"), AGENTS_WEIGHT);
+    match divide_agents(&agents) {
+        Ok(()) => AGENTS_DIVIDED.store(true, Ordering::SeqCst),
+        Err(err) => log::warn!(
+            "{} isn't divided, so its programs share one cgroup: {err}",
+            agents.display()
+        ),
+    }
     open_leaves(scope, unit).inspect_err(|_| leave_leaf(scope, pid))
+}
+
+/// Divides `agents`, a leaf, as the module's docs say: makes
+/// `agents/serve`, moves what's in `agents` itself there, as after an
+/// upgrade from a build before, and hands `agents`'s controllers down,
+/// which it can only once it has no programs of its own.
+fn divide_agents(agents: &Path) -> io::Result<()> {
+    let serve = agents.join(SERVE);
+    if let Err(err) = fs::create_dir(&serve)
+        && err.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(err);
+    }
+    let offered = fs::read_to_string(agents.join("cgroup.controllers"))?;
+    for _ in 0..8 {
+        move_all(agents, &serve)?;
+        match hand_down(agents, &offered) {
+            Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {}
+            handed => return handed,
+        }
+    }
+    Err(io::Error::other("programs kept starting in agents itself"))
+}
+
+/// Moves what's in the cgroup `from` itself into the cgroup `to`.
+fn move_all(from: &Path, to: &Path) -> io::Result<()> {
+    let strays = fs::read_to_string(from.join("cgroup.procs"))?;
+    for stray in strays.lines().filter(|line| !line.is_empty()) {
+        // One that has ended meanwhile is gone anyway.
+        if let Err(err) = write(&to.join("cgroup.procs"), stray)
+            && err.raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 /// Moves what's in `scope` itself into `terminals`, then hands the
@@ -1217,20 +1415,7 @@ fn leave_leaf(scope: &Path, pid: u32) {
 
 /// Moves whatever is in `scope` itself into its `terminals` leaf.
 fn move_strays(scope: &Path) -> io::Result<()> {
-    let strays = fs::read_to_string(scope.join("cgroup.procs"))?;
-    for stray in strays.lines().filter(|line| !line.is_empty()) {
-        let moved = write(
-            &scope.join(Leaf::Terminals.name()).join("cgroup.procs"),
-            stray,
-        );
-        // One that has ended meanwhile is gone anyway.
-        if let Err(err) = moved
-            && err.raw_os_error() != Some(libc::ESRCH)
-        {
-            return Err(err);
-        }
-    }
-    Ok(())
+    move_all(scope, &scope.join(Leaf::Terminals.name()))
 }
 
 /// Hands the controllers `offered` (a scope's `cgroup.controllers`) that
@@ -1302,13 +1487,14 @@ fn open_leaves(scope: &Path, unit: &str) -> io::Result<Leaves> {
     let open = |leaf: Leaf| -> io::Result<OwnedFd> {
         let file = OpenOptions::new()
             .write(true)
-            .open(scope.join(leaf.name()).join("cgroup.procs"))?;
+            .open(scope.join(leaf.path()).join("cgroup.procs"))?;
         Ok(rustix::io::fcntl_dupfd_cloexec(&file, LEAF_FDS)?)
     };
     Ok(Leaves {
         unit: unit.to_owned(),
         terminals: open(Leaf::Terminals)?,
         agents: open(Leaf::Agents)?,
+        divided: (AGENTS_DIVIDED.load(Ordering::SeqCst)).then(|| scope.join(Leaf::Agents.name())),
     })
 }
 
@@ -1340,7 +1526,7 @@ fn attach(user: &mut Bus, unit: &str, pid: Pid, leaf: Leaf) -> io::Result<()> {
     };
     let mut body = Body::default();
     body.string(unit);
-    body.string(&format!("/{}", leaf.name()));
+    body.string(&format!("/{}", leaf.path()));
     let pids = body.begin_array(4);
     body.u32(pid.as_raw_pid().cast_unsigned());
     body.end_array(pids);
@@ -1518,6 +1704,52 @@ mod tests {
     /// The leaves are kept out of the way of the fds a child's own hook
     /// puts in place, as the browser's does at 3 and 4, even in a daemon
     /// just upgraded, with only 0 to 2 open below them.
+    /// What the daemon starts in `agents/serve` stays there; what those
+    /// start gets a leaf of its own; what a program in one of those
+    /// starts goes in its; and one whose parent is elsewhere gets its own.
+    #[test]
+    fn a_program_in_serve_is_swept_by_its_parent() {
+        let daemon = 10;
+        assert_eq!(swept(20, 5, daemon, daemon, None), Swept::Stays);
+        assert_eq!(
+            swept(30, 7, 20, daemon, Some(SERVE)),
+            Swept::Own("30-7".into())
+        );
+        assert_eq!(
+            swept(40, 9, 30, daemon, Some("30-7")),
+            Swept::With("30-7".into())
+        );
+        assert_eq!(swept(50, 11, 1, daemon, None), Swept::Own("50-11".into()));
+    }
+
+    /// A process's parent, start time and leaf of `agents` are read from
+    /// `/proc`, a leaf deeper down, or none, being no leaf of `agents`.
+    #[test]
+    fn a_processs_parent_and_leaf_are_read_from_proc() {
+        let proc = tempfile::tempdir().unwrap();
+        let agents = "/user.slice/app-clackatoo-7.scope/agents";
+        let at = |pid: u32, cgroup: &str| {
+            let dir = proc.path().join(pid.to_string());
+            fs::create_dir(&dir).unwrap();
+            fs::write(
+                dir.join("stat"),
+                format!("{pid} (a (b)) S 9 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 4242 0 0"),
+            )
+            .unwrap();
+            fs::write(dir.join("cgroup"), format!("0::{cgroup}\n")).unwrap();
+        };
+        at(1, &format!("{agents}/serve"));
+        at(2, &format!("{agents}/30-7"));
+        at(3, &format!("{agents}/30-7/deeper"));
+        at(4, "/user.slice/app-clackatoo-7.scope/terminals");
+        assert_eq!(parent_and_start(proc.path(), 1), Some((9, 4242)));
+        assert_eq!(leaf_of(proc.path(), 1, agents).as_deref(), Some(SERVE));
+        assert_eq!(leaf_of(proc.path(), 2, agents).as_deref(), Some("30-7"));
+        assert_eq!(leaf_of(proc.path(), 3, agents), None);
+        assert_eq!(leaf_of(proc.path(), 4, agents), None);
+        assert_eq!(leaf_of(proc.path(), 5, agents), None, "gone");
+    }
+
     #[test]
     fn the_leaves_are_kept_at_64_or_above() {
         let scope = tempfile::tempdir().unwrap();

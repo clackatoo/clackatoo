@@ -287,7 +287,8 @@ impl Daemon {
 
     /// Checks the daemon has divided its scope as it does its own: itself
     /// in `daemon`, the programs of the user's terminals in `terminals`,
-    /// and, if `agent`, its agent in `agents`. A chat made again at a start
+    /// and, if `agent`, its agent in `agents/serve`, `agents` being divided
+    /// (CLACKA-263). A chat made again at a start
     /// starts its agent only once it's needed.
     fn check_leaves(&self, client: &mut Client, agent: bool) {
         let leaf = |name: &str| format!("/{}/{name}", self.unit);
@@ -307,7 +308,7 @@ impl Daemon {
         if agent {
             let agent = child_running(self.pid(), "fake_agent");
             eventually("the agent is in its leaf", || {
-                cgroup(agent).ends_with(&leaf("agents"))
+                cgroup(agent).ends_with(&leaf("agents/serve"))
             });
         }
     }

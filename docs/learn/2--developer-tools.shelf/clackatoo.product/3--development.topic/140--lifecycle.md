@@ -34,7 +34,7 @@ They end it four ways:
 
 Each test also checks the scope is divided as the daemon divides its own:
 the daemon in its leaf, each terminal's program in `terminals`, and the
-agent in `agents`.
+agent in `agents/serve`, as `agents` is divided again.
 
 ## Run them
 
