@@ -612,7 +612,8 @@ impl Daemon {
             };
         };
         if !self.may_see(chat, to) {
-            return format!("Chat {to} has moved out of this chat's workspace.\n");
+            let away = super::talk::MOVED_AWAY;
+            return format!("Chat {to} is out of this chat's sight now: {away}.\n");
         }
         let mut what = vec![other.agent_title().to_owned()];
         if let Some(specialist) = other.specialist() {
@@ -737,10 +738,7 @@ impl Daemon {
         if self.may_see(chat, to) {
             Ok(())
         } else {
-            Err(format!(
-                "chat {to} is in another workspace, and not of this chat's family: ask the user \
-                 about it"
-            ))
+            Err(super::talk::out_of_sight(to))
         }
     }
 }

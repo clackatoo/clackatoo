@@ -111,6 +111,9 @@ pub(crate) const INSTRUCTIONS: &str = "clackatoo is the terminal and editor the 
     list_panes gives them. Other chats with agents the user runs are \
     named by numbers too, as list_chats gives them: you can message \
     them, read them, start new ones and wait for their answers. \
+    Keep to chats in your own workspace and those you started: message, read or wait for \
+    a chat in another workspace only when the user explicitly asks you to, or as part of \
+    coordinating work or sharing out resources across the whole machine. \
     Use start_activity for long-running bounded builds, tests and deployments. Choose \
     a stable operation id and clear title, then return control while it runs; completion \
     is delivered automatically. Routine progress belongs in its card. Short commands \
@@ -1701,10 +1704,12 @@ fn clackatoo_tools() -> Value {
         {
             "name": "list_chats",
             "title": "List chats",
-            "description": "Lists the chats with agents in this chat's workspace, and the chats it \
-                started or was started by: each one's number, agent, title, working directory, \
-                workspace, and whether it's idle, working, or waiting for the user. This chat is \
-                among them. Only these can be messaged, read and waited for.",
+            "description": "Lists the chats with agents: those in this chat's workspace, and the \
+                chats it started or was started by, then those in other workspaces. Each one's \
+                number, agent, title, working directory, workspace, and whether it's idle, \
+                working, or waiting for the user. This chat is among them. Leave those in other \
+                workspaces alone unless the user explicitly asks you to reach one, or you're \
+                coordinating work or resources across the whole machine.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true, "openWorldHint": false },
         },
@@ -1715,7 +1720,10 @@ fn clackatoo_tools() -> Value {
                 chats as from this one. If that agent is busy answering, the message waits its turn. \
                 Its answer is what wait_for_chat returns. There's no limit on how many you send: go \
                 round with a chat you started (build, review, fix) for as long as the work needs. A \
-                chat whose agent may do more than this one can't be messaged.",
+                message to a chat whose agent may do more than this one, or that works outside this \
+                chat's project, asks the user first. Don't message a chat in another workspace \
+                unless the user explicitly asks you to, or you're coordinating work or resources \
+                across the whole machine.",
             "inputSchema": { "type": "object", "properties": {
                 "chat": chat,
                 "message": { "type": "string", "description": "The message." },

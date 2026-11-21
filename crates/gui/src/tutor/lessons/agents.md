@@ -189,6 +189,8 @@ How many may work at once is the chat's **Subagents** setting, in the permission
 
 Agents message each other's chats with `send_to_chat`. One whose chat may do more than the sender's, with a looser Tools setting, fewer limits, or a mode that lets its agent do more unasked, is asked about first, in the chat sending it: the message in full, how the other chat can do more, and **Allow**, **Always allow messages to this chat** or **Reject**. Modes compare across agents: Claude Code in Auto and Codex in Auto review message each other without asking. The chat a message you allowed goes to is told how its sender can do less, and not to do for it what it couldn't do itself.
 
+An agent can reach chats in your other workspaces too: `list_chats` lists them after its own. It's told to leave them alone unless you ask it to, or it's coordinating something across the whole machine. A message to a chat working in another project asks you first, the same way.
+
 ## A subagent's own pane
 
 Agent-created terminals have a teal band like subagent panes. It names the chat that started the terminal and says whether an agent is actively waiting for it. Click the band, or press Ctrl+B `u`, to return to that chat.

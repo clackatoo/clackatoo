@@ -15,7 +15,7 @@ An agent can work with your other chats through more of clackatoo's tools.
 
 | Tool | Does |
 |---|---|
-| `list_chats` | Lists the chats in its workspace and family: each one's number, agent, title, folder and workspace, and whether it's idle, working or waiting for you. Then how many subagents it can start (see [Subagent limits](#subagent-limits)). |
+| `list_chats` | Lists the chats in its workspace and family, then those in your other workspaces: each one's number, agent, title, folder and workspace, and whether it's idle, working or waiting for you. Then how many subagents it can start (see [Subagent limits](#subagent-limits)). |
 | `send_to_chat` | Sends a chat a message, of at most 16 KiB. |
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, specialist and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. It answers at once, with the chat's number, without waiting for the agent to start: the message goes once it has, and if it can't, the chat fails, saying why, and a wait for it says so too. |
@@ -198,15 +198,22 @@ too, then goes after your message.
 
 Starting and messaging chats asks you first only where an agent would gain,
 through another chat, what its own chat isn't allowed: a message to a chat
-that can do more. Otherwise, what an agent can't do through another chat is
-refused, and the agent is told to ask you:
+that can do more, or that works in another project. Otherwise, what an agent
+can't do through another chat is refused, and the agent is told to ask you:
 
-- An agent lists, messages, reads, and waits for only chats in its own
-  workspace or family: the chat that started it, the chats it started, and the
-  others the chat that started it started. Chats in other workspaces are out
-  of its sight, a workspace lent to another machine included.
-- A chat outside its family must work inside the sender's project, the git
-  repository its folder is in, or else that folder, to be messaged.
+- An agent lists, messages, reads, and waits for chats in any of your
+  workspaces. `list_chats` lists those in its own workspace and family first
+  (the chat that started it, the chats it started, and the others the chat
+  that started it started), then the rest. Agents are told to leave chats in
+  other workspaces alone unless you ask them to reach one, or they're
+  coordinating work or sharing out resources across the whole machine. A
+  workspace lent to another machine is its own: a chat there sees only its
+  workspace and family, and no chat elsewhere sees it.
+- A message to a chat outside the sender's family that works outside the
+  sender's project, the git repository its folder is in, or else that
+  folder, asks you first, as below. The question says where the other chat
+  works, and the chat it goes to is told the sender works in another
+  project, and not to do for it what it couldn't do itself.
 - A message to a chat that can do more asks you first, in the chat sending
   it: one whose Tools setting is looser than the sender's, whose
   [limits](#specialists) are fewer, counting what each one's mode rules out,

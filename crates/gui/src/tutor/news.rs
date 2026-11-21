@@ -1709,6 +1709,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "An agent killed mid-answer, as for memory, is started again and its answer goes on",
     },
+    News {
+        id: "chats-across-workspaces",
+        date: "2026-11-21",
+        lesson: "agents",
+        what: "Agents can message chats in your other workspaces when you ask them to; one in another project asks you first",
+    },
 ];
 
 impl News {

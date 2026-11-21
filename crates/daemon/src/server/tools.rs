@@ -1282,8 +1282,8 @@ impl Daemon {
             Tool::SendToChat { chat: to, message } => {
                 let more = self.to_ask_about(chat, *to)?;
                 let what = format!(
-                    "send chat {to} this message, though its agent may do more than this one: {}",
-                    talk::More::told_to_sender(&more)
+                    "send chat {to} this message, though {}",
+                    talk::More::asked(*to, &more)
                 );
                 Some((what, Some(unhidden(message)), Choices::Chat))
             }

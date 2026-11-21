@@ -15829,38 +15829,26 @@ fn chats_list_message_read_and_wait_for_each_other() {
     assert_eq!(sent.prompt, "hello<U+202E> there^G");
     assert_eq!(sent.from.as_ref().unwrap().agent, "Claude Code");
 
-    // A chat in another workspace, not of its family, isn't listed,
-    // messaged, read or waited for; nor is itself messaged, or a chat
-    // that isn't there read.
+    // A chat in another workspace, not of its family, is listed after
+    // those of its own, and messaged and read; but not itself messaged,
+    // or a chat that isn't there read.
     let c = start_tooled_chat(&mut client, AgentTools::Ask);
     let again = format!(
         "mcp list_chats\n\
          mcp send_to_chat {{\"chat\":{c},\"message\":\"hi\"}}\n\
          mcp read_chat {{\"chat\":{c}}}\n\
-         mcp wait_for_chat {{\"chat\":{c}}}\n\
-         mcp wait_for_chats {{\"chats\":[{c}]}}\n\
          mcp send_to_chat {{\"chat\":{a},\"message\":\"me\"}}\n\
          mcp read_chat {{\"chat\":99}}"
     );
     let node = ask_for(&mut client, a, &again, Duration::from_secs(10));
     let words = last_words(&node);
-    assert!(!words.contains(&format!("- chat {c}")), "{words}");
-    let away = format!("chat {c} is in another workspace, and not of this chat's family");
-    for tool in [
-        "send_to_chat",
-        "read_chat",
-        "wait_for_chat",
-        "wait_for_chats",
-    ] {
-        assert!(
-            words.contains(&format!("{tool}: failed: {away}")),
-            "{tool}: {words}"
-        );
-    }
-    assert!(
-        chat_now(&mut client, c).turns.is_empty(),
-        "nothing reached it"
-    );
+    let (_, others) = words.split_once("In other workspaces").expect(&words);
+    assert!(others.contains(&format!("- chat {c}")), "{words}");
+    assert!(words.contains("send_to_chat: Sent"), "{words}");
+    assert!(!words.contains("read_chat: failed: chat"), "{words}");
+    wait_for_chat(&mut client, c, |node| {
+        turn_from(node, a).is_some_and(|turn| turn.prompt == "hi")
+    });
     assert!(
         words.contains(&format!("send_to_chat: failed: chat {a} is this chat")),
         "{words}"
@@ -15933,7 +15921,7 @@ fn a_message_waiting_its_turn_is_dropped_if_it_may_no_longer_go_and_its_sender_t
 }
 
 #[test]
-fn a_chat_is_messaged_only_in_this_project_and_one_that_may_do_more_as_the_user_allows() {
+fn a_chat_in_another_project_and_one_that_may_do_more_are_messaged_as_the_user_allows() {
     let fake = |flags: &[&str]| -> Vec<std::ffi::OsString> {
         std::iter::once(fake_agent().into_os_string())
             .chain(flags.iter().map(Into::into))
@@ -15953,20 +15941,35 @@ fn a_chat_is_messaged_only_in_this_project_and_one_that_may_do_more_as_the_user_
     let other = other.canonicalize().unwrap();
     let a = start_new_chat(&mut client, tooled(AgentTools::Allow, None, Some(&mine)));
 
-    // A chat of the user's in this workspace, but another project.
+    // A chat of the user's in this workspace, but another project: the
+    // user is asked, told where it works (what that chat's agent is told
+    // beside it, the unit tests show).
     let b = start_chat_beside(
         &mut client,
         a,
         tooled(AgentTools::Allow, None, Some(&other)),
     );
     let send = |to: TerminalId| format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"x\"}}");
-    let words = last_words(&ask_for(&mut client, a, &send(b), Duration::from_secs(10)));
-    assert!(
-        words.contains(&format!(
-            "send_to_chat: failed: chat {b} works outside this chat's project ("
-        )),
-        "{words}"
+    client.chat(a, ChatAction::Send(send(b))).unwrap();
+    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
+    assert_eq!(
+        asking.question.unwrap().title,
+        format!(
+            "send chat {b} this message, though chat {b} works outside this chat's project, in \
+             {}",
+            other.display()
+        )
     );
+    answer(&mut client, a, Some("allow".to_owned()));
+    let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    assert!(
+        last_words(&node).contains("send_to_chat: Sent"),
+        "{}",
+        last_words(&node)
+    );
+    wait_for_chat(&mut client, b, |node| {
+        node.turns.len() == 1 && last_outcome(node).is_some()
+    });
     // Nor is one started there through a link from inside it.
     std::os::unix::fs::symlink(&other, mine.join("away")).unwrap();
     let away = "mcp start_chat {\"prompt\":\"x\",\"cwd\":\"away\"}";
