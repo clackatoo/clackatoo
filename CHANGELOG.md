@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.11.51 (2026-11-21)
+
+### Features
+
+- **priority:** give each program an agent's process starts a cgroup of its own (33c1d838)
+
+### Fixes
+
+- **chat:** open a session again whose own process stopped, going on with its turn (8d60f5f8)
+
 ## 2026.11.50 (2026-11-21)
 
 ### Features
