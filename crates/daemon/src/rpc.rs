@@ -528,6 +528,11 @@ impl Peer {
         self.incoming.has_gone()
     }
 
+    /// The program's process id.
+    pub(crate) fn pid(&self) -> u32 {
+        self.process.pid().as_raw_nonzero().get().unsigned_abs()
+    }
+
     /// Notes that the program has exited, so it has gone. A process's own
     /// pipes are closed as it exits, before its exit is told, so all it
     /// wrote itself is in its pipe by now. Something it started may still

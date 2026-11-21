@@ -47,6 +47,48 @@ impl HostedChat {
     /// whether it goes on, for the server to start the agent; otherwise
     /// it's as [`Self::disconnected`].
     pub(crate) fn agent_died(&mut self) -> bool {
+        // Its session was being let go to go on after the process the
+        // agent ran it in stopped (see `session_process_died`): it goes
+        // on all the same, from the agent started again.
+        if self.link == Link::Closing && self.queued.is_some() && self.answering_turn().is_some() {
+            self.link = Link::Opening;
+            self.set_state(ChatState::Starting);
+            return true;
+        }
+        if !self.go_on_after_stop() {
+            self.disconnected(None);
+            return false;
+        }
+        self.link = Link::Opening;
+        true
+    }
+
+    /// The process its agent ran its session in alone stopped, the agent
+    /// going on, as when the system kills one of Claude Code's for memory:
+    /// the agent never starts it again, and fails what it's asked. The
+    /// session is let go, as one idle in the background is (see
+    /// [`Self::park`]), and opened again once the agent has ended it,
+    /// which starts a new process on the same conversation. A turn under
+    /// way goes on there, as after the agent itself stops (see
+    /// [`Self::agent_died`]), once; otherwise it ends, and an idle chat's
+    /// next message opens it. Returns the session to end, for the server
+    /// to ask the agent to, if it was open.
+    pub(crate) fn session_process_died(&mut self) -> Option<String> {
+        if self.link != Link::Open {
+            return None;
+        }
+        let session = self.session.clone()?;
+        if self.answering_turn().is_some() && !self.go_on_after_stop() {
+            self.disconnected(None);
+        }
+        self.link = Link::Closing;
+        Some(session)
+    }
+
+    /// Readies a turn under way to go on after its agent's process
+    /// stopped: as [`Self::agent_died`] says, but for how its session is
+    /// opened again. Returns whether it goes on; if not, nothing's done.
+    fn go_on_after_stop(&mut self) -> bool {
         let went_on = |turn: &clackatoo_protocol::Turn| {
             (turn.items.iter())
                 .any(|item| matches!(item, Item::Other(said) if said == WENT_ON_AFTER_STOP))
@@ -59,7 +101,6 @@ impl HostedChat {
                 && !went_on(&self.node.turns[index])
         });
         let Some(index) = goes_on else {
-            self.disconnected(None);
             return false;
         };
         let lost = self.going_task_names();
@@ -107,7 +148,6 @@ impl HostedChat {
         (self.asking).retain(|(asker, _)| !matches!(asker, Asker::Agent(_)));
         self.show_question();
         self.queued = Some(prompt);
-        self.link = Link::Opening;
         self.set_state(ChatState::Starting);
         true
     }

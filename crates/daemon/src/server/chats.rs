@@ -133,6 +133,11 @@ pub(super) struct Agents {
     /// The chats waiting for their agent, by its name, to have gone, to
     /// ask a new one for their session (see [`Daemon::connect`]).
     held: Vec<(TerminalId, String)>,
+    /// The process each chat's agent runs its session in, where that's a
+    /// process of its own, as Claude Code's adapter runs one for each:
+    /// found from the process that connected for its tools (see
+    /// `session_process.rs`).
+    pub(super) session_processes: HashMap<TerminalId, super::session_process::Proc>,
 }
 
 /// A list of an agent's sessions a client asked for, waiting for the
@@ -1570,6 +1575,18 @@ impl Daemon {
                 terminal
             }
             Incoming::Answered { terminal, result } => {
+                // Failed as the process it ran the chat's session in
+                // stopped: it's opened again, and a turn goes on there.
+                let failed = (result.as_ref()).map_or(true, |answer| answer.failure.is_some());
+                if failed && !gone && self.session_process_gone(terminal) {
+                    self.lose_session_process(terminal);
+                    if self
+                        .chat_ref(terminal)
+                        .is_some_and(|chat| !chat.is_connected())
+                    {
+                        return;
+                    }
+                }
                 if !self.prompt_answered(terminal, result, gone) {
                     return;
                 }

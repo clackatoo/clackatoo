@@ -44,6 +44,16 @@ for ever. A turn you asked to stop doesn't go on. An idle chat whose agent
 stops says so, and the next message starts it again, carrying on the same
 conversation; so does one whose agent stops before it has started, saying why.
 
+Claude Code's adapter runs a Claude Code process for each chat, and one of
+those can stop alone, the adapter and every other chat going on; the adapter
+never starts it again by itself. clackatoo notices, as that process's
+connection to its tools closes, or as a message it was sent fails: it ends that
+chat's session and opens it again, which starts a new process on the same
+conversation. An answer under way goes on there, as above, once a turn; an idle
+chat's next message opens it, rather than failing with `Internal error`. This
+needs the process to have connected to clackatoo's tools, so a chat whose tools
+are off, or whose process stopped before this build, isn't helped.
+
 A chat keeps which agent it talks to. Chats from before there were other
 agents talk to Claude Code.
 

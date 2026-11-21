@@ -7144,6 +7144,63 @@ pub(crate) mod tests {
         assert!(chat.node.notice.is_some());
     }
 
+    /// The process its agent ran its session in stopping, the agent going
+    /// on, lets the session go and opens it again: a turn under way goes
+    /// on there, once; an idle chat waits, quietly, for its next message.
+    #[test]
+    fn a_session_whose_process_stopped_is_let_go_and_opened_again() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        assert_eq!(chat.session_process_died().as_deref(), Some("s"));
+        assert_eq!(chat.node.turns[0].end, None, "it goes on");
+        assert_eq!(chat.node.state, ChatState::Starting);
+        // Once the agent has ended it, it's opened again, and told to go on.
+        assert_eq!(chat.session_closed(), [Action::Connect]);
+        let actions = connect(&mut chat, "s");
+        let Some(Action::Prompt(prompt)) = actions.last() else {
+            panic!("{actions:?}");
+        };
+        assert!(
+            prompt.text.contains("stopped unexpectedly"),
+            "{}",
+            prompt.text
+        );
+        // Stopping again in that turn ends it.
+        assert_eq!(chat.session_process_died().as_deref(), Some("s"));
+        assert_eq!(
+            outcome(&chat.node.turns[0]),
+            Some(&Outcome::Failed("the agent stopped".into()))
+        );
+        assert!(chat.session_closed().is_empty());
+        // Idle, it says nothing, and its next message opens it again.
+        connect(&mut chat, "s");
+        chat.set_notice(None);
+        assert_eq!(chat.session_process_died().as_deref(), Some("s"));
+        assert!(chat.session_closed().is_empty());
+        assert_eq!(chat.node.notice, None);
+        assert_eq!(send(&mut chat, "hi"), [Action::Connect]);
+        // Not while it isn't open.
+        assert_eq!(chat.session_process_died(), None);
+    }
+
+    /// The agent itself stopping while a session is being let go to go on
+    /// after its process stopped goes on all the same.
+    #[test]
+    fn a_turn_going_on_after_its_process_stopped_goes_on_if_the_agent_stops_too() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        chat.session_process_died();
+        assert!(chat.agent_died());
+        let actions = connect(&mut chat, "s");
+        assert!(
+            matches!(actions.last(), Some(Action::Prompt(_))),
+            "{actions:?}"
+        );
+        assert_eq!(chat.node.turns[0].end, None);
+    }
+
     #[test]
     fn what_the_agent_writes_keeps_its_lines_but_no_controls() {
         let mut chat = chat();

@@ -99,6 +99,7 @@ mod rename;
 mod restore;
 mod reveal;
 mod review;
+mod session_process;
 mod settling;
 mod shutdown;
 mod side;

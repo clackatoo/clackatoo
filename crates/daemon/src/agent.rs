@@ -806,6 +806,23 @@ impl Agent {
         }
     }
 
+    /// Forgets what the chat in `terminal` asked of it besides its
+    /// session, as the process it ran that session in has stopped: what
+    /// it answers for them, as that a message failed, is for a session
+    /// that's gone, not the one the chat opens again.
+    pub(crate) fn abandon_requests(&mut self, terminal: TerminalId) {
+        for pending in self.pending.values_mut() {
+            if let Pending::Prompt(asked)
+            | Pending::Steer(asked, _)
+            | Pending::Setting(asked)
+            | Pending::StopTask(asked, _) = pending
+                && *asked == terminal
+            {
+                *pending = Pending::Ignored;
+            }
+        }
+    }
+
     /// Whether it can close a session, ending the work it does for it,
     /// as Claude Code's adapter can, ending the process it runs for each.
     pub(crate) fn can_close(&self) -> bool {
@@ -1014,6 +1031,11 @@ impl Agent {
     /// still be running, and writing.
     pub(crate) fn has_gone(&self) -> bool {
         self.peer.has_gone()
+    }
+
+    /// Its process id.
+    pub(crate) fn pid(&self) -> u32 {
+        self.peer.pid()
     }
 
     /// Notes that it has exited, so it has gone, and all it wrote is in

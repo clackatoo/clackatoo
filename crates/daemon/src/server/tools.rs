@@ -611,6 +611,7 @@ impl Daemon {
         if let Some(hosted) = self.chat(chat) {
             hosted.mcp_served(&secret);
         }
+        self.note_session_process(chat, &stream);
         let instructions = self.tools_instructions(chat);
         // Agents can cache the first catalogue for the whole session, even
         // when they accept MCP's list_changed notification. Advertise what
@@ -989,6 +990,7 @@ impl Daemon {
         for waiting in gone {
             self.forget_call(&waiting);
         }
+        self.tools_connection_closed(connection.chat);
     }
 
     /// The agent no longer wants the answer to the call `id` on the

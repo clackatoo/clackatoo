@@ -349,6 +349,7 @@ impl Daemon {
             .map_err(|err| log::error!("chat {chat}: its tools couldn't be taken over: {err}"))
             .ok()
             .filter(|_| kept)?;
+        self.note_session_process(chat, &connection.stream);
         let entry = self.sources.vacant_entry();
         let token = Token(entry.key());
         if let Err(err) =
