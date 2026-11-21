@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.50 (2026-11-21)
+
+### Features
+
+- **chat:** go on with a turn once after the agent's process stops by itself (52ec2206)
+- **talk:** let agents reach chats in other workspaces, asking for another project (1bbc2a61)
+
+### Fixes
+
+- **talk:** let an agent close a chat it started that the user sent back (7537e04f)
+
 ## 2026.11.49 (2026-11-18)
 
 ### Fixes
